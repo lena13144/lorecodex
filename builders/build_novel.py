@@ -892,6 +892,7 @@ def main():
     parser.add_argument("--skip-meta", action="store_true", help="Skip post-summarization series summary/aliases/glossary synthesis")
     parser.add_argument("--force", action="store_true", help="Ignore cached LLM checkpoints for targeted arcs")
     parser.add_argument("--max-tokens", type=int, default=0, help="Optional max_tokens for LLM requests (0 = omit, use model default)")
+    parser.add_argument("--temperature", type=float, default=None, help="Optional temperature for LLM requests (omit by default to use model default)")
     args = parser.parse_args()
 
     out_corpus_dir = os.path.join(args.out_dir, args.corpus_id)
@@ -1011,6 +1012,8 @@ def main():
             cfg = json.load(f)
         if args.max_tokens and args.max_tokens > 0:
             cfg["maxTokens"] = args.max_tokens
+        if args.temperature is not None:
+            cfg["temperature"] = args.temperature
         if not cfg.get("chatBase") or not cfg.get("chatKey"):
             raise RuntimeError("chatBase/chatKey missing in config.json (pass --no-llm for offline build)")
 

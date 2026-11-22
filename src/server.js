@@ -46,6 +46,12 @@ function parseOptionalMaxTokens(val) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
+function parseOptionalTemperature(val) {
+  if (val === null || val === undefined || String(val).trim() === '') return null;
+  const n = Number(val);
+  return Number.isFinite(n) && n >= 0 && n <= 2 ? n : null;
+}
+
 const defaultCfg = {
   port: 5240,
   defaultCorpus: 'demo-chronicles',
@@ -53,6 +59,7 @@ const defaultCfg = {
   chatKey: '',
   chatModel: 'deepseek-chat',
   maxTokens: null,
+  temperature: null,
 };
 
 let runtimeCfg = { ...defaultCfg };
@@ -64,12 +71,14 @@ if (fs.existsSync(CFG_FILE)) {
   }
 }
 runtimeCfg.maxTokens = parseOptionalMaxTokens(runtimeCfg.maxTokens ?? runtimeCfg.max_tokens);
+runtimeCfg.temperature = parseOptionalTemperature(runtimeCfg.temperature);
 
 if (process.env.PORT) runtimeCfg.port = Number(process.env.PORT) || runtimeCfg.port;
 if (process.env.CHAT_BASE) runtimeCfg.chatBase = process.env.CHAT_BASE;
 if (process.env.CHAT_KEY) runtimeCfg.chatKey = process.env.CHAT_KEY;
 if (process.env.CHAT_MODEL) runtimeCfg.chatModel = process.env.CHAT_MODEL;
 if (process.env.CHAT_MAX_TOKENS !== undefined) runtimeCfg.maxTokens = parseOptionalMaxTokens(process.env.CHAT_MAX_TOKENS);
+if (process.env.CHAT_TEMPERATURE !== undefined) runtimeCfg.temperature = parseOptionalTemperature(process.env.CHAT_TEMPERATURE);
 if (process.env.DEFAULT_CORPUS) runtimeCfg.defaultCorpus = process.env.DEFAULT_CORPUS;
 if (cli.port && Number.isFinite(cli.port)) runtimeCfg.port = cli.port;
 if (cli.defaultCorpus) runtimeCfg.defaultCorpus = cli.defaultCorpus;
@@ -143,6 +152,9 @@ function saveCfg(patch) {
   if ('maxTokens' in patch || 'max_tokens' in patch) {
     runtimeCfg.maxTokens = parseOptionalMaxTokens(patch.maxTokens ?? patch.max_tokens);
   }
+  if ('temperature' in patch) {
+    runtimeCfg.temperature = parseOptionalTemperature(patch.temperature);
+  }
   delete runtimeCfg.disableThinking;
   delete runtimeCfg.max_tokens;
   try {
@@ -169,6 +181,9 @@ function mergeCfg(patch) {
     }
     if ('maxTokens' in patch || 'max_tokens' in patch) {
       out.maxTokens = parseOptionalMaxTokens(patch.maxTokens ?? patch.max_tokens);
+    }
+    if ('temperature' in patch) {
+      out.temperature = parseOptionalTemperature(patch.temperature);
     }
   }
   return out;

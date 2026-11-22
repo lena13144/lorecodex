@@ -56,6 +56,7 @@ const defaultSettings = {
     chatKey: '',
     chatModel: '',
     maxTokens: '',
+    temperature: '',
     customXmlTag: '',
     customHeader: '',
     customPriorityRule: '',
@@ -92,6 +93,17 @@ function normalizeMaxScenes(val) {
 function normalizeMaxOrder(val) {
     const n = Number(val);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function normalizeTemperature(val) {
+    if (val === null || val === undefined || String(val).trim() === '') return '';
+    const n = Number(val);
+    return Number.isFinite(n) && n >= 0 && n <= 2 ? n : '';
+}
+
+function optionalTempOrNull(val) {
+    const v = normalizeTemperature(val);
+    return v === '' ? null : v;
 }
 
 function getSettings() {
@@ -156,6 +168,8 @@ function buildApiConfig(cfg) {
     if (cfg.chatModel) out.chatModel = cfg.chatModel.trim();
     const mt = Number(cfg.maxTokens);
     if (Number.isFinite(mt) && mt > 0) out.maxTokens = Math.floor(mt);
+    const t = normalizeTemperature(cfg.temperature);
+    if (t !== '') out.temperature = t;
     return out;
 }
 
@@ -297,6 +311,7 @@ function openWorkbenchModal(cfg, { runId = '', corpusId = '' } = {}) {
             chatKey: cfg.chatKey || '',
             chatModel: cfg.chatModel || 'deepseek-chat',
             maxTokens: Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null,
+            temperature: optionalTempOrNull(cfg.temperature),
         }).catch(() => {});
     }
     const { embedUrl, standaloneUrl } = buildWorkbenchUrls(cfg, { runId, corpusId });
@@ -764,6 +779,7 @@ jQuery(async () => {
         $('#lorecodex_chat_key').val(cfg.chatKey || '');
         $('#lorecodex_chat_model').val(cfg.chatModel || '');
         $('#lorecodex_max_tokens').val(Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : '');
+        $('#lorecodex_temperature').val(normalizeTemperature(cfg.temperature));
         $('#lorecodex_xml_tag').val(cfg.customXmlTag || '');
         $('#lorecodex_header').val(cfg.customHeader || '');
         $('#lorecodex_priority_rule').val(cfg.customPriorityRule || '');
@@ -935,8 +951,14 @@ jQuery(async () => {
                 if ((overwriteExisting || !cfg.chatModel) && localCfg.chatModel) cfg.chatModel = localCfg.chatModel;
                 if (overwriteExisting) {
                     cfg.maxTokens = Number(localCfg.maxTokens) > 0 ? Number(localCfg.maxTokens) : '';
-                } else if ((cfg.maxTokens === '' || cfg.maxTokens === undefined || cfg.maxTokens === null) && Number(localCfg.maxTokens) > 0) {
-                    cfg.maxTokens = Number(localCfg.maxTokens);
+                    cfg.temperature = normalizeTemperature(localCfg.temperature);
+                } else {
+                    if ((cfg.maxTokens === '' || cfg.maxTokens === undefined || cfg.maxTokens === null) && Number(localCfg.maxTokens) > 0) {
+                        cfg.maxTokens = Number(localCfg.maxTokens);
+                    }
+                    if (normalizeTemperature(cfg.temperature) === '' && normalizeTemperature(localCfg.temperature) !== '') {
+                        cfg.temperature = normalizeTemperature(localCfg.temperature);
+                    }
                 }
             }
             return;
@@ -950,8 +972,14 @@ jQuery(async () => {
             if ((overwriteExisting || !cfg.chatModel) && srvCfg.chatModel) cfg.chatModel = srvCfg.chatModel;
             if (overwriteExisting) {
                 cfg.maxTokens = Number(srvCfg.maxTokens) > 0 ? Number(srvCfg.maxTokens) : '';
-            } else if ((cfg.maxTokens === '' || cfg.maxTokens === undefined || cfg.maxTokens === null) && Number(srvCfg.maxTokens) > 0) {
-                cfg.maxTokens = Number(srvCfg.maxTokens);
+                cfg.temperature = normalizeTemperature(srvCfg.temperature);
+            } else {
+                if ((cfg.maxTokens === '' || cfg.maxTokens === undefined || cfg.maxTokens === null) && Number(srvCfg.maxTokens) > 0) {
+                    cfg.maxTokens = Number(srvCfg.maxTokens);
+                }
+                if (normalizeTemperature(cfg.temperature) === '' && normalizeTemperature(srvCfg.temperature) !== '') {
+                    cfg.temperature = normalizeTemperature(srvCfg.temperature);
+                }
             }
         } catch (_) {}
     };
@@ -964,6 +992,7 @@ jQuery(async () => {
             chatKey: cfg.chatKey || '',
             chatModel: cfg.chatModel || 'deepseek-chat',
             maxTokens: Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null,
+            temperature: optionalTempOrNull(cfg.temperature),
         }).catch(() => {});
 
         if (cfg.localMode || !lastHealthInfo?.ok) {
@@ -976,6 +1005,7 @@ jQuery(async () => {
         try {
             const body = buildApiConfig(cfg);
             body.maxTokens = Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null;
+            body.temperature = optionalTempOrNull(cfg.temperature);
             if (cfg.corpus) body.defaultCorpus = cfg.corpus;
             const r = await fetch(`${getServerBase(cfg)}/config`, {
                 method: 'POST',
@@ -1141,9 +1171,15 @@ jQuery(async () => {
                         <button id="lorecodex_fetch_models" class="menu_button" style="width:auto;margin-top:16px;padding:4px 8px;">拉取模型</button>
                     </div>
                     <select id="lorecodex_model_select" class="text_pole" style="display:none;"></select>
-                    <div>
-                        <small>单次输出 Max Tokens（留空 = 不限制，沿用模型默认）：</small>
-                        <input id="lorecodex_max_tokens" class="text_pole" type="number" min="0" step="256" value="${Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : ''}" placeholder="沿用模型默认" />
+                    <div style="display:flex;gap:8px;">
+                        <div style="flex:1;">
+                            <small>Max Tokens（留空 = 默认）：</small>
+                            <input id="lorecodex_max_tokens" class="text_pole" type="number" min="0" step="256" value="${Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : ''}" placeholder="沿用模型默认" />
+                        </div>
+                        <div style="flex:1;">
+                            <small>Temperature（留空 = 不传）：</small>
+                            <input id="lorecodex_temperature" class="text_pole" type="number" min="0" max="2" step="0.1" value="${normalizeTemperature(cfg.temperature)}" placeholder="沿用模型默认（留空不传）" />
+                        </div>
                     </div>
                     <button id="lorecodex_save_srv" class="menu_button" style="width:100%;">保存当前模型与默认书库配置</button>
                     <div id="lorecodex_model_status" class="lorecodex-status"></div>
@@ -1410,6 +1446,7 @@ jQuery(async () => {
         const n = Number(el.val());
         return Number.isFinite(n) && n > 0 ? Math.floor(n) : '';
     });
+    bind('#lorecodex_temperature', 'temperature', el => normalizeTemperature(el.val()));
     bind('#lorecodex_xml_tag', 'customXmlTag');
     bind('#lorecodex_header', 'customHeader');
     bind('#lorecodex_priority_rule', 'customPriorityRule');
@@ -1429,6 +1466,7 @@ jQuery(async () => {
                 if (localCfg.chatModel) cfg.chatModel = localCfg.chatModel;
                 if (localCfg.defaultCorpus && corporaMap.has(localCfg.defaultCorpus)) cfg.corpus = localCfg.defaultCorpus;
                 cfg.maxTokens = Number(localCfg.maxTokens) > 0 ? Number(localCfg.maxTokens) : '';
+                cfg.temperature = normalizeTemperature(localCfg.temperature);
             }
         }
         saveSettingsDebounced();

@@ -47,6 +47,12 @@ async function getLocalAgentAndPack(corpusId) {
   return { be, pack, agent: localAgentsCache.get(cacheKey), rows };
 }
 
+function parseOptionalTemp(val) {
+  if (val === null || val === undefined || String(val).trim() === '') return null;
+  const n = Number(val);
+  return Number.isFinite(n) && n >= 0 && n <= 2 ? n : null;
+}
+
 async function getLocalApiConfig(be) {
   const cfg = (await be.idbGetMeta('local_api_config', null)) || {};
   return {
@@ -55,6 +61,7 @@ async function getLocalApiConfig(be) {
     chatKey: cfg.chatKey || '',
     chatModel: cfg.chatModel || 'deepseek-chat',
     maxTokens: Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null,
+    temperature: parseOptionalTemp(cfg.temperature),
   };
 }
 
@@ -299,6 +306,7 @@ export async function saveConfig(patch) {
           ? Math.floor(Number(patch.maxTokens))
           : null
         : cur.maxTokens,
+    temperature: patch.temperature !== undefined ? parseOptionalTemp(patch.temperature) : cur.temperature,
   };
   await be.idbSetMeta('local_api_config', next);
   return { ok: true, config: { ...next, chatKey: next.chatKey ? '***' : '' } };

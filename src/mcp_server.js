@@ -25,6 +25,12 @@ const cli = parseArgs(process.argv);
 const CORPORA_DIR = cli.corporaDir || path.resolve(process.env.CORPORA_DIR || path.join(ROOT_DIR, 'corpora'));
 const CONFIG_PATH = cli.configFile || CFG_FILE;
 
+function parseOptionalTemp(val) {
+  if (val === null || val === undefined || String(val).trim() === '') return null;
+  const n = Number(val);
+  return Number.isFinite(n) && n >= 0 && n <= 2 ? n : null;
+}
+
 function loadRuntimeConfig() {
   const base = {
     defaultCorpus: 'demo-chronicles',
@@ -35,6 +41,7 @@ function loadRuntimeConfig() {
     chatKey: process.env.CHAT_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || '',
     chatModel: process.env.CHAT_MODEL || 'deepseek-chat',
     maxTokens: process.env.CHAT_MAX_TOKENS ? Number(process.env.CHAT_MAX_TOKENS) || null : null,
+    temperature: parseOptionalTemp(process.env.CHAT_TEMPERATURE),
   };
   if (fs.existsSync(CONFIG_PATH)) {
     try {
@@ -42,6 +49,7 @@ function loadRuntimeConfig() {
       Object.assign(base, fileCfg);
     } catch (_) {}
   }
+  base.temperature = parseOptionalTemp(base.temperature);
   if (cli.defaultCorpus) base.defaultCorpus = cli.defaultCorpus;
   if (process.env.DEFAULT_CORPUS) base.defaultCorpus = process.env.DEFAULT_CORPUS;
   return base;

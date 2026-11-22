@@ -99,14 +99,18 @@ export async function openSettingsModal() {
           </div>
           <select id="cfgModelSelect" class="fld-sel" style="display:none;margin-top:6px;"></select>
         </div>
+        <div class="fld-group">
+          <label class="fld">默认启动书库</label>
+          <select id="cfgDefaultCorpus" class="fld-sel">${corpusOptions}</select>
+        </div>
         <div class="fld-row-2">
-          <div class="fld-group">
-            <label class="fld">默认启动书库</label>
-            <select id="cfgDefaultCorpus" class="fld-sel">${corpusOptions}</select>
-          </div>
           <div class="fld-group">
             <label class="fld">单次输出 Max Tokens（留空/0 = 不限制）</label>
             <input id="cfgMaxTokens" type="number" min="0" step="256" value="${Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : ''}" placeholder="沿用模型默认" />
+          </div>
+          <div class="fld-group">
+            <label class="fld">采样温度 Temperature（留空 = 不传）</label>
+            <input id="cfgTemperature" type="number" min="0" max="2" step="0.1" value="${cfg.temperature !== null && cfg.temperature !== undefined && cfg.temperature !== '' ? cfg.temperature : ''}" placeholder="沿用模型默认（留空不传）" />
           </div>
         </div>
         <div id="cfgStatus" class="pane-sub"></div>
@@ -172,11 +176,14 @@ export async function openSettingsModal() {
     $('#cfgSaveBtn').addEventListener('click', async () => {
       try {
         const rawMaxTokens = Number($('#cfgMaxTokens').value);
+        const rawTempStr = $('#cfgTemperature').value.trim();
+        const parsedTemp = rawTempStr === '' ? null : Number(rawTempStr);
         const patch = {
           chatBase: $('#cfgBase').value.trim(),
           chatModel: $('#cfgModel').value.trim(),
           defaultCorpus: $('#cfgDefaultCorpus').value,
           maxTokens: Number.isFinite(rawMaxTokens) && rawMaxTokens > 0 ? Math.floor(rawMaxTokens) : null,
+          temperature: parsedTemp !== null && Number.isFinite(parsedTemp) && parsedTemp >= 0 && parsedTemp <= 2 ? parsedTemp : null,
         };
         const newKey = $('#cfgKey').value.trim();
         if (newKey) patch.chatKey = newKey;
