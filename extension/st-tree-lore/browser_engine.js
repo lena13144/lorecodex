@@ -1,0 +1,1058 @@
+const IDB_NAME = 'lorecodex_browser_store_v2';
+const IDB_STORE = 'corpora';
+
+const DEFAULT_STAGE_PATTERNS = [
+    '(?:世界|城市|模拟器|舞台|总览|合集|世界书|沙盒|sandbox|world|city|simulator)',
+];
+
+const AD_PATTERNS = [
+    /https?:\/\/\S+/i,
+    /(?:爱下电子书|爱阅小说|笔趣阁|起点中文网|晋江文学城|飞卢小说|全本小说网)/i,
+    /网页版章节内容慢.*下载.*app/i,
+    /请记住本站域名/i,
+    /最新章节.*阅读/i,
+    /^[-=]{3,}\s*章节内容开始\s*[-=]{3,}$/i,
+];
+
+function stripMarkup(text) {
+    return String(text || '')
+        .replace(/<\/?(?:color|size|b|i|u|s|ruby|rt)(?:=[^>]*)?>/gi, '')
+        .replace(/\r\n/g, '\n');
+}
+
+function escapeRegExp(str) {
+    return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function formatCharCount(n) {
+    const num = Number(n) || 0;
+    return num >= 10000 ? `${(num / 10000).toFixed(1)} 万字` : `${num.toLocaleString()} 字`;
+}
+
+function normalizeOrder(val) {
+    if (val === null || val === undefined || val === '') return null;
+    const n = Number(val);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.floor(n);
+}
+
+function isOrderAllowed(order, maxOrder) {
+    const limit = normalizeOrder(maxOrder);
+    if (limit === null) return true;
+    if (order === null || order === undefined || order === '') return true;
+    const n = Number(order);
+    if (!Number.isFinite(n)) return true;
+    return n <= limit;
+}
+
+function extractJsonObject(text) {
+    const s = String(text || '').trim();
+    if (!s) return null;
+    const fenced = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const candidate = fenced ? fenced[1].trim() : s;
+    try {
+        return JSON.parse(candidate);
+    } catch (_) {}
+    const first = candidate.indexOf('{');
+    const last = candidate.lastIndexOf('}');
+    if (first >= 0 && last > first) {
+        try {
+            return JSON.parse(candidate.slice(first, last + 1));
+        } catch (_) {}
+    }
+    return null;
+}
+
+export function normalizeCorpusConfig(raw, corpusId) {
+    const cfg = raw && typeof raw === 'object' ? raw : {};
+    const name = String(cfg.name || corpusId || 'LoreCodex').trim();
+    const pf = cfg.prompt_framing && typeof cfg.prompt_framing === 'object' ? cfg.prompt_framing : {};
+    const sg = cfg.spoiler_gate && typeof cfg.spoiler_gate === 'object' ? cfg.spoiler_gate : {};
+    const ug = cfg.user_identity_guard && typeof cfg.user_identity_guard === 'object' ? cfg.user_identity_guard : {};
+    const hier = cfg.hierarchy && typeof cfg.hierarchy === 'object' ? cfg.hierarchy : {};
+    const grep = cfg.grep && typeof cfg.grep === 'object' ? cfg.grep : {};
+    const scrub = cfg.db_scrubber && typeof cfg.db_scrubber === 'object' ? cfg.db_scrubber : {};
+
+    return {
+        id: String(cfg.id || corpusId || 'default').trim(),
+        name,
+        description: String(cfg.description || '').trim(),
+        language: String(cfg.language || 'zh-CN').trim(),
+        world_premise:
+            String(cfg.world_premise || '').trim() ||
+            `当前语料库收录了《${name}》的完整故事章节与设定档案。你负责消解对话中的模糊指代，从目录树中定位并核实原始文本片段，供正文模型直接衔接。`,
+        active_recall_triggers:
+            String(cfg.active_recall_triggers || '').trim() ||
+            '追忆往昔、今昔对比、角色心结暗涌、提及人物过往相处与旧事、或询问/涉及世界观设定、组织机构、器物装备与特定台词细节',
+        skip_criteria:
+            String(cfg.skip_criteria || '').trim() ||
+            '完全属于与原著过往/世界观设定无关的纯日常琐事、普通闲聊且没有任何怀旧或设定查阅需求',
+        aliases: Array.isArray(cfg.aliases) ? cfg.aliases : [],
+        glossary: Array.isArray(cfg.glossary) ? cfg.glossary.map(String).filter(Boolean) : [],
+        stage_card_patterns:
+            Array.isArray(cfg.stage_card_patterns) && cfg.stage_card_patterns.length
+                ? cfg.stage_card_patterns
+                : DEFAULT_STAGE_PATTERNS,
+        user_identity_guard: {
+            enabled: ug.enabled !== false,
+            note: String(ug.note || '用户身份（玩家本尊，严禁将其误判为同名或谐音角色去检索）').trim(),
+        },
+        oc_examples: Array.isArray(cfg.oc_examples) ? cfg.oc_examples.map(String).filter(Boolean) : [],
+        tone_routing_hints: String(cfg.tone_routing_hints || '').trim(),
+        spoiler_gate: {
+            enabled: Boolean(sg.enabled),
+            order_label: String(sg.order_label || '章节进度').trim(),
+            default_max_order: normalizeOrder(sg.default_max_order),
+        },
+        hierarchy: {
+            auto_series_threshold: Math.max(20, Number(hier.auto_series_threshold) || 250),
+        },
+        grep: {
+            english_exclude_terms: Array.isArray(grep.english_exclude_terms)
+                ? grep.english_exclude_terms.map(String).filter(Boolean)
+                : [],
+        },
+        prompt_framing: {
+            xml_tag: String(pf.xml_tag || 'lore_source_reference').trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'lore_source_reference',
+            header:
+                String(pf.header || '').trim() ||
+                `以下为《${name}》典籍中检索并核实的过往剧情原文与设定片段。请将其作为角色回忆、既有经历或背景常识自然融入扮演，不要机械复读旁白。`,
+            priority_rule:
+                String(pf.priority_rule || '').trim() ||
+                '【事实优先级】若原作片段细节与当前世界书/角色卡设定或本局对话已确认的新发展存在冲突，一律以本局当前时间线为准。',
+            follow_up_hint:
+                String(pf.follow_up_hint || '').trim() ||
+                '如仍需追查其他特定过往台词或细节，可在回复末尾附带【查原文：具体问题或人物事件】。',
+        },
+        db_scrubber: {
+            boilerplate_patterns: Array.isArray(scrub.boilerplate_patterns) ? scrub.boilerplate_patterns : [],
+            summary_priority_patterns: Array.isArray(scrub.summary_priority_patterns) ? scrub.summary_priority_patterns : [],
+        },
+    };
+}
+
+// IndexedDB wrapper for local serverless corpora
+function openIdb() {
+    return new Promise((resolve, reject) => {
+        if (typeof indexedDB === 'undefined') {
+            return reject(new Error('当前环境不支持 IndexedDB'));
+        }
+        const req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(IDB_STORE)) {
+                db.createObjectStore(IDB_STORE, { keyPath: 'id' });
+            }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error || new Error('IndexedDB 打开失败'));
+    });
+}
+
+export async function idbListCorpora() {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const st = tx.objectStore(IDB_STORE);
+        const req = st.getAll();
+        req.onsuccess = () => {
+            const rows = Array.isArray(req.result) ? req.result : [];
+            resolve(rows);
+        };
+        req.onerror = () => reject(req.error);
+    });
+}
+
+export async function idbSaveCorpus(pack) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        const st = tx.objectStore(IDB_STORE);
+        const req = st.put({
+            id: pack.id,
+            config: normalizeCorpusConfig(pack.config, pack.id),
+            indexData: pack.indexData,
+            textsData: pack.textsData,
+            updatedAt: new Date().toISOString(),
+        });
+        req.onsuccess = () => resolve(true);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+export async function idbDeleteCorpus(id) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        const st = tx.objectStore(IDB_STORE);
+        const req = st.delete(id);
+        req.onsuccess = () => resolve(true);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+// Pure-JS Heuristic Novel Builder (.txt / .md) for In-Browser Serverless Mode
+const CN_NUM_MAP = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10, 百: 100, 千: 1000 };
+function parseChineseOrArabicInt(raw) {
+    const s = String(raw || '').trim();
+    if (/^\d+$/.test(s)) return Number(s);
+    let total = 0;
+    let cur = 0;
+    for (const ch of s) {
+        const v = CN_NUM_MAP[ch];
+        if (v === undefined) return null;
+        if (v >= 10) {
+            total += (cur || 1) * v;
+            cur = 0;
+        } else {
+            cur = cur * 10 + v;
+        }
+    }
+    return total + cur || null;
+}
+
+function inferToneTags(text) {
+    const s = String(text || '');
+    const tags = [];
+    if (/(?:战斗|攻击|爆炸|剑|枪|火光|杀|血|死|危机|轰鸣|交锋|突袭)/.test(s)) tags.push('战斗/危机');
+    if (/(?:微笑|温柔|茶|午后|阳光|日常|轻声|拥抱|晚安|散步|厨房)/.test(s)) tags.push('温情/日常');
+    if (/(?:历史|纪元|档案|设定|法则|原理|组织|编年|体系|阶级)/.test(s)) tags.push('设定/档案');
+    if (/(?:心想|沉默|回忆|孤独|梦境|怀疑|愧疚|秘密|凝视)/.test(s)) tags.push('心理/独白');
+    if (!tags.length) tags.push('叙事/剧情');
+    return tags.slice(0, 2);
+}
+
+function extractDialogueCast(text) {
+    const counts = new Map();
+    const stop = new Set(['自己', '他们', '她们', '我们', '你们', '大家', '众人', '有人', '男人', '女人', '少年', '少女', '声音', '系统']);
+    const re = /([\u4e00-\u9fff]{2,4})(?:说道|问道|笑道|低声道|冷笑道|回答|开口|叹道|喊道|看着|转身)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+        const name = m[1];
+        if (!stop.has(name)) counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    return [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map((x) => x[0]);
+}
+
+function makeHeuristicSummary(text) {
+    const lines = String(text || '')
+        .split(/\n+/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 6);
+    if (!lines.length) return '';
+    if (lines.length === 1) return lines[0].slice(0, 140);
+    const first = lines[0].slice(0, 75);
+    const last = lines[lines.length - 1].slice(0, 65);
+    return first === last ? first : `${first} … ${last}`;
+}
+
+export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = '正文' }) {
+    const lines = String(rawText || '').replace(/\r\n/g, '\n').split('\n');
+    const volRe = /^\s*(?:#\s*)?(第[一二三四五六七八九十百千0-9]+(?:卷|部|篇|集)|Volume\s+\d+|Book\s+\d+)(?:[\s：:·、，,-]+(.{0,36}))?\s*$/i;
+    const chapRe = /^\s*(?:##+\s*)?(第[零一二三四五六七八九十百千万0-9]+(?:章|节|回|幕|话)|(?:Chapter|Episode)\s+\d+|序章|楔子|尾声|终章)(?:[\s：:·、，,-]*([^\n]{0,45}))?\s*$/i;
+
+    let currentSeries = '';
+    let autoVolIdx = 1;
+    let lastChapNum = 0;
+    const rawChapters = [];
+    let curChap = null;
+
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        if (AD_PATTERNS.some((re) => re.test(line))) continue;
+
+        const vm = line.match(volRe);
+        if (vm && line.length <= 42 && !/敬请期待|求月票|求收藏/.test(line)) {
+            currentSeries = `${vm[1]}${vm[2] ? ' ' + vm[2].trim() : ''}`.trim();
+            continue;
+        }
+
+        const cm = line.match(chapRe);
+        if (cm && line.length <= 55) {
+            const numPart = (cm[1].match(/[零一二三四五六七八九十百千万0-9]+/) || [])[0];
+            const chapNum = numPart ? parseChineseOrArabicInt(numPart) : null;
+            if (chapNum === 1 && lastChapNum >= 5 && !vm) {
+                if (!currentSeries) {
+                    for (const prev of rawChapters) {
+                        if (!prev.series) prev.series = `第${autoVolIdx}卷`;
+                    }
+                }
+                autoVolIdx += 1;
+                currentSeries = `第${autoVolIdx}卷`;
+            }
+            if (chapNum !== null) lastChapNum = chapNum;
+            const title = `${cm[1]}${cm[2] ? ' ' + cm[2].trim() : ''}`.trim();
+            curChap = {
+                title,
+                series: currentSeries,
+                lines: [],
+            };
+            rawChapters.push(curChap);
+            continue;
+        }
+
+        if (!curChap) {
+            curChap = { title: '序幕', series: currentSeries, lines: [] };
+            rawChapters.push(curChap);
+        }
+        curChap.lines.push(line);
+    }
+
+    const validChaps = rawChapters.filter((c) => c.lines.join('\n').trim().length > 0);
+    const arcs = [];
+    const textsData = {};
+    let arcSeq = 1;
+    let nodeSeq = 1;
+    let totalChars = 0;
+
+    for (const ch of validChaps) {
+        const arcId = String(arcSeq).padStart(4, '0');
+        const fullText = ch.lines.join('\n');
+        const targetSize = 1800;
+        const maxSize = 2600;
+        const chunks = [];
+        let buf = [];
+        let bufLen = 0;
+
+        for (const p of ch.lines) {
+            if (bufLen + p.length > maxSize && buf.length > 0) {
+                chunks.push(buf.join('\n'));
+                buf = [p];
+                bufLen = p.length;
+            } else {
+                buf.push(p);
+                bufLen += p.length;
+                if (bufLen >= targetSize) {
+                    chunks.push(buf.join('\n'));
+                    buf = [];
+                    bufLen = 0;
+                }
+            }
+        }
+        if (buf.length > 0) chunks.push(buf.join('\n'));
+
+        const scenes = [];
+        for (let i = 0; i < chunks.length; i++) {
+            const scText = chunks[i];
+            const nodeId = String(nodeSeq++).padStart(4, '0');
+            const scTitle = chunks.length === 1 ? ch.title : `${ch.title}（${i + 1}）`;
+            const scSummary = makeHeuristicSummary(scText);
+            const scTones = inferToneTags(scText);
+            scenes.push({
+                node_id: nodeId,
+                group: `${arcId}-${i + 1}`,
+                group_title: scTitle,
+                title: scTitle,
+                order: arcSeq,
+                chars: scText.length,
+                tone_tags: scTones,
+                summary: scSummary,
+            });
+            textsData[nodeId] = {
+                arc_id: arcId,
+                arc_title: ch.title,
+                group: `${arcId}-${i + 1}`,
+                group_title: scTitle,
+                text: scText,
+            };
+        }
+
+        const cast = extractDialogueCast(fullText);
+        const arcChars = fullText.length;
+        totalChars += arcChars;
+        arcs.push({
+            arc_id: arcId,
+            arc_key: `${corpusId}-${arcId}`,
+            title: ch.title,
+            series: ch.series || '',
+            category: category || '正文',
+            order: arcSeq,
+            total_chars: arcChars,
+            description: scenes[0]?.summary || ch.title,
+            characters: cast,
+            key_items: [],
+            tone_tags: scenes[0]?.tone_tags || ['叙事/剧情'],
+            scenes,
+        });
+        arcSeq += 1;
+    }
+
+    const indexData = {
+        version: 2,
+        corpus_id: corpusId,
+        corpus_name: name || corpusId,
+        built_at: new Date().toISOString(),
+        stats: {
+            arcs: arcs.length,
+            scenes: nodeSeq - 1,
+            total_chars: totalChars,
+            max_order: arcs.length,
+            llm_scenes: 0,
+            llm_arcs: 0,
+        },
+        series_summaries: {},
+        arcs,
+    };
+
+    const config = normalizeCorpusConfig({ id: corpusId, name: name || corpusId }, corpusId);
+    return { id: corpusId, config, indexData, textsData };
+}
+
+// Pure-JS Worldbook / Character Card V2 Builder (.json) for In-Browser Mode
+export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '档案设定', existingPack = null }) {
+    const parsed = typeof rawJson === 'string' ? JSON.parse(rawJson) : rawJson;
+
+    // Also support full .lorepack.json export bundle
+    if (parsed && parsed.indexData && parsed.textsData) {
+        const packId = String(corpusId || parsed.id || parsed.indexData.corpus_id || 'imported-pack').trim();
+        return {
+            id: packId,
+            config: normalizeCorpusConfig(parsed.config || { id: packId, name: name || parsed.indexData.corpus_name || packId }, packId),
+            indexData: parsed.indexData,
+            textsData: parsed.textsData,
+        };
+    }
+
+    let entriesRaw = [];
+    if (parsed?.data?.character_book?.entries) {
+        const e = parsed.data.character_book.entries;
+        entriesRaw = Array.isArray(e) ? e : Object.values(e);
+    } else if (parsed?.character_book?.entries) {
+        const e = parsed.character_book.entries;
+        entriesRaw = Array.isArray(e) ? e : Object.values(e);
+    } else if (parsed?.entries) {
+        entriesRaw = Array.isArray(parsed.entries) ? parsed.entries : Object.values(parsed.entries);
+    } else if (Array.isArray(parsed)) {
+        entriesRaw = parsed;
+    }
+
+    const baseArcs = existingPack ? [...(existingPack.indexData.arcs || [])] : [];
+    const textsData = existingPack ? { ...(existingPack.textsData || {}) } : {};
+    let arcSeq = baseArcs.length + 1;
+    let nodeSeq = Object.keys(textsData).length + 1;
+
+    const cleanEntries = [];
+    for (const ent of entriesRaw) {
+        if (!ent || typeof ent !== 'object') continue;
+        if (ent.disable === true || ent.disabled === true || ent.enabled === false) continue;
+        const content = String(ent.content || ent.text || '').trim();
+        if (!content || content.length < 10) continue;
+        if (/<style[\s>]|{{setvar::|{{getvar::/i.test(content) && content.replace(/<style[\s\S]*?<\/style>/gi, '').trim().length < 20) {
+            continue;
+        }
+        const title = String(ent.comment || ent.title || ent.name || (Array.isArray(ent.key) ? ent.key[0] : '') || `设定条目 ${cleanEntries.length + 1}`).trim();
+        const keys = [
+            ...(Array.isArray(ent.key) ? ent.key : []),
+            ...(Array.isArray(ent.keys) ? ent.keys : []),
+            ...(Array.isArray(ent.keysecondary) ? ent.keysecondary : []),
+        ]
+            .map((k) => String(k || '').trim())
+            .filter(Boolean);
+        cleanEntries.push({ title, content, keys });
+    }
+
+    const arcId = 'L' + String(arcSeq).padStart(3, '0');
+    const scenes = [];
+    const allKeys = new Set();
+    let arcChars = 0;
+
+    for (let i = 0; i < cleanEntries.length; i++) {
+        const item = cleanEntries[i];
+        const nodeId = 'L' + String(nodeSeq++).padStart(4, '0');
+        item.keys.forEach((k) => allKeys.add(k));
+        arcChars += item.content.length;
+        scenes.push({
+            node_id: nodeId,
+            group: `${arcId}-${i + 1}`,
+            group_title: item.title,
+            title: item.title,
+            order: null,
+            chars: item.content.length,
+            tone_tags: ['设定/档案'],
+            summary: makeHeuristicSummary(item.content),
+        });
+        textsData[nodeId] = {
+            arc_id: arcId,
+            arc_title: name || '世界书设定集',
+            group: `${arcId}-${i + 1}`,
+            group_title: item.title,
+            text: item.content,
+        };
+    }
+
+    if (scenes.length) {
+        baseArcs.push({
+            arc_id: arcId,
+            arc_key: `${corpusId}-${arcId}`,
+            title: name || '世界书设定档案',
+            series: category || '档案设定',
+            category: category || '档案设定',
+            order: null,
+            total_chars: arcChars,
+            description: `收录 ${scenes.length} 条世界书与角色设定档案`,
+            characters: [...allKeys].slice(0, 20),
+            key_items: [...allKeys].slice(0, 20),
+            tone_tags: ['设定/档案'],
+            scenes,
+        });
+    }
+
+    const totalScenes = baseArcs.reduce((a, x) => a + (x.scenes || []).length, 0);
+    const totalChars = baseArcs.reduce((a, x) => a + (Number(x.total_chars) || 0), 0);
+    const maxOrder = baseArcs.reduce((m, x) => (x.order != null && x.order > m ? x.order : m), 0);
+
+    const targetId = existingPack ? existingPack.id : corpusId;
+    const targetName = existingPack ? existingPack.config.name : name || corpusId;
+    const indexData = {
+        version: 2,
+        corpus_id: targetId,
+        corpus_name: targetName,
+        built_at: new Date().toISOString(),
+        stats: {
+            arcs: baseArcs.length,
+            scenes: totalScenes,
+            total_chars: totalChars,
+            max_order: maxOrder,
+        },
+        series_summaries: existingPack?.indexData?.series_summaries || {},
+        arcs: baseArcs,
+    };
+    const config = existingPack ? existingPack.config : normalizeCorpusConfig({ id: targetId, name: targetName }, targetId);
+    return { id: targetId, config, indexData, textsData };
+}
+
+// In-Browser Tree Agent & Grep Runtime
+export function createBrowserTreeAgent(pack) {
+    const corpusId = pack.id;
+    const corpusConfig = normalizeCorpusConfig(pack.config, corpusId);
+    const indexData = pack.indexData || { arcs: [] };
+    const textsData = pack.textsData || {};
+    const seriesSummaries = indexData.series_summaries || {};
+
+    const arcMap = new Map();
+    const sceneMetaMap = new Map();
+    const searchableScenes = [];
+    const categorySet = new Set();
+    const toneSet = new Set();
+    const seriesStatsMap = new Map();
+    let maxOrderAvailable = 0;
+
+    const aliasMap = new Map();
+    for (const grp of corpusConfig.aliases || []) {
+        if (!Array.isArray(grp)) continue;
+        const clean = grp.map((x) => String(x || '').trim()).filter(Boolean);
+        for (const item of clean) {
+            const low = item.toLowerCase();
+            aliasMap.set(low, [...new Set([...(aliasMap.get(low) || []), ...clean])]);
+        }
+    }
+    const expandAliases = (term) => {
+        const t = String(term || '').trim();
+        if (!t) return [];
+        return aliasMap.get(t.toLowerCase()) || [t];
+    };
+
+    const effectiveSceneOrder = (sc, arc) => {
+        if (sc && sc.order !== undefined && sc.order !== null && sc.order !== '') return Number(sc.order);
+        if (arc && arc.order !== undefined && arc.order !== null && arc.order !== '') return Number(arc.order);
+        return null;
+    };
+
+    for (const arc of indexData.arcs || []) {
+        arcMap.set(arc.arc_id, arc);
+        const arcSeries = String(arc.series || '').trim();
+        const arcCat = String(arc.category || '').trim();
+        if (arcCat) categorySet.add(arcCat);
+        const arcTones = Array.isArray(arc.tone_tags) ? arc.tone_tags.map(String).filter(Boolean) : [];
+        arcTones.forEach((t) => toneSet.add(t));
+        if (arc.order != null && Number.isFinite(Number(arc.order))) {
+            maxOrderAvailable = Math.max(maxOrderAvailable, Number(arc.order));
+        }
+
+        const serKey = arcSeries || arcCat || '默认分卷';
+        if (!seriesStatsMap.has(serKey)) {
+            seriesStatsMap.set(serKey, {
+                series: serKey,
+                arcs: 0,
+                scenes: 0,
+                total_chars: 0,
+                min_order: null,
+                max_order: null,
+                categories: new Set(),
+            });
+        }
+        const ss = seriesStatsMap.get(serKey);
+        ss.arcs += 1;
+        ss.scenes += (arc.scenes || []).length;
+        ss.total_chars += Number(arc.total_chars) || 0;
+        if (arcCat) ss.categories.add(arcCat);
+        if (arc.order != null && Number.isFinite(Number(arc.order))) {
+            const ord = Number(arc.order);
+            ss.min_order = ss.min_order === null ? ord : Math.min(ss.min_order, ord);
+            ss.max_order = ss.max_order === null ? ord : Math.max(ss.max_order, ord);
+        }
+
+        const arcMetaHay = [arc.title, arc.description, arcSeries, ...(arc.characters || []), ...(arc.key_items || [])]
+            .join(' ')
+            .toLowerCase();
+
+        for (const sc of arc.scenes || []) {
+            const scOrder = effectiveSceneOrder(sc, arc);
+            if (scOrder !== null && Number.isFinite(scOrder)) {
+                maxOrderAvailable = Math.max(maxOrderAvailable, scOrder);
+            }
+            const scTones = Array.isArray(sc.tone_tags) && sc.tone_tags.length ? sc.tone_tags : arcTones;
+            scTones.forEach((t) => toneSet.add(t));
+            sceneMetaMap.set(sc.node_id, {
+                ...sc,
+                arc_id: arc.arc_id,
+                arc_title: arc.title,
+                arc_series: arcSeries,
+                arc_category: arcCat,
+                arc_characters: arc.characters || [],
+                effective_order: scOrder,
+                effective_tones: scTones,
+            });
+            const rawItem = textsData[sc.node_id];
+            if (rawItem && rawItem.text) {
+                const cleanText = stripMarkup(rawItem.text);
+                const lines = cleanText
+                    .split(/\n+/)
+                    .map((l) => l.trim())
+                    .filter(Boolean);
+                searchableScenes.push({
+                    node_id: sc.node_id,
+                    arc_id: arc.arc_id,
+                    arc_title: arc.title,
+                    series: arcSeries,
+                    category: arcCat,
+                    title: sc.title || sc.group_title || '',
+                    order: scOrder,
+                    tone_tags: scTones,
+                    chars: sc.chars || cleanText.length,
+                    metaHay: `${arcMetaHay} ${sc.title || ''} ${sc.summary || ''}`.toLowerCase(),
+                    lowerTitle: `${arc.title || ''} ${sc.title || ''}`.toLowerCase(),
+                    cleanText,
+                    lowerText: cleanText.toLowerCase(),
+                    lines,
+                });
+            }
+        }
+    }
+
+    const stats = {
+        arcs: indexData.stats?.arcs || (indexData.arcs || []).length,
+        scenes: indexData.stats?.scenes || sceneMetaMap.size,
+        total_chars: indexData.stats?.total_chars || searchableScenes.reduce((a, s) => a + s.chars, 0),
+        max_order: maxOrderAvailable,
+    };
+    const categories = [...categorySet];
+    const seriesList = [...seriesStatsMap.values()].map((s) => ({
+        ...s,
+        categories: [...s.categories],
+    }));
+    const toneTags = [...toneSet];
+
+    function grepScenes(rawQuery, opts = {}) {
+        const limit = Math.min(Math.max(Number(opts.limit) || 20, 1), 60);
+        const maxOrder = opts.maxOrder ?? null;
+        const catFilter = String(opts.category || '').trim();
+        const toneFilter = String(opts.tone || '').trim().toLowerCase();
+        const t0 = performance.now();
+        const q = String(rawQuery || '').trim();
+        if (!q) return { took_ms: 0, total: 0, cameo_count: 0, all_matched: false, hits: [] };
+
+        const tokens = q.split(/[\s,，、]+/).map((x) => x.trim()).filter(Boolean);
+        const groups = tokens.map((tk) => expandAliases(tk).map((a) => a.toLowerCase()));
+        const flatAliases = [...new Set(groups.flat())];
+
+        const eligible = searchableScenes.filter((sc) => {
+            if (!isOrderAllowed(sc.order, maxOrder)) return false;
+            if (catFilter && sc.category !== catFilter) return false;
+            if (toneFilter && !(sc.tone_tags || []).some((t) => String(t).toLowerCase().includes(toneFilter))) return false;
+            return true;
+        });
+
+        const collect = (requireAll) => {
+            const matched = [];
+            for (const sc of eligible) {
+                let groupsHit = 0;
+                let totalOccurrences = 0;
+                for (const grp of groups) {
+                    let grpCount = 0;
+                    for (const term of grp) {
+                        let idx = sc.lowerText.indexOf(term);
+                        if (idx >= 0) {
+                            while (idx >= 0) {
+                                grpCount += 1;
+                                idx = sc.lowerText.indexOf(term, idx + term.length);
+                            }
+                        } else if (sc.lowerTitle.includes(term)) {
+                            grpCount += 1;
+                        }
+                    }
+                    if (grpCount > 0) {
+                        groupsHit += 1;
+                        totalOccurrences += grpCount;
+                    }
+                }
+                if (requireAll ? groupsHit < groups.length : groupsHit === 0) continue;
+                const cameo = !flatAliases.some((a) => sc.metaHay.includes(a));
+                const snippets = [];
+                for (let i = 0; i < sc.lines.length; i++) {
+                    const low = sc.lines[i].toLowerCase();
+                    if (flatAliases.some((a) => low.includes(a))) {
+                        const win = sc.lines.slice(Math.max(0, i - 1), Math.min(sc.lines.length, i + 2));
+                        snippets.push(win.join(' / '));
+                        if (snippets.length >= 2) break;
+                    }
+                }
+                matched.push({
+                    node_id: sc.node_id,
+                    arc_id: sc.arc_id,
+                    arc_title: sc.arc_title,
+                    series: sc.series,
+                    category: sc.category,
+                    title: sc.title,
+                    order: sc.order,
+                    tone_tags: sc.tone_tags,
+                    chars: sc.chars,
+                    groups_hit: groupsHit,
+                    match_count: totalOccurrences,
+                    cameo,
+                    snippet: snippets.join(' … ').slice(0, 260),
+                });
+            }
+            return matched;
+        };
+
+        let allMatched = true;
+        let pool = collect(true);
+        if (!pool.length && groups.length > 1) {
+            allMatched = false;
+            pool = collect(false);
+        }
+        pool.sort((a, b) => Number(b.cameo) - Number(a.cameo) || b.groups_hit - a.groups_hit || b.match_count - a.match_count);
+        const cameos = pool.filter((x) => x.cameo);
+        return {
+            took_ms: Number((performance.now() - t0).toFixed(2)),
+            total: pool.length,
+            cameo_count: cameos.length,
+            all_matched: allMatched,
+            hits: pool.slice(0, limit),
+        };
+    }
+
+    async function callChat({ base, key, model, messages, tools, maxTokens }) {
+        const cleanBase = String(base || '')
+            .trim()
+            .replace(/\/+$/, '')
+            .replace(/\/(?:chat\/completions|models)$/i, '')
+            .replace(/\/+$/, '');
+        const body = { model, messages, temperature: 0.1 };
+        const mt = Number(maxTokens);
+        if (Number.isFinite(mt) && mt > 0) body.max_tokens = Math.floor(mt);
+        if (tools && tools.length) {
+            body.tools = tools;
+            body.tool_choice = 'auto';
+        }
+        const resp = await fetch(`${cleanBase}/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${key}`,
+            },
+            body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+            const errTxt = await resp.text().catch(() => '');
+            throw new Error(`LLM HTTP ${resp.status}: ${errTxt.slice(0, 160)}`);
+        }
+        return resp.json();
+    }
+
+    async function search(payload, apiCfg) {
+        const t0 = Date.now();
+        const maxOrder = normalizeOrder(payload.maxOrder) ?? corpusConfig.spoiler_gate?.default_max_order ?? null;
+        const maxTurns = 8;
+        const rawMaxScenes = Number(payload.maxScenes);
+        const maxScenes = rawMaxScenes > 0 ? Math.min(rawMaxScenes, 12) : 10;
+
+        if (!apiCfg?.chatBase || !apiCfg?.chatKey) {
+            throw new Error('内置免服务端模式需要先在下方「旁路推理 Agent 模型配置」填写 API Base URL 与 API Key');
+        }
+
+        const visibleArcs = (indexData.arcs || [])
+            .filter((a) => isOrderAllowed(a.order, maxOrder))
+            .map((a) => ({
+                arc: a,
+                scenes: (a.scenes || []).filter((s) => isOrderAllowed(effectiveSceneOrder(s, a), maxOrder)),
+            }))
+            .filter((x) => x.scenes.length > 0);
+
+        const hasSeriesTool = seriesList.length >= 2;
+        const tools = [];
+        if (hasSeriesTool) {
+            tools.push({
+                type: 'function',
+                function: {
+                    name: 'list_series',
+                    description: `列出《${corpusConfig.name}》Level-0 分卷总览`,
+                    parameters: { type: 'object', properties: { keyword: { type: 'string' } }, required: [] },
+                },
+            });
+        }
+        tools.push(
+            {
+                type: 'function',
+                function: {
+                    name: 'list_story_arcs',
+                    description: `列出《${corpusConfig.name}》篇章目录（支持 series, category, character, keyword, tone 过滤）`,
+                    parameters: {
+                        type: 'object',
+                        properties: {
+                            series: { type: 'string' },
+                            category: { type: 'string' },
+                            character: { type: 'string' },
+                            keyword: { type: 'string' },
+                            tone: { type: 'string' },
+                        },
+                        required: [],
+                    },
+                },
+            },
+            {
+                type: 'function',
+                function: {
+                    name: 'get_arc_scenes',
+                    description: '展开 1~5 个篇章下的分幕摘要目录',
+                    parameters: {
+                        type: 'object',
+                        properties: { arc_ids: { type: 'array', items: { type: 'string' } } },
+                        required: ['arc_ids'],
+                    },
+                },
+            },
+            {
+                type: 'function',
+                function: {
+                    name: 'read_scene',
+                    description: '批量读取 1~10 个场景节点的完整无损原文',
+                    parameters: {
+                        type: 'object',
+                        properties: { scene_node_ids: { type: 'array', items: { type: 'string' } } },
+                        required: ['scene_node_ids'],
+                    },
+                },
+            },
+            {
+                type: 'function',
+                function: {
+                    name: 'grep_scenes',
+                    description: '全库正文毫秒级精确扫描（自动展开人物别名与客串发现）',
+                    parameters: {
+                        type: 'object',
+                        properties: { query: { type: 'string' }, category: { type: 'string' }, tone: { type: 'string' } },
+                        required: ['query'],
+                    },
+                },
+            }
+        );
+
+        const sysPrompt = `你是《${corpusConfig.name}》后台树形记忆检索 Agent（当前运行于浏览器内置引擎）。
+语料规模：${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}。${maxOrder ? `当前防剧透锁定：order <= ${maxOrder}。` : ''}
+- 第一轮可并发调用 list_series / list_story_arcs 与 grep_scenes。
+- 调用 read_scene 时尽量一次批量传入多个候选 scene_node_ids（最多 10 个）。
+- 若无需检索或属未收录原创角色，直接输出 {"skip":true,"reason":"..."}。
+- 核实完毕后停止调工具，仅输出严格 JSON：
+{"skip":false,"selected_nodes":["经read_scene核实的node_id"],"selected_arcs":["可选宏观arc_id"],"timeline_note":"时间线阶段","guide":"结构化记忆导读并标注[node_id]"}`;
+
+        const userParts = [];
+        if (payload.sceneAnchor?.charName) userParts.push(`当前角色：${payload.sceneAnchor.charName} | 用户：${payload.sceneAnchor.userName || '旅人'}`);
+        if (payload.activeStateHints) userParts.push(`【状态线索】\n${payload.activeStateHints}`);
+        if (Array.isArray(payload.recentChat) && payload.recentChat.length) {
+            userParts.push(`【最近对话】\n` + payload.recentChat.map((m) => `[${m.name || m.role}]: ${m.text}`).join('\n'));
+        }
+        if (payload.onDemand) userParts.push(`【显式检索】\n${payload.onDemand}`);
+        if (payload.query) userParts.push(`【当前输入】\n${payload.query}`);
+
+        const messages = [
+            { role: 'system', content: sysPrompt },
+            { role: 'user', content: userParts.join('\n\n') },
+        ];
+
+        const readScenesMap = new Map();
+        const trace = [];
+
+        const execTool = (fnName, args) => {
+            if (fnName === 'list_series') {
+                const kw = String(args?.keyword || '').toLowerCase();
+                const rows = seriesList
+                    .filter((s) => !kw || s.series.toLowerCase().includes(kw) || String(seriesSummaries[s.series] || '').toLowerCase().includes(kw))
+                    .map((s) => `[${s.series}] ${s.arcs}卷 ${s.scenes}幕 (${formatCharCount(s.total_chars)})${seriesSummaries[s.series] ? ' | ' + seriesSummaries[s.series] : ''}`);
+                return rows.join('\n') || '无匹配分部';
+            }
+            if (fnName === 'list_story_arcs') {
+                const ser = String(args?.series || '').toLowerCase();
+                const cat = String(args?.category || '').toLowerCase();
+                const ch = String(args?.character || '').toLowerCase();
+                const kw = String(args?.keyword || '').toLowerCase();
+                const chTerms = ch ? expandAliases(ch).map((x) => x.toLowerCase()) : [];
+                const kwTerms = kw ? expandAliases(kw).map((x) => x.toLowerCase()) : [];
+                const matched = visibleArcs.filter(({ arc, scenes }) => {
+                    if (ser && !String(arc.series || arc.category || '').toLowerCase().includes(ser)) return false;
+                    if (cat && !String(arc.category || '').toLowerCase().includes(cat)) return false;
+                    const hay = [arc.title, arc.description, ...(arc.characters || []), ...scenes.map((s) => `${s.title} ${s.summary}`)].join(' ').toLowerCase();
+                    if (chTerms.length && !chTerms.some((t) => hay.includes(t))) return false;
+                    if (kwTerms.length && !kwTerms.some((t) => hay.includes(t))) return false;
+                    return true;
+                });
+                return matched
+                    .slice(0, 60)
+                    .map(({ arc, scenes }) => `- [${arc.arc_id}] (${arc.series || arc.category}${arc.order != null ? '·序' + arc.order : ''}) 《${arc.title}》 (${scenes.length}幕): ${arc.description || ''}`)
+                    .join('\n') || '无匹配篇章';
+            }
+            if (fnName === 'get_arc_scenes') {
+                const ids = (Array.isArray(args?.arc_ids) ? args.arc_ids : []).map(String).slice(0, 5);
+                return ids
+                    .map((aid) => {
+                        const found = visibleArcs.find((x) => x.arc.arc_id === aid);
+                        if (!found) return `[${aid}] 未找到`;
+                        return `[${aid}] 《${found.arc.title}》:\n` + found.scenes.map((s) => `  * [${s.node_id}] 《${s.title}》(${s.chars}字): ${s.summary}`).join('\n');
+                    })
+                    .join('\n\n');
+            }
+            if (fnName === 'read_scene') {
+                const ids = (Array.isArray(args?.scene_node_ids) ? args.scene_node_ids : []).map(String).slice(0, 10);
+                const out = [];
+                for (const sid of ids) {
+                    const sm = sceneMetaMap.get(sid);
+                    const raw = textsData[sid];
+                    if (!sm || !raw || !isOrderAllowed(sm.effective_order, maxOrder)) continue;
+                    const cleanText = stripMarkup(raw.text);
+                    const rec = {
+                        node_id: sid,
+                        arc_id: sm.arc_id,
+                        arc_title: sm.arc_title,
+                        category: sm.arc_category,
+                        title: sm.title || sm.group_title,
+                        order: sm.effective_order,
+                        chars: cleanText.length,
+                        text: cleanText,
+                    };
+                    readScenesMap.set(sid, rec);
+                    out.push(rec);
+                }
+                return JSON.stringify(out);
+            }
+            if (fnName === 'grep_scenes') {
+                const res = grepScenes(args?.query || '', { limit: 20, maxOrder, category: args?.category, tone: args?.tone });
+                if (!res.hits.length) return `[全文扫描 ${res.took_ms}ms] 零命中`;
+                return (
+                    `[全文扫描 ${res.took_ms}ms | 命中 ${res.total} 幕]\n` +
+                    res.hits.map((h) => `- [${h.node_id}|${h.arc_id}] ${h.arc_title} · ${h.title}${h.cameo ? '[客串]' : ''} (${h.match_count}处): ${h.snippet}`).join('\n')
+                );
+            }
+            return '[]';
+        };
+
+        let rawAnswer = '';
+        let finalTurn = 1;
+        for (let turn = 1; turn <= maxTurns; turn++) {
+            finalTurn = turn;
+            const tReq = Date.now();
+            const resp = await callChat({
+                base: apiCfg.chatBase,
+                key: apiCfg.chatKey,
+                model: apiCfg.chatModel || 'deepseek-chat',
+                messages,
+                tools: turn < maxTurns ? tools : undefined,
+                maxTokens: apiCfg.maxTokens,
+            });
+            const reqMs = Date.now() - tReq;
+            const msg = resp?.choices?.[0]?.message;
+            if (!msg) throw new Error('模型返回为空');
+            messages.push(msg);
+            const tcs = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+            if (!tcs.length) {
+                rawAnswer = msg.content || '';
+                break;
+            }
+            const callLogs = [];
+            for (const tc of tcs) {
+                const fnName = tc?.function?.name || '';
+                let fArgs = {};
+                try {
+                    fArgs = JSON.parse(tc?.function?.arguments || '{}');
+                } catch (_) {}
+                callLogs.push(`${fnName}(${JSON.stringify(fArgs)})`);
+                const toolRes = execTool(fnName, fArgs);
+                messages.push({ role: 'tool', tool_call_id: tc.id, content: toolRes });
+            }
+            trace.push(`T${turn}(${reqMs}ms): ${callLogs.join(' ; ')}`);
+        }
+
+        const parsed = extractJsonObject(rawAnswer);
+        const took_ms = Date.now() - t0;
+        if (parsed?.skip === true) {
+            return {
+                ok: true,
+                corpus_id: corpusId,
+                corpus_name: corpusConfig.name,
+                max_order: maxOrder,
+                skip: true,
+                reason: parsed.reason || '无需检索',
+                took_ms,
+                turns: finalTurn,
+                trace,
+                guide: '',
+                scenes: [],
+                outlines: [],
+            };
+        }
+
+        const wantedIds = Array.isArray(parsed?.selected_nodes) ? parsed.selected_nodes.map(String) : [];
+        const finalScenes = [];
+        for (const id of wantedIds) {
+            if (readScenesMap.has(id) && finalScenes.length < maxScenes) {
+                finalScenes.push(readScenesMap.get(id));
+            }
+        }
+        if (!finalScenes.length && readScenesMap.size > 0) {
+            for (const sc of readScenesMap.values()) {
+                if (finalScenes.length >= Math.min(3, maxScenes)) break;
+                finalScenes.push(sc);
+            }
+        }
+
+        const guide = (parsed && typeof parsed.guide === 'string' ? parsed.guide : rawAnswer).trim();
+        return {
+            ok: true,
+            corpus_id: corpusId,
+            corpus_name: corpusConfig.name,
+            max_order: maxOrder,
+            skip: !finalScenes.length && !guide,
+            reason: !finalScenes.length && !guide ? '无命中片段' : '',
+            took_ms,
+            turns: finalTurn,
+            trace,
+            timeline_note: parsed?.timeline_note || '',
+            guide,
+            scenes: finalScenes,
+            outlines: [],
+        };
+    }
+
+    return {
+        id: corpusId,
+        name: corpusConfig.name,
+        config: corpusConfig,
+        stats,
+        grepScenes,
+        search,
+    };
+}

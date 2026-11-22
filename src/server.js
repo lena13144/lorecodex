@@ -621,6 +621,33 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  const corpusExportMatch = pathname.match(/^\/corpora\/([^/]+)\/export$/);
+  if (req.method === 'GET' && corpusExportMatch) {
+    const cid = decodeURIComponent(corpusExportMatch[1]).trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(cid) || !corpusManager.hasCorpus(cid)) {
+      return send({ error: `corpus "${cid}" not found` }, 404);
+    }
+    const meta = corpusManager.getCorpusMeta(cid);
+    const corpusDir = path.join(CORPORA_DIR, cid);
+    const idxFile = ['tree_index.json', 'full_tree_index.json'].map((f) => path.join(corpusDir, f)).find((p) => fs.existsSync(p));
+    const txtFile = ['tree_texts.json', 'full_tree_texts.json'].map((f) => path.join(corpusDir, f)).find((p) => fs.existsSync(p));
+    if (!idxFile || !txtFile) return send({ error: 'corpus index/texts missing' }, 404);
+    const pack = {
+      format: 'lorecodex-pack-v2',
+      id: cid,
+      config: meta?.config || {},
+      indexData: JSON.parse(fs.readFileSync(idxFile, 'utf8')),
+      textsData: JSON.parse(fs.readFileSync(txtFile, 'utf8')),
+      exportedAt: new Date().toISOString(),
+    };
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${cid}.lorepack.json"`,
+      'Access-Control-Allow-Origin': '*',
+    });
+    return res.end(JSON.stringify(pack));
+  }
+
   if (req.method === 'GET' && pathname.startsWith('/corpora/')) {
     const id = decodeURIComponent(pathname.slice('/corpora/'.length));
     const meta = corpusManager.getCorpusMeta(id);

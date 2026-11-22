@@ -121,17 +121,20 @@ node src/server.js
    ```
 3. 手机浏览器回到酒馆，点击插件面板的 **「打开书阁」**（或发送 `/loreui`），界面会自动切换为**移动端底部三标签导航**，可直接在手机浏览器里点击「导入」选择手机中的 `.txt` / `.epub` / `.json` 建树。
 
-#### 玩法 B：电脑 / 服务器跑后端，手机连局域网访问
-若酒馆与 LoreCodex 运行在电脑或 NAS 上，手机通过局域网浏览器访问酒馆：
-1. 电脑启动 LoreCodex 时开启局域网监听并放行跨域来源：
-   ```bash
-   # Linux / macOS:
-   ALLOWED_ORIGINS=* node src/server.js --host 0.0.0.0 --port 5240
+#### 玩法 B：TauriTavern / 手机纯前端免服务端模式（无需 Termux、无需 Node.js 后端）
+如果你使用的是 **TauriTavern**（桌面或 Android 原生 App），或者在手机上不想启动任何 Termux / Node.js 后台进程：
+1. 在 TauriTavern / 酒馆的扩展管理中粘贴 `https://github.com/lena13144/lorecodex` 安装插件；
+2. 展开插件面板中的 **「TauriTavern / 手机免服务端内置书库 (IndexedDB 纯前端引擎)」**，勾选 **「启用纯前端免服务端模式」**；
+3. 直接点击文件选择框，选中手机或电脑本地的小说（`.txt` / `.md`）、世界书或 V2 角色卡（`.json`），或者从电脑端书阁导出的单文件书库包（`.lorepack.json`），点击 **「导入并建树到浏览器」**；
+4. 书库将直接保存在浏览器/WebView 的 `IndexedDB` 中，由内置纯 JS 树形 Agent 与毫秒级 Grep 引擎直接完成每轮检索注入，全程零后台依赖。
 
-   # Windows PowerShell:
-   $env:ALLOWED_ORIGINS="*"; node src/server.js --host 0.0.0.0 --port 5240
+#### 玩法 C：电脑 / 服务器跑后端，手机连局域网访问
+若酒馆与 LoreCodex 运行在电脑或 NAS 上，手机通过局域网（`192.168.x.x` / Tailscale `100.x.x.x`）访问电脑酒馆：
+1. 电脑启动 LoreCodex 时开启局域网监听：
+   ```bash
+   node src/server.js --host 0.0.0.0 --port 5240
    ```
-2. 手机打开酒馆网页，在 **LoreCodex 插件设置** 中将「服务地址」从 `http://127.0.0.1:5240` 改为电脑的局域网 IP（如 `http://192.168.1.100:5240`），点击刷新即可连接。
+2. 手机打开电脑酒馆网页，插件会自动探测并回退到 `http://<电脑局域网IP>:5240`（也可手动填入局域网地址），局域网与 TauriTavern 来源均已默认放行。
 
 ---
 
@@ -186,6 +189,27 @@ python3 builders/build_lore.py --input path/to/worldbook.json --corpus-id my-nov
   - `/lorecorpus <corpus_id>` — 切换当前挂载书库
   - `/loreorder <n|off>` — 设置或解除防剧透章节序上限
   - `/lorepov <角色名>` — 设置当前检索视角（角色缺席事件自动标注转述/传闻）
+
+---
+
+## 原生 Agent 接入：MCP Server 与 Agent Skill
+
+除了给酒馆挂载记忆外，LoreCodex 原生内置了零依赖的 **MCP Server（`src/mcp_server.js`）** 与 **Agent Skill（`skills/lorecodex/SKILL.md`）**，可直接挂载到 Claude Code、Antigravity、Cursor、Codex 等原生 Agent 环境：
+
+```json
+{
+  "mcpServers": {
+    "lorecodex": {
+      "command": "node",
+      "args": ["/path/to/lorecodex/src/mcp_server.js"]
+    }
+  }
+}
+```
+
+暴露的 8 个 MCP 工具涵盖两种使用模式：
+- **主 Agent 亲自翻书模式（零额外旁路 API 消耗）**：`lorecodex_list_corpora`、`lorecodex_list_series`、`lorecodex_list_arcs`、`lorecodex_expand_arc`、`lorecodex_grep_scenes`（毫秒级内存别名与客串扫描）、`lorecodex_read_scenes`（批量读取最多 10 幕无损原文）。
+- **子 Agent 蒸馏与在线建树模式**：`lorecodex_ask_agent`（由独立子 Agent 翻完目录树后仅向主 Agent 返回浓缩导读与证据原文，节省主 Agent 上下文窗口）、`lorecodex_build_corpus`（直接从本地小说/EPUB/世界书建树或执行 `--upgrade`）。
 
 ---
 

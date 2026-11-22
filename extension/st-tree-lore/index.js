@@ -17,11 +17,20 @@ const [
     { extension_settings, getContext },
     { SlashCommand },
     { SlashCommandParser },
+    {
+        idbListCorpora,
+        idbSaveCorpus,
+        idbDeleteCorpus,
+        buildNovelCorpusInBrowser,
+        buildLoreCorpusInBrowser,
+        createBrowserTreeAgent,
+    },
 ] = await Promise.all([
     import(new URL('script.js', stRootUrl).href),
     import(new URL('scripts/extensions.js', stRootUrl).href),
     import(new URL('scripts/slash-commands/SlashCommand.js', stRootUrl).href),
     import(new URL('scripts/slash-commands/SlashCommandParser.js', stRootUrl).href),
+    import(new URL('browser_engine.js', import.meta.url).href),
 ]);
 
 const MODULE_NAME = 'st_tree_lore';
@@ -29,6 +38,7 @@ const PROMPT_TAG = 'lorecodex_context';
 
 const defaultSettings = {
     enabled: true,
+    localMode: false,
     ragServer: 'http://127.0.0.1:5240',
     corpus: '',
     maxOrder: 0,
@@ -51,6 +61,9 @@ const defaultSettings = {
 
 let corporaCache = [];
 const corporaMap = new Map();
+let localPacksCache = [];
+const localPacksMap = new Map();
+const localAgentsCache = new Map();
 let serverDefaultCorpus = '';
 let lastHealthInfo = null;
 let lastInjectionSnapshot = null;
@@ -313,12 +326,45 @@ async function probeServerHealthAndCorpora(base) {
     return { hr, cr };
 }
 
+async function refreshLocalPacks() {
+    try {
+        const rows = await idbListCorpora();
+        localPacksCache = rows;
+        localPacksMap.clear();
+        localAgentsCache.clear();
+        for (const p of rows) {
+            localPacksMap.set(p.id, p);
+        }
+    } catch (e) {
+        console.warn('[LoreCodex] IndexedDB unavailable:', e);
+    }
+}
+
+function isUsingLocalEngine(cfg) {
+    if (cfg.localMode) return true;
+    if (!lastHealthInfo?.ok && localPacksMap.size > 0) return true;
+    if (cfg.corpus && localPacksMap.has(cfg.corpus) && !corporaMap.has(cfg.corpus)) return true;
+    return false;
+}
+
+function getLocalAgent(corpusId) {
+    const id = String(corpusId || '').trim() || (localPacksCache[0]?.id || '');
+    if (!id || !localPacksMap.has(id)) return null;
+    if (!localAgentsCache.has(id)) {
+        localAgentsCache.set(id, createBrowserTreeAgent(localPacksMap.get(id)));
+    }
+    return localAgentsCache.get(id);
+}
+
 async function fetchCorporaAndHealth(cfg) {
+    await refreshLocalPacks();
     const primary = getConfiguredServerBase(cfg);
+    let srvOk = false;
     try {
         let { hr, cr } = await probeServerHealthAndCorpora(primary);
         if (cr && hr?.ok) {
             resolvedServerBase = primary;
+            srvOk = true;
         } else {
             const lanAlt = getLanFallbackBase(primary);
             if (lanAlt) {
@@ -327,24 +373,50 @@ async function fetchCorporaAndHealth(cfg) {
                     hr = altRes.hr;
                     cr = altRes.cr;
                     resolvedServerBase = lanAlt;
+                    srvOk = true;
                 }
             }
         }
         lastHealthInfo = hr;
-        if (!cr) return false;
-        corporaCache = Array.isArray(cr.corpora) ? cr.corpora : [];
-        serverDefaultCorpus = String(cr.defaultCorpus || '');
-        corporaMap.clear();
-        for (const c of corporaCache) corporaMap.set(c.id, c);
-        if (corporaCache.length > 0 && (!cfg.corpus || !corporaMap.has(cfg.corpus))) {
-            cfg.corpus = corporaMap.has(serverDefaultCorpus) ? serverDefaultCorpus : corporaCache[0].id;
-            saveSettingsDebounced();
+        if (cr) {
+            corporaCache = Array.isArray(cr.corpora) ? cr.corpora : [];
+            serverDefaultCorpus = String(cr.defaultCorpus || '');
+        } else {
+            corporaCache = [];
         }
-        return true;
     } catch (_) {
         lastHealthInfo = null;
-        return false;
+        corporaCache = [];
     }
+
+    corporaMap.clear();
+    if (!cfg.localMode) {
+        for (const c of corporaCache) corporaMap.set(c.id, c);
+    }
+    for (const p of localPacksCache) {
+        if (!corporaMap.has(p.id)) {
+            const st = p.indexData?.stats || {
+                arcs: (p.indexData?.arcs || []).length,
+                scenes: Object.keys(p.textsData || {}).length,
+                total_chars: 0,
+            };
+            corporaMap.set(p.id, {
+                id: p.id,
+                name: `${p.config?.name || p.id} [内置]`,
+                stats: st,
+                prompt_framing: p.config?.prompt_framing,
+                db_scrubber: p.config?.db_scrubber,
+                isLocal: true,
+            });
+        }
+    }
+
+    const allIds = [...corporaMap.keys()];
+    if (allIds.length > 0 && (!cfg.corpus || !corporaMap.has(cfg.corpus))) {
+        cfg.corpus = corporaMap.has(serverDefaultCorpus) ? serverDefaultCorpus : allIds[0];
+        saveSettingsDebounced();
+    }
+    return srvOk;
 }
 
 function getEffectiveFraming(corpusMeta, cfg) {
@@ -404,8 +476,29 @@ function renderLastPreview(cfg) {
     );
 }
 
-async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, dbRecallHints, clear }) {
+async function executeTreeSearchRequest(cfg, payload) {
+    const cid = payload.corpus || cfg.corpus || serverDefaultCorpus || '';
+    if (isUsingLocalEngine(cfg) || (cid && localPacksMap.has(cid) && !corporaCache.some(c => c.id === cid))) {
+        const localAgent = getLocalAgent(cid);
+        if (!localAgent) {
+            throw new Error(`内置免服务端引擎中尚未导入书库 "${cid || '空'}"，请在下方「免服务端内置书库管理」导入小说或世界书`);
+        }
+        return await localAgent.search(payload, buildApiConfig(cfg));
+    }
     const server = getServerBase(cfg);
+    const resp = await fetch(`${server}/tree-search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+        const errBody = await resp.json().catch(() => ({}));
+        throw new Error(errBody.error || `HTTP ${resp.status}`);
+    }
+    return await resp.json();
+}
+
+async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, dbRecallHints, clear }) {
     const depth = Number.isFinite(Number(cfg.depth)) ? Number(cfg.depth) : 1;
     const recentChat = collectRecentChat(chat, cfg.recentTurns || 5);
     const corpusId = (cfg.corpus || serverDefaultCorpus || '').trim();
@@ -413,10 +506,9 @@ async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, d
     const activeStateHints = buildActiveStateHints(entryTexts, dbRecallHints, corpusMeta, cfg);
     const maxOrder = normalizeMaxOrder(cfg.maxOrder);
 
-    const resp = await fetch(`${server}/tree-search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    let data;
+    try {
+        data = await executeTreeSearchRequest(cfg, {
             corpus: corpusId || undefined,
             query,
             onDemand,
@@ -431,11 +523,9 @@ async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, d
             maxOrder: maxOrder || undefined,
             pov: cfg.pov || '',
             apiConfig: buildApiConfig(cfg),
-        }),
-    });
-    if (!resp.ok) {
-        const errBody = await resp.json().catch(() => ({}));
-        const errMsg = errBody.error || `HTTP ${resp.status}`;
+        });
+    } catch (err) {
+        const errMsg = err?.message || String(err);
         console.warn('[LoreCodex] tree-search failed:', errMsg);
         clear();
         lastInjectionSnapshot = {
@@ -454,8 +544,6 @@ async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, d
         if (typeof toastr !== 'undefined') toastr.warning(`LoreCodex 检索失败: ${errMsg}`);
         return;
     }
-
-    const data = await resp.json();
     const scenes = Array.isArray(data.scenes) ? data.scenes : [];
     const chunks = Array.isArray(data.chunks) ? data.chunks : [];
     const outlines = Array.isArray(data.outlines) ? data.outlines : [];
@@ -611,6 +699,7 @@ jQuery(async () => {
 
     const syncUiFromCfg = () => {
         $('#lorecodex_enabled').prop('checked', Boolean(cfg.enabled));
+        $('#lorecodex_local_mode').prop('checked', Boolean(cfg.localMode));
         $('#lorecodex_server').val(cfg.ragServer || '');
         $('#lorecodex_corpus').val(cfg.corpus || '');
         $('#lorecodex_max_order').val(cfg.maxOrder ?? 0);
@@ -635,25 +724,31 @@ jQuery(async () => {
         const txt = $('#lorecodex_conn_text');
         if (!dot.length) return;
         dot.removeClass('ok err wait');
-        if (ok && lastHealthInfo?.ok) {
+        const isTauri = typeof window !== 'undefined' && (Boolean(window.__TAURITAVERN__) || Boolean(window.__TAURI_INTERNALS__));
+        const tauriTag = isTauri ? ' · TauriTavern' : '';
+        if (!cfg.localMode && ok && lastHealthInfo?.ok) {
             dot.addClass('ok');
-            txt.text(`已连接 · ${corporaCache.length} 个书库 · ${lastHealthInfo.mode || 'tree-only'} (${lastHealthInfo.boot_ms ?? '-'}ms)`);
+            txt.text(`已连接服务端${tauriTag} · ${corporaCache.length} 个服务端书库${localPacksCache.length ? ` (+${localPacksCache.length}本地)` : ''} · ${lastHealthInfo.boot_ms ?? '-'}ms`);
+        } else if (cfg.localMode || localPacksCache.length > 0) {
+            dot.addClass('ok');
+            txt.text(`内置免服务端引擎就绪${tauriTag} · ${localPacksCache.length} 个本地书库 (IndexedDB)`);
         } else {
             dot.addClass('err');
-            txt.text(`未连接到 ${getServerBase(cfg)}`);
+            txt.text(`未连接到 ${getServerBase(cfg)}（也可在下方开启免服务端内置书库）`);
         }
     };
 
     const renderCorpusDropdown = () => {
         const sel = $('#lorecodex_corpus').empty();
-        if (!corporaCache.length) {
-            sel.append(`<option value="${escHtml(cfg.corpus || '')}">${escHtml(cfg.corpus || '（未连接服务端或无书库）')}</option>`);
+        const entries = [...corporaMap.values()];
+        if (!entries.length) {
+            sel.append(`<option value="${escHtml(cfg.corpus || '')}">${escHtml(cfg.corpus || '（请连接服务端或在下方导入内置书库）')}</option>`);
             return;
         }
-        for (const c of corporaCache) {
-            sel.append(`<option value="${escHtml(c.id)}">${escHtml(c.name)} (${c.stats.arcs}卷 / ${c.stats.scenes}幕)</option>`);
+        for (const c of entries) {
+            sel.append(`<option value="${escHtml(c.id)}">${escHtml(c.name)} (${c.stats?.arcs || 0}卷 / ${c.stats?.scenes || 0}幕)</option>`);
         }
-        if (cfg.corpus) sel.val(cfg.corpus);
+        if (cfg.corpus && corporaMap.has(cfg.corpus)) sel.val(cfg.corpus);
     };
 
     const updateBindingLabel = () => {
@@ -862,6 +957,34 @@ jQuery(async () => {
             </div>
 
             <details class="lorecodex-card">
+                <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">TauriTavern / 手机免服务端内置书库 (IndexedDB 纯前端引擎)</summary>
+                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+                    <label class="checkbox_label">
+                        <input id="lorecodex_local_mode" type="checkbox" ${cfg.localMode ? 'checked' : ''} />
+                        <span><b>启用纯前端免服务端模式（无需运行 Node.js / Termux 后台）</b></span>
+                    </label>
+                    <div class="lorecodex-muted">可直接选择小说 (.txt / .md)、世界书/V2角色卡 (.json) 或导出的单文件书库包 (.lorepack.json)，在浏览器 IndexedDB 内秒级建树并由内置 Agent 检索。</div>
+                    <input id="lorecodex_local_file" class="text_pole" type="file" accept=".txt,.md,.json" />
+                    <div class="lorecodex-row">
+                        <div style="flex:1;">
+                            <small>书库 ID（英文/数字/连字符）：</small>
+                            <input id="lorecodex_local_id" class="text_pole" type="text" placeholder="my-book" />
+                        </div>
+                        <div style="flex:1;">
+                            <small>书库显示名称：</small>
+                            <input id="lorecodex_local_name" class="text_pole" type="text" placeholder="例如：才不是魔女" />
+                        </div>
+                    </div>
+                    <div class="lorecodex-row">
+                        <button id="lorecodex_local_import_btn" type="button" class="menu_button" style="flex:2;">导入并建树到浏览器</button>
+                        <button id="lorecodex_local_export_btn" type="button" class="menu_button" style="flex:1;">导出 .lorepack</button>
+                        <button id="lorecodex_local_delete_btn" type="button" class="menu_button" style="width:auto;padding:4px 8px;">删除</button>
+                    </div>
+                    <div id="lorecodex_local_status" class="lorecodex-status"></div>
+                </div>
+            </details>
+
+            <details class="lorecodex-card">
                 <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">内嵌测试检索（无需弹窗）</summary>
                 <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
                     <div class="lorecodex-row">
@@ -947,6 +1070,101 @@ jQuery(async () => {
     };
 
     bind('#lorecodex_enabled', 'enabled', el => el.prop('checked'));
+    $('#lorecodex_local_mode').on('change', async function () {
+        cfg.localMode = $(this).prop('checked');
+        saveSettingsDebounced();
+        const ok = await fetchCorporaAndHealth(cfg);
+        renderConnStatus(ok);
+        renderCorpusDropdown();
+    });
+
+    $('#lorecodex_local_file').on('change', function (e) {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        const stem = f.name.replace(/\.lorepack\.json$/i, '').replace(/\.[^.]+$/, '');
+        const slug = stem.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'local-book';
+        if (!$('#lorecodex_local_id').val().trim()) $('#lorecodex_local_id').val(slug);
+        if (!$('#lorecodex_local_name').val().trim()) $('#lorecodex_local_name').val(stem);
+    });
+
+    $('#lorecodex_local_import_btn').on('click', async () => {
+        const fileEl = $('#lorecodex_local_file')[0];
+        const file = fileEl?.files?.[0];
+        const st = $('#lorecodex_local_status');
+        if (!file) {
+            st.text('请先选择一个 .txt / .md / .json / .lorepack.json 文件');
+            return;
+        }
+        const cid = ($('#lorecodex_local_id').val().trim() || 'local-book').replace(/[^a-zA-Z0-9_-]/g, '-');
+        const cName = $('#lorecodex_local_name').val().trim() || cid;
+        st.text(`正在浏览器内读取并构建「${cName}」...`);
+        try {
+            const text = await file.text();
+            const isJson = file.name.toLowerCase().endsWith('.json');
+            const pack = isJson
+                ? buildLoreCorpusInBrowser({
+                      rawJson: text,
+                      corpusId: cid,
+                      name: cName,
+                      existingPack: localPacksMap.get(cid) || null,
+                  })
+                : buildNovelCorpusInBrowser({
+                      rawText: text,
+                      corpusId: cid,
+                      name: cName,
+                  });
+            await idbSaveCorpus(pack);
+            cfg.corpus = pack.id;
+            saveSettingsDebounced();
+            const ok = await fetchCorporaAndHealth(cfg);
+            renderConnStatus(ok);
+            renderCorpusDropdown();
+            const stats = pack.indexData?.stats || {};
+            st.text(`已存入浏览器 IndexedDB：${pack.config.name} (${stats.arcs || 0}卷 / ${stats.scenes || 0}幕 / ${(stats.total_chars || 0).toLocaleString()}字)`);
+            if (typeof toastr !== 'undefined') toastr.success(`本地书库「${pack.config.name}」构建完成`);
+        } catch (err) {
+            st.text('本地建树失败: ' + (err?.message || err));
+            if (typeof toastr !== 'undefined') toastr.error('本地建树失败: ' + (err?.message || err));
+        }
+    });
+
+    $('#lorecodex_local_export_btn').on('click', () => {
+        const cid = cfg.corpus;
+        const pack = localPacksMap.get(cid);
+        const st = $('#lorecodex_local_status');
+        if (!pack) {
+            if (!isUsingLocalEngine(cfg) && cid) {
+                window.open(`${getServerBase(cfg)}/corpora/${encodeURIComponent(cid)}/export`, '_blank');
+                return;
+            }
+            st.text('当前选中的书库不在本地 IndexedDB 中');
+            return;
+        }
+        const blob = new Blob([JSON.stringify({ format: 'lorecodex-pack-v2', ...pack })], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${pack.id}.lorepack.json`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        st.text(`已导出 ${pack.id}.lorepack.json`);
+    });
+
+    $('#lorecodex_local_delete_btn').on('click', async () => {
+        const cid = cfg.corpus;
+        const st = $('#lorecodex_local_status');
+        if (!localPacksMap.has(cid)) {
+            st.text(`书库 "${cid}" 不是本地 IndexedDB 书库`);
+            return;
+        }
+        await idbDeleteCorpus(cid);
+        cfg.corpus = '';
+        saveSettingsDebounced();
+        const ok = await fetchCorporaAndHealth(cfg);
+        renderConnStatus(ok);
+        renderCorpusDropdown();
+        st.text(`已从浏览器 IndexedDB 删除本地书库 "${cid}"`);
+    });
     bind('#lorecodex_server', 'ragServer');
     bind('#lorecodex_corpus', 'corpus');
     bind('#lorecodex_max_order', 'maxOrder', el => normalizeMaxOrder(el.val()));
@@ -1062,14 +1280,40 @@ jQuery(async () => {
         btn.prop('disabled', true);
         st.text('正在拉取模型列表...');
         try {
-            const r = await fetch(`${getServerBase(cfg)}/models`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ baseUrl: cfg.chatBase, apiKey: cfg.chatKey }),
-            });
-            const j = await r.json();
-            if (!j.ok) throw new Error(j.error || 'failed');
-            const models = Array.isArray(j.models) ? j.models : [];
+            let models = [];
+            if (!isUsingLocalEngine(cfg) && lastHealthInfo?.ok) {
+                const r = await fetch(`${getServerBase(cfg)}/models`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ baseUrl: cfg.chatBase, apiKey: cfg.chatKey }),
+                });
+                const j = await r.json();
+                if (!j.ok) throw new Error(j.error || 'failed');
+                models = Array.isArray(j.models) ? j.models : [];
+            } else {
+                const cleanBase = String(cfg.chatBase || '')
+                    .trim()
+                    .replace(/\/+$/, '')
+                    .replace(/\/(?:chat\/completions|models)$/i, '')
+                    .replace(/\/+$/, '');
+                if (!cleanBase || !cfg.chatKey) {
+                    throw new Error('请先填写 API Base URL 与 API Key');
+                }
+                const r = await fetch(`${cleanBase}/models`, {
+                    headers: { Authorization: `Bearer ${cfg.chatKey.trim()}` },
+                });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const j = await r.json();
+                const rawList = Array.isArray(j.data) ? j.data : Array.isArray(j.models) ? j.models : [];
+                models = [
+                    ...new Set(
+                        rawList
+                            .map((x) => (typeof x === 'string' ? x : x?.id || String(x?.name || '').replace(/^models\//, '')))
+                            .map((s) => String(s || '').trim())
+                            .filter(Boolean)
+                    ),
+                ];
+            }
             const sel = $('#lorecodex_model_select').empty();
             sel.append(`<option value="">-- 点击此处从已拉取的 ${models.length} 个模型中选择 --</option>`);
             for (const m of models) {
@@ -1082,7 +1326,9 @@ jQuery(async () => {
                     $('#lorecodex_chat_model').val(models[0]);
                     sel.val(models[0]);
                     saveSettingsDebounced();
-                    await syncConfigToServer({ silent: true });
+                    if (!isUsingLocalEngine(cfg) && lastHealthInfo?.ok) {
+                        await syncConfigToServer({ silent: true });
+                    }
                 }
             }
             st.text(
@@ -1123,23 +1369,17 @@ jQuery(async () => {
         st.text('正在执行树形 Agent 检索...');
         try {
             const ctx = getContext();
-            const r = await fetch(`${getServerBase(cfg)}/tree-search`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    corpus: cfg.corpus || undefined,
-                    query: q,
-                    onDemand: q,
-                    recentChat: collectRecentChat(ctx?.chat || [], cfg.recentTurns || 5),
-                    sceneAnchor: { charName: ctx?.name2 || '', userName: ctx?.name1 || '旅人', pov: cfg.pov || '' },
-                    maxScenes: normalizeMaxScenes(cfg.maxScenes),
-                    maxOrder: normalizeMaxOrder(cfg.maxOrder) || undefined,
-                    pov: cfg.pov || '',
-                    apiConfig: buildApiConfig(cfg),
-                }),
+            const j = await executeTreeSearchRequest(cfg, {
+                corpus: cfg.corpus || undefined,
+                query: q,
+                onDemand: q,
+                recentChat: collectRecentChat(ctx?.chat || [], cfg.recentTurns || 5),
+                sceneAnchor: { charName: ctx?.name2 || '', userName: ctx?.name1 || '旅人', pov: cfg.pov || '' },
+                maxScenes: normalizeMaxScenes(cfg.maxScenes),
+                maxOrder: normalizeMaxOrder(cfg.maxOrder) || undefined,
+                pov: cfg.pov || '',
+                apiConfig: buildApiConfig(cfg),
             });
-            const j = await r.json();
-            if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
             lastInjectionSnapshot = {
                 corpus_id: j.corpus_id || cfg.corpus,
                 corpus_name: j.corpus_name || corporaMap.get(j.corpus_id || cfg.corpus)?.name || cfg.corpus,

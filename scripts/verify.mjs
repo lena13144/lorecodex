@@ -475,7 +475,99 @@ function testHygieneAndSyntax() {
   assert.strictEqual(manifest.js, 'index.js');
   assert.strictEqual(manifest.css, 'style.css');
   execFileSync('node', ['--check', path.join(extDir, 'index.js')], { stdio: 'inherit' });
+  execFileSync('node', ['--check', path.join(extDir, 'browser_engine.js')], { stdio: 'inherit' });
+  assert(fs.existsSync(path.join(ROOT, 'skills', 'lorecodex', 'SKILL.md')), 'skills/lorecodex/SKILL.md must exist');
   console.log('  PASS: zero leaked secrets/private paths & all JS modules syntax-verified');
+}
+
+async function testMcpAndBrowserEngine() {
+  console.log('\n[7.5/9] Testing MCP Server (stdio JSON-RPC 2.0), .lorepack export, and In-Browser Serverless Engine...');
+  // 1. Test GET /corpora/demo-chronicles/export -> import into browser_engine
+  const expRes = await getJson('/corpora/demo-chronicles/export');
+  assert.strictEqual(expRes.status, 200, 'GET /corpora/demo-chronicles/export must return 200');
+  assert.strictEqual(expRes.data.format, 'lorecodex-pack-v2');
+  assert(expRes.data.indexData?.arcs?.length >= 5, 'Exported pack must include indexData.arcs');
+
+  const browserMod = await import(new URL('../extension/st-tree-lore/browser_engine.js', import.meta.url).href);
+  const importedPack = browserMod.buildLoreCorpusInBrowser({
+    rawJson: expRes.data,
+    corpusId: 'demo-local',
+  });
+  const localAgent = browserMod.createBrowserTreeAgent(importedPack);
+  const localGrep = localAgent.grepScenes('Zero-7');
+  assert(localGrep.total >= 2, 'In-Browser engine must expand Zero-7 alias and hit Ch.1 & Ch.4');
+  const localCameo = localAgent.grepScenes('卡伦');
+  assert.strictEqual(localCameo.hits[0]?.cameo, true, 'In-Browser engine must detect cameo');
+
+  const builtNovelPack = browserMod.buildNovelCorpusInBrowser({
+    rawText: '第一卷 星港篇\n第1章 黎明信号\n苏璃说道：“灰烬星港的雷达刚刚捕获了Zero-7频段。”\n第2章 暗潮\n林夜推门走入观测室，记录下第二段脉冲。',
+    corpusId: 'local-novel-smoke',
+    name: '本地构建测试',
+  });
+  assert.strictEqual(builtNovelPack.indexData.arcs.length, 2, 'In-Browser novel builder should parse 2 chapters');
+  assert.strictEqual(builtNovelPack.indexData.arcs[0].series, '第一卷 星港篇');
+
+  // 2. Test src/mcp_server.js over stdio JSON-RPC 2.0
+  const mcpProc = spawn('node', [path.join(ROOT, 'src', 'mcp_server.js'), '--corpora-dir', path.join(ROOT, 'corpora')], {
+    cwd: ROOT,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  const rpcResponses = new Map();
+  let mcpBuf = '';
+  mcpProc.stdout.on('data', (chunk) => {
+    mcpBuf += chunk.toString('utf8');
+    let nl;
+    while ((nl = mcpBuf.indexOf('\n')) >= 0) {
+      const line = mcpBuf.slice(0, nl).trim();
+      mcpBuf = mcpBuf.slice(nl + 1);
+      if (!line) continue;
+      try {
+        const msg = JSON.parse(line);
+        if (msg.id !== undefined) rpcResponses.set(msg.id, msg);
+      } catch (_) {}
+    }
+  });
+
+  const callRpc = async (id, method, params = {}) => {
+    mcpProc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    const t0 = Date.now();
+    while (Date.now() - t0 < 4000) {
+      if (rpcResponses.has(id)) return rpcResponses.get(id);
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error(`MCP RPC timeout on method ${method}`);
+  };
+
+  try {
+    const initRes = await callRpc(1, 'initialize', { protocolVersion: '2024-11-05' });
+    assert.strictEqual(initRes.result?.serverInfo?.name, 'lorecodex-mcp');
+
+    const toolsRes = await callRpc(2, 'tools/list');
+    const toolNames = (toolsRes.result?.tools || []).map((t) => t.name);
+    assert(toolNames.includes('lorecodex_list_corpora') && toolNames.includes('lorecodex_grep_scenes'));
+
+    const corporaCall = await callRpc(3, 'tools/call', {
+      name: 'lorecodex_list_corpora',
+      arguments: {},
+    });
+    assert(corporaCall.result?.content?.[0]?.text.includes('demo-chronicles'));
+
+    const grepCall = await callRpc(4, 'tools/call', {
+      name: 'lorecodex_grep_scenes',
+      arguments: { corpus: 'demo-chronicles', query: 'Zero-7' },
+    });
+    assert(grepCall.result?.content?.[0]?.text.includes('scenes matched'));
+
+    const readCall = await callRpc(5, 'tools/call', {
+      name: 'lorecodex_read_scenes',
+      arguments: { corpus: 'demo-chronicles', scene_node_ids: ['0001'] },
+    });
+    assert(readCall.result?.content?.[0]?.text.includes('node_id=0001'));
+    console.log('  PASS: MCP stdio server (8 tools), .lorepack export, and In-Browser Serverless Engine verified');
+  } finally {
+    mcpProc.kill();
+  }
 }
 
 async function main() {
@@ -652,6 +744,8 @@ async function main() {
     assert(gCameoDemo.data.total >= 1);
     assert.strictEqual(gCameoDemo.data.hits[0].cameo, true, '卡伦 must be detected as cameo');
     console.log(`  PASS: demo-chronicles Zero-7=${gAliasDemo.data.took_ms}ms/${gAliasDemo.data.total} hits, cameo=${gCameoDemo.data.hits[0].cameo}`);
+
+    await testMcpAndBrowserEngine();
 
     testHygieneAndSyntax();
 

@@ -3,11 +3,16 @@
   "version": "2.0.0",
   "description": "Vectorless tree-reasoning, millisecond in-RAM grep, and sidecar memory agent for long-form fiction, game lore, and SillyTavern roleplay.",
   "main": "src/server.js",
+  "bin": {
+    "lorecodex": "./src/server.js",
+    "lorecodex-mcp": "./src/mcp_server.js"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
   "scripts": {
     "start": "node src/server.js --tree-only",
+    "mcp": "node src/mcp_server.js",
     "test": "node scripts/verify.mjs --offline",
     "build:demo": "node scripts/create_demo_corpus.mjs",
     "verify": "node scripts/verify.mjs"
