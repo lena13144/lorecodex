@@ -1122,7 +1122,7 @@ export function createBrowserTreeAgent(pack) {
         };
     }
 
-    async function callChat({ base, key, model, messages, tools, maxTokens, temperature }) {
+    async function callChat({ base, key, model, messages, tools, maxTokens, temperature, reasoningEffort }) {
         const cleanBase = String(base || '')
             .trim()
             .replace(/\/+$/, '')
@@ -1132,6 +1132,8 @@ export function createBrowserTreeAgent(pack) {
         if (temperature !== undefined && temperature !== null && temperature !== '' && Number.isFinite(Number(temperature))) {
             body.temperature = Number(temperature);
         }
+        const re = String(reasoningEffort || '').trim().toLowerCase();
+        if (re) body.reasoning_effort = re;
         const mt = Number(maxTokens);
         if (Number.isFinite(mt) && mt > 0) body.max_tokens = Math.floor(mt);
         if (tools && tools.length) {
@@ -1418,6 +1420,7 @@ ${corpusConfig.world_premise || ''}
                 tools: turn < maxTurns ? tools : undefined,
                 maxTokens: apiCfg.maxTokens,
                 temperature: apiCfg.temperature,
+                reasoningEffort: apiCfg.reasoningEffort ?? apiCfg.reasoning_effort,
             });
             const reqMs = Date.now() - tReq;
             if (resp?.usage) {
@@ -1769,6 +1772,7 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
     const mt = Number(apiCfg.maxTokens);
     const rawTemp = apiCfg.temperature;
     const hasTemp = rawTemp !== undefined && rawTemp !== null && rawTemp !== '' && Number.isFinite(Number(rawTemp));
+    const re = String(apiCfg.reasoningEffort || apiCfg.reasoning_effort || '').trim().toLowerCase();
     let lastErr = null;
 
     for (let attempt = 0; attempt < retries; attempt++) {
@@ -1778,6 +1782,7 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
             messages: [{ role: 'user', content: prompt }],
         };
         if (hasTemp) body.temperature = Number(rawTemp);
+        if (re) body.reasoning_effort = re;
         if (Number.isFinite(mt) && mt > 0) body.max_tokens = Math.floor(mt);
         try {
             const resp = await fetch(`${cleanBase}/chat/completions`, {

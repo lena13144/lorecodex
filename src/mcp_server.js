@@ -42,6 +42,7 @@ function loadRuntimeConfig() {
     chatModel: process.env.CHAT_MODEL || 'deepseek-chat',
     maxTokens: process.env.CHAT_MAX_TOKENS ? Number(process.env.CHAT_MAX_TOKENS) || null : null,
     temperature: parseOptionalTemp(process.env.CHAT_TEMPERATURE),
+    reasoningEffort: String(process.env.CHAT_REASONING_EFFORT || '').trim().toLowerCase() || null,
   };
   if (fs.existsSync(CONFIG_PATH)) {
     try {
@@ -50,6 +51,7 @@ function loadRuntimeConfig() {
     } catch (_) {}
   }
   base.temperature = parseOptionalTemp(base.temperature);
+  base.reasoningEffort = String(base.reasoningEffort ?? base.reasoning_effort ?? '').trim().toLowerCase() || null;
   if (cli.defaultCorpus) base.defaultCorpus = cli.defaultCorpus;
   if (process.env.DEFAULT_CORPUS) base.defaultCorpus = process.env.DEFAULT_CORPUS;
   return base;

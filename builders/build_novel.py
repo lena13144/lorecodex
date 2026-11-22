@@ -647,6 +647,7 @@ def llm_json(cfg, prompt, retries=4):
             temp_val = float(raw_temp)
         except (TypeError, ValueError):
             pass
+    raw_re = str(cfg.get("reasoningEffort") or cfg.get("reasoning_effort") or "").strip().lower()
     last_err = None
     for attempt in range(retries):
         payload = {
@@ -655,6 +656,8 @@ def llm_json(cfg, prompt, retries=4):
         }
         if temp_val is not None:
             payload["temperature"] = temp_val
+        if raw_re:
+            payload["reasoning_effort"] = raw_re
         if max_tokens_val is not None:
             payload["max_tokens"] = max_tokens_val
         try:
@@ -893,6 +896,7 @@ def main():
     parser.add_argument("--force", action="store_true", help="Ignore cached LLM checkpoints for targeted arcs")
     parser.add_argument("--max-tokens", type=int, default=0, help="Optional max_tokens for LLM requests (0 = omit, use model default)")
     parser.add_argument("--temperature", type=float, default=None, help="Optional temperature for LLM requests (omit by default to use model default)")
+    parser.add_argument("--reasoning-effort", default="", help="Optional reasoning_effort for LLM requests, e.g. low/medium/high (empty = omit, use model default)")
     args = parser.parse_args()
 
     out_corpus_dir = os.path.join(args.out_dir, args.corpus_id)
@@ -1014,6 +1018,8 @@ def main():
             cfg["maxTokens"] = args.max_tokens
         if args.temperature is not None:
             cfg["temperature"] = args.temperature
+        if str(args.reasoning_effort or "").strip():
+            cfg["reasoningEffort"] = str(args.reasoning_effort).strip().lower()
         if not cfg.get("chatBase") or not cfg.get("chatKey"):
             raise RuntimeError("chatBase/chatKey missing in config.json (pass --no-llm for offline build)")
 

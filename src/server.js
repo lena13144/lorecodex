@@ -52,6 +52,11 @@ function parseOptionalTemperature(val) {
   return Number.isFinite(n) && n >= 0 && n <= 2 ? n : null;
 }
 
+function parseOptionalReasoningEffort(val) {
+  const s = String(val || '').trim().toLowerCase();
+  return s || null;
+}
+
 const defaultCfg = {
   port: 5240,
   defaultCorpus: 'demo-chronicles',
@@ -60,6 +65,7 @@ const defaultCfg = {
   chatModel: 'deepseek-chat',
   maxTokens: null,
   temperature: null,
+  reasoningEffort: null,
 };
 
 let runtimeCfg = { ...defaultCfg };
@@ -72,6 +78,7 @@ if (fs.existsSync(CFG_FILE)) {
 }
 runtimeCfg.maxTokens = parseOptionalMaxTokens(runtimeCfg.maxTokens ?? runtimeCfg.max_tokens);
 runtimeCfg.temperature = parseOptionalTemperature(runtimeCfg.temperature);
+runtimeCfg.reasoningEffort = parseOptionalReasoningEffort(runtimeCfg.reasoningEffort ?? runtimeCfg.reasoning_effort);
 
 if (process.env.PORT) runtimeCfg.port = Number(process.env.PORT) || runtimeCfg.port;
 if (process.env.CHAT_BASE) runtimeCfg.chatBase = process.env.CHAT_BASE;
@@ -79,6 +86,7 @@ if (process.env.CHAT_KEY) runtimeCfg.chatKey = process.env.CHAT_KEY;
 if (process.env.CHAT_MODEL) runtimeCfg.chatModel = process.env.CHAT_MODEL;
 if (process.env.CHAT_MAX_TOKENS !== undefined) runtimeCfg.maxTokens = parseOptionalMaxTokens(process.env.CHAT_MAX_TOKENS);
 if (process.env.CHAT_TEMPERATURE !== undefined) runtimeCfg.temperature = parseOptionalTemperature(process.env.CHAT_TEMPERATURE);
+if (process.env.CHAT_REASONING_EFFORT !== undefined) runtimeCfg.reasoningEffort = parseOptionalReasoningEffort(process.env.CHAT_REASONING_EFFORT);
 if (process.env.DEFAULT_CORPUS) runtimeCfg.defaultCorpus = process.env.DEFAULT_CORPUS;
 if (cli.port && Number.isFinite(cli.port)) runtimeCfg.port = cli.port;
 if (cli.defaultCorpus) runtimeCfg.defaultCorpus = cli.defaultCorpus;
@@ -155,8 +163,12 @@ function saveCfg(patch) {
   if ('temperature' in patch) {
     runtimeCfg.temperature = parseOptionalTemperature(patch.temperature);
   }
+  if ('reasoningEffort' in patch || 'reasoning_effort' in patch) {
+    runtimeCfg.reasoningEffort = parseOptionalReasoningEffort(patch.reasoningEffort ?? patch.reasoning_effort);
+  }
   delete runtimeCfg.disableThinking;
   delete runtimeCfg.max_tokens;
+  delete runtimeCfg.reasoning_effort;
   try {
     fs.writeFileSync(CFG_FILE, JSON.stringify(runtimeCfg, null, 2) + '\n', 'utf8');
   } catch (err) {
@@ -184,6 +196,9 @@ function mergeCfg(patch) {
     }
     if ('temperature' in patch) {
       out.temperature = parseOptionalTemperature(patch.temperature);
+    }
+    if ('reasoningEffort' in patch || 'reasoning_effort' in patch) {
+      out.reasoningEffort = parseOptionalReasoningEffort(patch.reasoningEffort ?? patch.reasoning_effort);
     }
   }
   return out;

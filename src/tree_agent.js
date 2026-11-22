@@ -267,7 +267,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     return grepEngine.grepScenes(rawQuery, normalizedOpts);
   }
 
-  async function callChat({ base, key, model, messages, tools, maxTokens = null, temperature = null }) {
+  async function callChat({ base, key, model, messages, tools, maxTokens = null, temperature = null, reasoningEffort = null }) {
     const cleanBase = String(base || '')
       .trim()
       .replace(/\/+$/, '')
@@ -280,6 +280,10 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     };
     if (temperature !== null && temperature !== undefined && temperature !== '' && Number.isFinite(Number(temperature))) {
       body.temperature = Number(temperature);
+    }
+    const re = String(reasoningEffort || '').trim().toLowerCase();
+    if (re) {
+      body.reasoning_effort = re;
     }
     const parsedMaxTokens = Number(maxTokens);
     if (Number.isFinite(parsedMaxTokens) && parsedMaxTokens > 0) {
@@ -1007,6 +1011,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         tools: turn < maxTurns ? tools : undefined,
         maxTokens: effectiveCfg.maxTokens,
         temperature: effectiveCfg.temperature,
+        reasoningEffort: effectiveCfg.reasoningEffort ?? effectiveCfg.reasoning_effort,
       });
       const reqMs = Date.now() - tReq;
       const u = resp.usage || {};
@@ -1100,6 +1105,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       tools: undefined,
       maxTokens: effectiveCfg.maxTokens,
       temperature: effectiveCfg.temperature,
+      reasoningEffort: effectiveCfg.reasoningEffort ?? effectiveCfg.reasoning_effort,
     });
     const finalMs = Date.now() - tFinal;
     const fu = finalResp.usage || {};

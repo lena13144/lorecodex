@@ -53,6 +53,11 @@ function parseOptionalTemp(val) {
   return Number.isFinite(n) && n >= 0 && n <= 2 ? n : null;
 }
 
+function parseOptionalReasoningEffort(val) {
+  const s = String(val || '').trim().toLowerCase();
+  return s || null;
+}
+
 async function getLocalApiConfig(be) {
   const cfg = (await be.idbGetMeta('local_api_config', null)) || {};
   return {
@@ -62,6 +67,7 @@ async function getLocalApiConfig(be) {
     chatModel: cfg.chatModel || 'deepseek-chat',
     maxTokens: Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null,
     temperature: parseOptionalTemp(cfg.temperature),
+    reasoningEffort: parseOptionalReasoningEffort(cfg.reasoningEffort),
   };
 }
 
@@ -307,6 +313,8 @@ export async function saveConfig(patch) {
           : null
         : cur.maxTokens,
     temperature: patch.temperature !== undefined ? parseOptionalTemp(patch.temperature) : cur.temperature,
+    reasoningEffort:
+      patch.reasoningEffort !== undefined ? parseOptionalReasoningEffort(patch.reasoningEffort) : cur.reasoningEffort,
   };
   await be.idbSetMeta('local_api_config', next);
   return { ok: true, config: { ...next, chatKey: next.chatKey ? '***' : '' } };

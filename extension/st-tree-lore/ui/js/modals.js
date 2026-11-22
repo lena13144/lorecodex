@@ -99,9 +99,18 @@ export async function openSettingsModal() {
           </div>
           <select id="cfgModelSelect" class="fld-sel" style="display:none;margin-top:6px;"></select>
         </div>
-        <div class="fld-group">
-          <label class="fld">默认启动书库</label>
-          <select id="cfgDefaultCorpus" class="fld-sel">${corpusOptions}</select>
+        <div class="fld-row-2">
+          <div class="fld-group">
+            <label class="fld">默认启动书库</label>
+            <select id="cfgDefaultCorpus" class="fld-sel">${corpusOptions}</select>
+          </div>
+          <div class="fld-group">
+            <label class="fld">思考强度 Reasoning Effort（默认不传）</label>
+            <select id="cfgReasoningEffort" class="fld-sel">
+              <option value="" ${!cfg.reasoningEffort ? 'selected' : ''}>沿用模型默认（不传）</option>
+              ${['minimal', 'low', 'medium', 'high'].map((v) => `<option value="${v}" ${cfg.reasoningEffort === v ? 'selected' : ''}>${v}</option>`).join('')}
+            </select>
+          </div>
         </div>
         <div class="fld-row-2">
           <div class="fld-group">
@@ -178,12 +187,14 @@ export async function openSettingsModal() {
         const rawMaxTokens = Number($('#cfgMaxTokens').value);
         const rawTempStr = $('#cfgTemperature').value.trim();
         const parsedTemp = rawTempStr === '' ? null : Number(rawTempStr);
+        const reVal = ($('#cfgReasoningEffort')?.value || '').trim().toLowerCase();
         const patch = {
           chatBase: $('#cfgBase').value.trim(),
           chatModel: $('#cfgModel').value.trim(),
           defaultCorpus: $('#cfgDefaultCorpus').value,
           maxTokens: Number.isFinite(rawMaxTokens) && rawMaxTokens > 0 ? Math.floor(rawMaxTokens) : null,
           temperature: parsedTemp !== null && Number.isFinite(parsedTemp) && parsedTemp >= 0 && parsedTemp <= 2 ? parsedTemp : null,
+          reasoningEffort: reVal || null,
         };
         const newKey = $('#cfgKey').value.trim();
         if (newKey) patch.chatKey = newKey;
