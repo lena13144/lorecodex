@@ -1056,3 +1056,404 @@ export function createBrowserTreeAgent(pack) {
         search,
     };
 }
+
+function mergeAliasGroupsInBrowser(existingGroups = [], newGroups = [], maxGroups = 60) {
+    const existingTermsLower = new Set();
+    const merged = [];
+
+    const absorb = (group, isNew = false) => {
+        if (!Array.isArray(group)) return;
+        const seenLocal = new Set();
+        const clean = [];
+        for (const raw of group) {
+            const term = String(raw || '').trim();
+            if (!term) continue;
+            const low = term.toLowerCase();
+            if (isNew && term.length < 2 && !existingTermsLower.has(low)) continue;
+            if (seenLocal.has(low)) continue;
+            seenLocal.add(low);
+            clean.push(term);
+        }
+        if (clean.length < 2) return;
+        if (!isNew) {
+            for (const t of clean) existingTermsLower.add(t.toLowerCase());
+        }
+        const cleanLower = new Set(clean.map((t) => t.toLowerCase()));
+        const hitIndices = [];
+        for (let idx = 0; idx < merged.length; idx++) {
+            if (merged[idx].some((t) => cleanLower.has(t.toLowerCase()))) {
+                hitIndices.push(idx);
+            }
+        }
+        if (!hitIndices.length) {
+            merged.push(clean);
+            return;
+        }
+        const primary = hitIndices[0];
+        const combined = [];
+        const combinedLower = new Set();
+        for (const idx of hitIndices) {
+            for (const t of merged[idx]) {
+                if (!combinedLower.has(t.toLowerCase())) {
+                    combinedLower.add(t.toLowerCase());
+                    combined.push(t);
+                }
+            }
+        }
+        for (const t of clean) {
+            if (!combinedLower.has(t.toLowerCase())) {
+                combinedLower.add(t.toLowerCase());
+                combined.push(t);
+            }
+        }
+        merged[primary] = combined;
+        for (let i = hitIndices.length - 1; i >= 1; i--) {
+            merged.splice(hitIndices[i], 1);
+        }
+    };
+
+    for (const g of existingGroups) absorb(g, false);
+    for (const g of newGroups) absorb(g, true);
+    return merged.slice(0, maxGroups);
+}
+
+function mergeGlossaryInBrowser(existingList = [], newList = [], maxItems = 35) {
+    const headOf = (item) => {
+        for (const sep of ['：', ':']) {
+            const pos = item.indexOf(sep);
+            if (pos > 0) {
+                const h = item.slice(0, pos).trim().toLowerCase();
+                if (h) return h;
+            }
+        }
+        return item.trim().toLowerCase();
+    };
+    const out = [];
+    const seenHeads = new Set();
+    const seenFull = new Set();
+    for (const raw of existingList) {
+        const item = String(raw || '').trim();
+        if (!item) continue;
+        const h = headOf(item);
+        const full = item.toLowerCase();
+        if (seenHeads.has(h) || seenFull.has(full)) continue;
+        seenHeads.add(h);
+        seenFull.add(full);
+        out.push(item);
+    }
+    for (const raw of newList) {
+        const item = String(raw || '').trim();
+        if (!item || item.length > 220) continue;
+        const h = headOf(item);
+        const full = item.toLowerCase();
+        if (seenHeads.has(h) || seenFull.has(full)) continue;
+        seenHeads.add(h);
+        seenFull.add(full);
+        out.push(item);
+        if (out.length >= maxItems) break;
+    }
+    return out.slice(0, maxItems);
+}
+
+function buildSeriesDigestInBrowser(serArcs, maxSamples = 80, maxChars = 6500) {
+    let sampled = serArcs;
+    if (serArcs.length > maxSamples) {
+        const idxs = new Set();
+        for (let i = 0; i < maxSamples; i++) {
+            idxs.add(Math.floor((i * (serArcs.length - 1)) / (maxSamples - 1)));
+        }
+        sampled = [...idxs].map((i) => serArcs[i]);
+    }
+    const lines = [];
+    let used = 0;
+    for (const a of sampled) {
+        const ordTag = a.order != null ? `第${a.order}章 ` : '';
+        const desc = String(a.description || '').replace(/\s+/g, ' ').trim().slice(0, 65);
+        const line = `- ${ordTag}${a.title || ''}: ${desc}`;
+        if (used + line.length + 1 > maxChars && lines.length) break;
+        lines.push(line);
+        used += line.length + 1;
+    }
+    const freq = new Map();
+    for (const a of serArcs) {
+        for (const ch of a.characters || []) {
+            const cs = String(ch || '').trim();
+            if (cs) freq.set(cs, (freq.get(cs) || 0) + 1);
+        }
+    }
+    const topChars = [...freq.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 20)
+        .map((x) => x[0]);
+    return { digestText: lines.join('\n'), topChars };
+}
+
+async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
+    const cleanBase = String(apiCfg.chatBase || '')
+        .trim()
+        .replace(/\/+$/, '')
+        .replace(/\/(?:chat\/completions|models)$/i, '')
+        .replace(/\/+$/, '');
+    const model = String(apiCfg.chatModel || 'deepseek-chat').trim();
+    const mt = Number(apiCfg.maxTokens);
+    let lastErr = null;
+
+    for (let attempt = 0; attempt < retries; attempt++) {
+        if (signal?.aborted) throw new Error('用户已暂停/终止 LLM 建库');
+        const body = {
+            model,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.1,
+        };
+        if (Number.isFinite(mt) && mt > 0) body.max_tokens = Math.floor(mt);
+        try {
+            const resp = await fetch(`${cleanBase}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${apiCfg.chatKey}`,
+                },
+                body: JSON.stringify(body),
+                signal,
+            });
+            if (!resp.ok) {
+                const errTxt = await resp.text().catch(() => '');
+                throw new Error(`HTTP ${resp.status}: ${errTxt.slice(0, 140)}`);
+            }
+            const data = await resp.json();
+            const txt = data?.choices?.[0]?.message?.content || '';
+            const parsed = extractJsonObject(txt);
+            if (!parsed || typeof parsed !== 'object') {
+                throw new Error('LLM 未返回有效 JSON');
+            }
+            return parsed;
+        } catch (err) {
+            if (signal?.aborted) throw new Error('用户已暂停/终止 LLM 建库');
+            lastErr = err;
+            if (attempt + 1 < retries) {
+                await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+            }
+        }
+    }
+    throw lastErr || new Error('LLM 请求失败');
+}
+
+/**
+ * In-Browser LLM Corpus Directory Builder & In-Place Upgrader (100% parity with build_novel.py --upgrade)
+ * Supports concurrent scene/arc summarization, single-scene reuse optimization, series summary + aliases +
+ * glossary synthesis, and automatic checkpoint persistence via onSave(pack).
+ */
+export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
+    if (!apiCfg?.chatBase || !apiCfg?.chatKey) {
+        throw new Error('请先在下方「旁路推理 Agent 模型配置」填写 API Base URL 与 API Key');
+    }
+    const bookName = pack.config?.name || pack.indexData?.corpus_name || pack.id;
+    const seriesFilter = String(opts.series || '').trim();
+    const limitArcs = Number(opts.limitArcs) > 0 ? Math.floor(Number(opts.limitArcs)) : 0;
+    const workers = Math.min(Math.max(Number(opts.workers) || 4, 1), 16);
+    const force = Boolean(opts.force);
+    const signal = opts.signal || null;
+    const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : () => {};
+    const onSave = typeof opts.onSave === 'function' ? opts.onSave : null;
+
+    const allArcs = pack.indexData?.arcs || [];
+    const textsData = pack.textsData || {};
+    let targetArcs = allArcs.filter((a) => !seriesFilter || String(a.series || a.category || '').trim() === seriesFilter);
+    if (!force) {
+        targetArcs = targetArcs.filter((a) => !a._llm_done);
+    }
+    if (limitArcs > 0) {
+        targetArcs = targetArcs.slice(0, limitArcs);
+    }
+
+    const totalTargetArcs = targetArcs.length;
+    if (!totalTargetArcs) {
+        return {
+            upgradedArcs: 0,
+            upgradedScenes: 0,
+            synthesizedSeries: 0,
+            message: '所选范围内的章节均已完成 LLM 目录构建（如需重跑请勾选强制重跑）',
+        };
+    }
+
+    let completedArcs = 0;
+    let upgradedScenes = 0;
+    let unsavedCounter = 0;
+
+    const persistStatsAndCheckpoint = async (forceSave = false) => {
+        let llmScenesCount = 0;
+        let llmArcsCount = 0;
+        for (const a of allArcs) {
+            if (a._llm_done) llmArcsCount += 1;
+            for (const sc of a.scenes || []) {
+                if (sc._llm_done) llmScenesCount += 1;
+            }
+        }
+        pack.indexData.stats = {
+            ...(pack.indexData.stats || {}),
+            arcs: allArcs.length,
+            scenes: allArcs.reduce((acc, x) => acc + (x.scenes || []).length, 0),
+            llm_arcs: llmArcsCount,
+            llm_scenes: llmScenesCount,
+        };
+        if (onSave && (forceSave || unsavedCounter >= 4)) {
+            unsavedCounter = 0;
+            await onSave(pack);
+        }
+    };
+
+    const processSingleArc = async (arc) => {
+        if (signal?.aborted) throw new Error('用户已暂停/终止 LLM 建库');
+        const scenes = arc.scenes || [];
+        for (const sc of scenes) {
+            if (!force && sc._llm_done && sc.summary) continue;
+            const rawText = String(textsData[sc.node_id]?.text || '').slice(0, 5400);
+            if (!rawText.trim()) continue;
+            const leafPrompt =
+                `你是《${bookName}》文本目录索引员。请为下面这段完整场景生成检索索引（注意把人称代词消解为具体人名）：\n` +
+                `1. title: 6-14字场景标题，概括地点/人物或核心事件；\n` +
+                `2. summary: 2句话（70-130字），保留人名、化名/外号、专有名词、重要物品、数字和事件转折；\n` +
+                `3. characters: 本幕直接出场或被明确提及的关键人物数组（最多6人）；\n` +
+                `4. tone_tags: 从 [战斗/危机, 温情/日常, 心理/独白, 权谋/悬疑, 设定/档案, 叙事/剧情] 中选 1-2 个标签。\n` +
+                `只输出严格 JSON：{"title":"...","summary":"...","characters":[],"tone_tags":[]}\n\n` +
+                `所属篇章：${arc.series || ''} / ${arc.title}\n正文：\n${rawText}`;
+            const parsed = await callLlmJsonInBrowser(apiCfg, leafPrompt, signal);
+            sc.title = String(parsed.title || '').trim() || sc.title || `${arc.title}·片段`;
+            sc.summary = String(parsed.summary || '').trim() || sc.summary;
+            sc.tone_tags = Array.isArray(parsed.tone_tags)
+                ? parsed.tone_tags.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 2)
+                : sc.tone_tags || ['叙事/剧情'];
+            sc._chars = Array.isArray(parsed.characters)
+                ? parsed.characters.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 6)
+                : [];
+            sc._llm_done = true;
+            upgradedScenes += 1;
+        }
+
+        if (scenes.length === 1) {
+            const sc = scenes[0];
+            arc.description = sc.summary || arc.description;
+            if (sc._chars?.length) arc.characters = sc._chars.slice(0, 8);
+            arc.tone_tags = (sc.tone_tags || ['叙事/剧情']).slice(0, 2);
+            arc.key_items = sc.title ? [sc.title] : [];
+            arc._llm_done = true;
+        } else if (scenes.length > 1) {
+            const scLines = scenes
+                .slice(0, 25)
+                .map((s) => `- [${s.node_id}] ${s.title}: ${s.summary}`)
+                .join('\n');
+            const arcPrompt =
+                `根据《${bookName}》篇章的子场景摘要提炼篇章总目信息：\n` +
+                `1. description: 1-2句话（50-100字）概括全章核心人物与事件；\n` +
+                `2. characters: 核心出场人物数组（最多8人）；\n` +
+                `3. tone_tags: 1-2个氛围标签。\n` +
+                `只输出 JSON：{"description":"...","characters":[],"tone_tags":[]}\n\n` +
+                `篇章：${arc.series || ''} / ${arc.title}\n子场景：\n${scLines}`;
+            const parsedArc = await callLlmJsonInBrowser(apiCfg, arcPrompt, signal);
+            arc.description = String(parsedArc.description || '').trim() || arc.description;
+            const chars = Array.isArray(parsedArc.characters)
+                ? parsedArc.characters.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 8)
+                : [];
+            if (chars.length) arc.characters = chars;
+            arc.tone_tags = Array.isArray(parsedArc.tone_tags)
+                ? parsedArc.tone_tags.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 2)
+                : arc.tone_tags || ['叙事/剧情'];
+            arc.key_items = scenes
+                .slice(0, 8)
+                .map((s) => s.title)
+                .filter(Boolean);
+            arc._llm_done = true;
+        }
+
+        for (const sc of scenes) delete sc._chars;
+        completedArcs += 1;
+        unsavedCounter += 1;
+        await persistStatsAndCheckpoint(false);
+        onProgress({
+            phase: 'arcs',
+            done: completedArcs,
+            total: totalTargetArcs,
+            arcTitle: arc.title,
+            series: arc.series || '',
+        });
+    };
+
+    // Concurrent worker pool for targetArcs
+    let cursor = 0;
+    const workerLoops = Array.from({ length: Math.min(workers, totalTargetArcs) }, async () => {
+        while (cursor < totalTargetArcs) {
+            if (signal?.aborted) break;
+            const idx = cursor++;
+            const arc = targetArcs[idx];
+            await processSingleArc(arc);
+        }
+    });
+    await Promise.all(workerLoops);
+    await persistStatsAndCheckpoint(true);
+
+    // Phase 2: Series summary + character aliases + glossary synthesis per touched series
+    const groupedSeries = new Map();
+    for (const a of targetArcs) {
+        if (!a._llm_done) continue;
+        const serName = String(a.series || a.category || '正文卷').trim();
+        if (!groupedSeries.has(serName)) groupedSeries.set(serName, []);
+        groupedSeries.get(serName).push(a);
+    }
+
+    pack.indexData.series_summaries = pack.indexData.series_summaries || {};
+    let synthesizedSeries = 0;
+    const extractedAliases = [];
+    const extractedGlossary = [];
+
+    for (const [serName] of groupedSeries.entries()) {
+        if (signal?.aborted) break;
+        const fullSerArcs = allArcs.filter((a) => String(a.series || a.category || '正文卷').trim() === serName);
+        const { digestText, topChars } = buildSeriesDigestInBrowser(fullSerArcs);
+        onProgress({
+            phase: 'series_meta',
+            done: completedArcs,
+            total: totalTargetArcs,
+            series: serName,
+        });
+        const metaPrompt =
+            `你是《${bookName}》文本资料库总编。请根据以下「${serName}」的章节脉络与高频人物表，提炼全卷级检索元数据：\n` +
+            `1. series_summary: 60-120字精炼概括本卷主线剧情、核心舞台与关键转折；\n` +
+            `2. aliases: 同一人物/实体的本名、化名、外号、简称对照二维数组（每组至少2项，严禁把不同人混为一组，最多25组）；\n` +
+            `3. glossary: 本卷重要势力、组织、能力体系、核心地点或器物速查数组（每条“名称：一句话说明”，最多15条）。\n` +
+            `只输出严格 JSON：{"series_summary":"60-120字概括本卷主线、核心舞台与转折","aliases":[["正式名","化名/外号/简称"]],"glossary":["重要势力/序列/组织/地点：一句话说明"]}\n\n` +
+            `高频人物：${topChars.length ? topChars.join(', ') : '（暂无）'}\n` +
+            `章节脉络（共 ${fullSerArcs.length} 章）：\n${digestText}`;
+        try {
+            const parsedMeta = await callLlmJsonInBrowser(apiCfg, metaPrompt, signal);
+            const serSum = String(parsedMeta.series_summary || '').trim();
+            if (serSum) {
+                pack.indexData.series_summaries[serName] = serSum;
+                synthesizedSeries += 1;
+            }
+            if (Array.isArray(parsedMeta.aliases)) {
+                extractedAliases.push(...parsedMeta.aliases);
+            }
+            if (Array.isArray(parsedMeta.glossary)) {
+                extractedGlossary.push(...parsedMeta.glossary);
+            }
+        } catch (_) {
+            // Non-fatal if series meta synthesis fails on a single volume
+        }
+    }
+
+    if (extractedAliases.length) {
+        pack.config.aliases = mergeAliasGroupsInBrowser(pack.config.aliases || [], extractedAliases);
+    }
+    if (extractedGlossary.length) {
+        pack.config.glossary = mergeGlossaryInBrowser(pack.config.glossary || [], extractedGlossary);
+    }
+    await persistStatsAndCheckpoint(true);
+
+    return {
+        upgradedArcs: completedArcs,
+        upgradedScenes,
+        synthesizedSeries,
+        aliasesCount: (pack.config.aliases || []).length,
+        glossaryCount: (pack.config.glossary || []).length,
+    };
+}

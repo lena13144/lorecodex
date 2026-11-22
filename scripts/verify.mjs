@@ -507,6 +507,76 @@ async function testMcpAndBrowserEngine() {
   assert.strictEqual(builtNovelPack.indexData.arcs.length, 2, 'In-Browser novel builder should parse 2 chapters');
   assert.strictEqual(builtNovelPack.indexData.arcs[0].series, '第一卷 星港篇');
 
+  // Test In-Browser LLM Corpus Directory Upgrader (upgradeBrowserCorpusWithLLM)
+  const browserMockSrv = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url.endsWith('/chat/completions')) {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        assert.strictEqual(body.max_tokens, undefined, 'In-Browser LLM upgrader must omit max_tokens by default');
+        const prompt = String(body?.messages?.[0]?.content || '');
+        let replyObj;
+        if (prompt.includes('series_summary')) {
+          replyObj = {
+            series_summary: '第一卷星港篇总览：苏璃与林夜捕获Zero-7异常脉冲。',
+            aliases: [['苏璃', 'Zero-7', '璃姐']],
+            glossary: ['灰烬星港：边境深空雷达观测站'],
+          };
+        } else {
+          replyObj = {
+            title: '捕获Zero-7脉冲',
+            summary: '苏璃（Zero-7）在灰烬星港雷达室捕获异常信号，林夜记录第二段脉冲。',
+            characters: ['苏璃', '林夜'],
+            tone_tags: ['叙事/剧情'],
+          };
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(replyObj) } }] }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end('{}');
+  });
+  await new Promise((r) => browserMockSrv.listen(0, '127.0.0.1', r));
+  try {
+    const bPort = browserMockSrv.address().port;
+    let savedSnapshots = 0;
+    const upgRes = await browserMod.upgradeBrowserCorpusWithLLM(
+      builtNovelPack,
+      { chatBase: `http://127.0.0.1:${bPort}/v1`, chatKey: 'mock-key', chatModel: 'mock-model' },
+      {
+        workers: 2,
+        onSave: async () => {
+          savedSnapshots += 1;
+        },
+      }
+    );
+    assert.strictEqual(upgRes.upgradedArcs, 2, 'In-Browser LLM upgrader must upgrade both chapters');
+    assert.strictEqual(upgRes.synthesizedSeries, 1, 'In-Browser LLM upgrader must synthesize series summary');
+    assert(savedSnapshots >= 1, 'In-Browser LLM upgrader must checkpoint via onSave');
+    assert(
+      builtNovelPack.indexData.series_summaries['第一卷 星港篇'].includes('Zero-7'),
+      'In-Browser series summary stored'
+    );
+    assert(
+      builtNovelPack.config.aliases.some((g) => g.includes('苏璃') && g.includes('璃姐')),
+      'In-Browser aliases synthesized and merged'
+    );
+    assert(builtNovelPack.config.glossary.some((g) => g.includes('灰烬星港')), 'In-Browser glossary synthesized');
+
+    // Second run without force must skip already upgraded chapters (checkpoint resume)
+    const resumeRes = await browserMod.upgradeBrowserCorpusWithLLM(builtNovelPack, {
+      chatBase: `http://127.0.0.1:${bPort}/v1`,
+      chatKey: 'mock-key',
+      chatModel: 'mock-model',
+    });
+    assert.strictEqual(resumeRes.upgradedArcs, 0, 'Resume run must skip already completed chapters');
+  } finally {
+    browserMockSrv.close();
+  }
+
   // 2. Test src/mcp_server.js over stdio JSON-RPC 2.0
   const mcpProc = spawn('node', [path.join(ROOT, 'src', 'mcp_server.js'), '--corpora-dir', path.join(ROOT, 'corpora')], {
     cwd: ROOT,

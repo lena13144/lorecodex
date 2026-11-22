@@ -24,6 +24,7 @@ const [
         buildNovelCorpusInBrowser,
         buildLoreCorpusInBrowser,
         createBrowserTreeAgent,
+        upgradeBrowserCorpusWithLLM,
     },
 ] = await Promise.all([
     import(new URL('script.js', stRootUrl).href),
@@ -738,17 +739,43 @@ jQuery(async () => {
         }
     };
 
+    const renderLocalSeriesOptions = () => {
+        const sel = $('#lorecodex_local_upg_series').empty();
+        const pack = localPacksMap.get(cfg.corpus);
+        if (!pack) {
+            sel.append('<option value="">（请先选择或导入一个内置书库）</option>');
+            return;
+        }
+        const arcs = pack.indexData?.arcs || [];
+        const totalDone = arcs.filter((a) => a._llm_done).length;
+        sel.append(`<option value="">全部章节 (${totalDone}/${arcs.length} 章已构建 LLM 目录)</option>`);
+        const seriesMap = new Map();
+        for (const a of arcs) {
+            const sk = String(a.series || a.category || '默认分卷').trim();
+            if (!seriesMap.has(sk)) seriesMap.set(sk, { total: 0, done: 0 });
+            const st = seriesMap.get(sk);
+            st.total += 1;
+            if (a._llm_done) st.done += 1;
+        }
+        for (const [sk, st] of seriesMap.entries()) {
+            sel.append(`<option value="${escHtml(sk)}">${escHtml(sk)} (${st.done}/${st.total} 章已构建)</option>`);
+        }
+    };
+
     const renderCorpusDropdown = () => {
         const sel = $('#lorecodex_corpus').empty();
         const entries = [...corporaMap.values()];
         if (!entries.length) {
             sel.append(`<option value="${escHtml(cfg.corpus || '')}">${escHtml(cfg.corpus || '（请连接服务端或在下方导入内置书库）')}</option>`);
+            renderLocalSeriesOptions();
             return;
         }
         for (const c of entries) {
-            sel.append(`<option value="${escHtml(c.id)}">${escHtml(c.name)} (${c.stats?.arcs || 0}卷 / ${c.stats?.scenes || 0}幕)</option>`);
+            const llmTag = c.stats?.llm_arcs ? ` · LLM:${c.stats.llm_arcs}章` : '';
+            sel.append(`<option value="${escHtml(c.id)}">${escHtml(c.name)} (${c.stats?.arcs || 0}卷 / ${c.stats?.scenes || 0}幕${llmTag})</option>`);
         }
         if (cfg.corpus && corporaMap.has(cfg.corpus)) sel.val(cfg.corpus);
+        renderLocalSeriesOptions();
     };
 
     const updateBindingLabel = () => {
@@ -957,13 +984,13 @@ jQuery(async () => {
             </div>
 
             <details class="lorecodex-card">
-                <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">TauriTavern / 手机免服务端内置书库 (IndexedDB 纯前端引擎)</summary>
+                <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">TauriTavern / 手机免服务端内置书库 (IndexedDB 纯前端引擎 + LLM 建库)</summary>
                 <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
                     <label class="checkbox_label">
                         <input id="lorecodex_local_mode" type="checkbox" ${cfg.localMode ? 'checked' : ''} />
                         <span><b>启用纯前端免服务端模式（无需运行 Node.js / Termux 后台）</b></span>
                     </label>
-                    <div class="lorecodex-muted">可直接选择小说 (.txt / .md)、世界书/V2角色卡 (.json) 或导出的单文件书库包 (.lorepack.json)，在浏览器 IndexedDB 内秒级建树并由内置 Agent 检索。</div>
+                    <div class="lorecodex-muted">可直接选择小说 (.txt / .md)、世界书/V2角色卡 (.json) 或单文件书库包 (.lorepack.json) 存入浏览器 IndexedDB。<b>注意：三层树检索依赖高质量 LLM 目录摘要与人物别名表，导入原始小说后请执行下方「LLM 智能目录构建」（支持按卷构建与断点续传）。</b></div>
                     <input id="lorecodex_local_file" class="text_pole" type="file" accept=".txt,.md,.json" />
                     <div class="lorecodex-row">
                         <div style="flex:1;">
@@ -975,10 +1002,37 @@ jQuery(async () => {
                             <input id="lorecodex_local_name" class="text_pole" type="text" placeholder="例如：才不是魔女" />
                         </div>
                     </div>
+                    <label class="checkbox_label">
+                        <input id="lorecodex_local_auto_llm" type="checkbox" checked />
+                        <span>导入后立即启动 LLM 智能目录构建（自动生成分幕摘要、卷总览、人物别名与术语表）</span>
+                    </label>
                     <div class="lorecodex-row">
                         <button id="lorecodex_local_import_btn" type="button" class="menu_button" style="flex:2;">导入并建树到浏览器</button>
                         <button id="lorecodex_local_export_btn" type="button" class="menu_button" style="flex:1;">导出 .lorepack</button>
                         <button id="lorecodex_local_delete_btn" type="button" class="menu_button" style="width:auto;padding:4px 8px;">删除</button>
+                    </div>
+                    <div style="border-top:1px solid rgba(128,128,128,0.25);padding-top:6px;margin-top:2px;display:flex;flex-direction:column;gap:6px;">
+                        <div style="font-weight:bold;font-size:0.84em;">当前内置书库 LLM 目录构建 / 原地补全（支持 IndexedDB 断点续传）</div>
+                        <div class="lorecodex-row">
+                            <div style="flex:2;min-width:140px;">
+                                <small>目标分卷（推荐按卷逐卷构建）：</small>
+                                <select id="lorecodex_local_upg_series" class="text_pole">
+                                    <option value="">全部未完成章节</option>
+                                </select>
+                            </div>
+                            <div style="flex:1;min-width:70px;">
+                                <small>并发数：</small>
+                                <input id="lorecodex_local_upg_workers" class="text_pole" type="number" min="1" max="12" value="4" />
+                            </div>
+                            <div style="flex:1;min-width:80px;" title="0 = 所选分卷全部章节">
+                                <small>本批章数(0全卷)：</small>
+                                <input id="lorecodex_local_upg_limit" class="text_pole" type="number" min="0" value="0" />
+                            </div>
+                        </div>
+                        <div class="lorecodex-row">
+                            <button id="lorecodex_local_upg_btn" type="button" class="menu_button" style="flex:2;">开始 / 继续 LLM 目录构建</button>
+                            <button id="lorecodex_local_upg_stop_btn" type="button" class="menu_button" style="flex:1;display:none;">暂停并保存进度</button>
+                        </div>
                     </div>
                     <div id="lorecodex_local_status" class="lorecodex-status"></div>
                 </div>
@@ -1087,6 +1141,84 @@ jQuery(async () => {
         if (!$('#lorecodex_local_name').val().trim()) $('#lorecodex_local_name').val(stem);
     });
 
+    let localUpgAbortCtrl = null;
+
+    const runLocalLlmUpgrade = async (targetCorpusId) => {
+        const st = $('#lorecodex_local_status');
+        const pack = localPacksMap.get(targetCorpusId);
+        if (!pack) {
+            st.text(`内置书库 "${targetCorpusId}" 不存在（请先导入或选中一个内置书库）`);
+            return;
+        }
+        const apiCfg = buildApiConfig(cfg);
+        if (!apiCfg.chatBase || !apiCfg.chatKey) {
+            st.text('请先在下方「旁路推理 Agent 模型配置」填写 API Base URL 与 API Key 后再启动 LLM 目录构建');
+            if (typeof toastr !== 'undefined') toastr.warning('请先填写旁路推理 API Base URL 与 API Key');
+            return;
+        }
+        if (localUpgAbortCtrl) {
+            st.text('LLM 目录构建正在进行中...');
+            return;
+        }
+        const series = String($('#lorecodex_local_upg_series').val() || '').trim();
+        const workers = Math.min(Math.max(Number($('#lorecodex_local_upg_workers').val()) || 4, 1), 12);
+        const limitArcs = Math.max(0, Number($('#lorecodex_local_upg_limit').val()) || 0);
+
+        localUpgAbortCtrl = new AbortController();
+        $('#lorecodex_local_upg_btn').prop('disabled', true);
+        $('#lorecodex_local_upg_stop_btn').show();
+        st.text(`正在启动「${pack.config.name}」LLM 目录构建 (并发=${workers}${series ? `, 分卷=${series}` : ''})...`);
+
+        try {
+            const res = await upgradeBrowserCorpusWithLLM(pack, apiCfg, {
+                series,
+                workers,
+                limitArcs,
+                signal: localUpgAbortCtrl.signal,
+                onProgress(prog) {
+                    if (prog.phase === 'series_meta') {
+                        st.text(`正在提炼「${prog.series}」全卷大纲、人物别名对照表与专有术语...`);
+                    } else {
+                        st.text(`LLM 目录构建中：已完成 ${prog.done}/${prog.total} 章 (${prog.series ? prog.series + ' · ' : ''}${prog.arcTitle}) [进度已实时写入 IndexedDB]`);
+                    }
+                },
+                async onSave(updatedPack) {
+                    await idbSaveCorpus(updatedPack);
+                    localAgentsCache.delete(updatedPack.id);
+                },
+            });
+            await idbSaveCorpus(pack);
+            localAgentsCache.delete(pack.id);
+            const ok = await fetchCorporaAndHealth(cfg);
+            renderConnStatus(ok);
+            renderCorpusDropdown();
+            if (res.message) {
+                st.text(res.message);
+            } else {
+                const msg = `LLM 目录构建完成：升级 ${res.upgradedArcs} 章 / ${res.upgradedScenes} 幕，合成 ${res.synthesizedSeries} 卷总览，累计 ${res.aliasesCount} 组人物别名、${res.glossaryCount} 条术语`;
+                st.text(msg);
+                if (typeof toastr !== 'undefined') toastr.success(msg);
+            }
+        } catch (err) {
+            await idbSaveCorpus(pack).catch(() => {});
+            localAgentsCache.delete(pack.id);
+            await fetchCorporaAndHealth(cfg);
+            renderCorpusDropdown();
+            const errMsg = err?.message || String(err);
+            st.text(`LLM 构建已中断（已完成章节均已保存在 IndexedDB，可随时点击继续）: ${errMsg}`);
+            if (typeof toastr !== 'undefined') toastr.info(`LLM 构建已暂停/中断: ${errMsg}`);
+        } finally {
+            localUpgAbortCtrl = null;
+            $('#lorecodex_local_upg_btn').prop('disabled', false);
+            $('#lorecodex_local_upg_stop_btn').hide();
+        }
+    };
+
+    $('#lorecodex_local_upg_btn').on('click', () => runLocalLlmUpgrade(cfg.corpus));
+    $('#lorecodex_local_upg_stop_btn').on('click', () => {
+        if (localUpgAbortCtrl) localUpgAbortCtrl.abort();
+    });
+
     $('#lorecodex_local_import_btn').on('click', async () => {
         const fileEl = $('#lorecodex_local_file')[0];
         const file = fileEl?.files?.[0];
@@ -1097,10 +1229,12 @@ jQuery(async () => {
         }
         const cid = ($('#lorecodex_local_id').val().trim() || 'local-book').replace(/[^a-zA-Z0-9_-]/g, '-');
         const cName = $('#lorecodex_local_name').val().trim() || cid;
-        st.text(`正在浏览器内读取并构建「${cName}」...`);
+        const autoLlm = $('#lorecodex_local_auto_llm').prop('checked');
+        st.text(`正在浏览器内读取并切分「${cName}」...`);
         try {
             const text = await file.text();
             const isJson = file.name.toLowerCase().endsWith('.json');
+            const isLorepack = file.name.toLowerCase().endsWith('.lorepack.json');
             const pack = isJson
                 ? buildLoreCorpusInBrowser({
                       rawJson: text,
@@ -1121,7 +1255,16 @@ jQuery(async () => {
             renderCorpusDropdown();
             const stats = pack.indexData?.stats || {};
             st.text(`已存入浏览器 IndexedDB：${pack.config.name} (${stats.arcs || 0}卷 / ${stats.scenes || 0}幕 / ${(stats.total_chars || 0).toLocaleString()}字)`);
-            if (typeof toastr !== 'undefined') toastr.success(`本地书库「${pack.config.name}」构建完成`);
+            if (typeof toastr !== 'undefined') toastr.success(`本地书库「${pack.config.name}」切分入库完成`);
+
+            if (autoLlm && !isLorepack) {
+                const apiCfg = buildApiConfig(cfg);
+                if (apiCfg.chatBase && apiCfg.chatKey) {
+                    await runLocalLlmUpgrade(pack.id);
+                } else {
+                    st.text(`已切分入库 (${stats.arcs || 0}章)。请先在下方填写旁路 API Base URL 与 API Key，再点击「开始 / 继续 LLM 目录构建」补全目录摘要与别名表。`);
+                }
+            }
         } catch (err) {
             st.text('本地建树失败: ' + (err?.message || err));
             if (typeof toastr !== 'undefined') toastr.error('本地建树失败: ' + (err?.message || err));
@@ -1166,7 +1309,11 @@ jQuery(async () => {
         st.text(`已从浏览器 IndexedDB 删除本地书库 "${cid}"`);
     });
     bind('#lorecodex_server', 'ragServer');
-    bind('#lorecodex_corpus', 'corpus');
+    $('#lorecodex_corpus').on('change input', function () {
+        cfg.corpus = $(this).val();
+        saveSettingsDebounced();
+        renderLocalSeriesOptions();
+    });
     bind('#lorecodex_max_order', 'maxOrder', el => normalizeMaxOrder(el.val()));
     bind('#lorecodex_max_scenes', 'maxScenes', el => normalizeMaxScenes(el.val()));
     bind('#lorecodex_recent_turns', 'recentTurns', el => Math.max(1, Number(el.val()) || 5));

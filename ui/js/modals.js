@@ -494,8 +494,8 @@ export function openImportModal() {
 
       <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-          <input id="impUseLlm" type="checkbox" />
-          <span>启用 LLM 并发摘要（取消则离线秒级启发式建树）</span>
+          <input id="impUseLlm" type="checkbox" checked />
+          <span><b>启用 LLM 智能目录构建</b>（自动生成分幕摘要、卷总览、人物别名对照表与术语表；数百万字大书可先取消勾选切好分卷，再在「语料配置 -> LLM 目录补全」按卷升级）</span>
         </label>
       </div>
 
