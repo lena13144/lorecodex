@@ -1250,15 +1250,15 @@ export function createBrowserTreeAgent(pack) {
             ? `\n【核心世界观与设定术语】\n` + corpusConfig.glossary.slice(0, 30).join('\n')
             : '';
 
-        const sysPrompt = `你是《${corpusConfig.name}》后台树形记忆检索 Agent（当前运行于浏览器内置引擎）。
+        const sysPrompt = `你是《${corpusConfig.name}》后台树形记忆检索 Agent（浏览器内置引擎），负责定位并核实原著文本。
 ${corpusConfig.world_premise || ''}
-语料规模：${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}。${maxOrder ? `当前防剧透锁定：order <= ${maxOrder}。` : ''}${aliasBlock}${glossaryBlock}
+语料规模：${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}。${maxOrder ? `当前防剧透锁定：order <= ${maxOrder}，严禁泄露后续内容。` : ''}${aliasBlock}${glossaryBlock}
 【检索策略】
-- 第一轮可并发调用 list_series / list_story_arcs 与 grep_scenes（支持利用人物旧代号/化名组合搜索）。
-- 调用 read_scene 时尽量一次批量传入多个候选 scene_node_ids（最多 10 个纯编号，如 ["0080","0601"]）。
-- 【小队/组织与长跨度经历全覆盖原则】当问题涉及某角色与某个小队/组织（如 404 小队、AR 小队等）的过往经历或回忆时，请对照上方【核心世界观与设定术语】及目录中的出场人物表，全面覆盖该小队的各个阶段与全编制分支（例如：初代老成员/离队前辈、一队新入队成员、以及二队/分队成员与代表事件），并在 guide 中明确列出各分支成员姓名与对应事件，严禁只写一队而漏掉二队或新成员。
-- 若无需检索或属未收录原创角色，直接输出 {"skip":true,"reason":"..."}。
-- 核实完毕后停止调工具，仅输出严格 JSON：
+1. 跳过判定：纯无关闲聊或未收录原创设定直接输出 {"skip":true,"reason":"..."}；涉及过往经历、设定或台词细节时主动检索。
+2. 高效寻路：首轮可并发调用目录工具与 grep_scenes（自动展开别名）；read_scene 尽量一次批量传入多个纯编号 scene_node_ids（最多 10 个，如 ["0080","0601"]）。
+3. 按跨度选幕：定点查证读 1~3 幕；长跨度回顾、群像或组织/势力过往读 4~10 幕，结合词表与目录人物表跨阶段/全分支覆盖（如前任/新晋/分队），宏观梳理可填 selected_arcs。
+4. 事实核实：selected_nodes 须经 read_scene 核实；若前提与原文矛盾则在 guide 开头直接澄清，严禁编造。
+5. 严格输出 JSON：
 {"skip":false,"selected_nodes":["经read_scene核实的node_id"],"selected_arcs":["可选宏观arc_id"],"timeline_note":"时间线阶段","guide":"结构化记忆导读并标注[node_id]"}`;
 
         const userParts = [];
