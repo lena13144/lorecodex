@@ -834,7 +834,7 @@ jQuery(async () => {
             return;
         }
         const series = String($('#lorecodex_local_upg_series').val() || '').trim();
-        const workers = Math.min(Math.max(Number($('#lorecodex_local_upg_workers').val()) || 4, 1), 12);
+        const workers = Math.min(Math.max(Number($('#lorecodex_local_upg_workers').val()) || 8, 1), 24);
         const limitArcs = Math.max(0, Number($('#lorecodex_local_upg_limit').val()) || 0);
         const plan = estimateBrowserLlmUpgradePlan(pack, { series, workers, limitArcs });
         if (!plan.totalArcs) {
@@ -1274,7 +1274,7 @@ jQuery(async () => {
                                 </div>
                                 <div style="flex:1;min-width:70px;">
                                     <small>并发数：</small>
-                                    <input id="lorecodex_local_upg_workers" class="text_pole" type="number" min="1" max="12" value="4" />
+                                    <input id="lorecodex_local_upg_workers" class="text_pole" type="number" min="1" max="24" value="8" />
                                 </div>
                                 <div style="flex:1;min-width:80px;" title="0 = 所选分卷全部章节">
                                     <small>本批章数(0全卷)：</small>
@@ -1528,7 +1528,7 @@ jQuery(async () => {
             return;
         }
         const series = String($('#lorecodex_local_upg_series').val() || '').trim();
-        const workers = Math.min(Math.max(Number($('#lorecodex_local_upg_workers').val()) || 4, 1), 12);
+        const workers = Math.min(Math.max(Number($('#lorecodex_local_upg_workers').val()) || 8, 1), 24);
         const limitArcs = Math.max(0, Number($('#lorecodex_local_upg_limit').val()) || 0);
         const plan = estimateBrowserLlmUpgradePlan(pack, { series, workers, limitArcs });
 

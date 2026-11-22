@@ -371,7 +371,7 @@ export function cancelJob(jobId) {
   return true;
 }
 
-export async function previewLocalImportFile({ filename = 'upload.txt', buffer, kind = 'novel', corpusId = 'preview', name = '预览书库', category = '' }) {
+export async function previewLocalImportFile({ filename = 'upload.txt', buffer, kind = 'novel', corpusId = 'preview', name = '预览书库', category = '', workers = 8 }) {
   try {
     const be = await getBrowserEngine();
     const rawBytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
@@ -397,7 +397,8 @@ export async function previewLocalImportFile({ filename = 'upload.txt', buffer, 
           category: category || '正文',
         });
     const report = be.inspectCorpusStructure(pack);
-    const estimate = isJson ? null : be.estimateBrowserLlmUpgradePlan(pack, { workers: 4 });
+    const safeWorkers = Math.min(Math.max(Number(workers) || 8, 1), 24);
+    const estimate = isJson ? null : be.estimateBrowserLlmUpgradePlan(pack, { workers: safeWorkers });
     return { ok: true, report, estimate };
   } catch (e) {
     return { ok: false, error: e?.message || String(e) };
@@ -512,7 +513,7 @@ export async function importCorpus(payload) {
         } else {
           const apiCfg = await getLocalApiConfig(be);
           if (apiCfg.chatBase && apiCfg.chatKey) {
-            const workers = 4;
+            const workers = Math.min(Math.max(Number(payload.workers) || 8, 1), 24);
             const plan = be.estimateBrowserLlmUpgradePlan(pack, { workers });
             job.progress = {
               ...job.progress,
@@ -619,7 +620,7 @@ export async function upgradeCorpus(id, payload = {}) {
   const jobId = 'job_upg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
   const abortCtrl = new AbortController();
   localJobControllers.set(jobId, abortCtrl);
-  const workers = Math.min(Math.max(Number(payload.workers) || 4, 1), 16);
+  const workers = Math.min(Math.max(Number(payload.workers) || 8, 1), 24);
   const limitArcs = Number(payload.limitArcs) || 0;
   const force = Boolean(payload.force);
   const skipMeta = Boolean(payload.skipMeta);

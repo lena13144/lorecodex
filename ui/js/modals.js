@@ -45,7 +45,7 @@ function isArcDoneInIndex(arc, indexData) {
   return Boolean(String(arc.description || '').trim());
 }
 
-function estimateIndexUpgradePlan(indexData, { series = '', limitArcs = 0, workers = 4, force = false, skipMeta = false } = {}) {
+function estimateIndexUpgradePlan(indexData, { series = '', limitArcs = 0, workers = 8, force = false, skipMeta = false } = {}) {
   const allArcs = indexData?.arcs || [];
   const serFilter = String(series || '').trim();
   let targetArcs = allArcs.filter((a) => !serFilter || String(a.series || a.category || '').trim() === serFilter);
@@ -71,7 +71,8 @@ function estimateIndexUpgradePlan(indexData, { series = '', limitArcs = 0, worke
   const totalSeriesMeta = skipMeta ? 0 : touchedSeries.size;
   const phase1Calls = totalScenes + arcSummaryCalls;
   const totalCalls = phase1Calls + totalSeriesMeta;
-  const effectiveWorkers = Math.min(Math.max(Number(workers) || 4, 1), Math.max(1, targetArcs.length));
+  const parsedWorkers = Math.min(Math.max(Number(workers) || 8, 1), 24);
+  const effectiveWorkers = Math.min(parsedWorkers, Math.max(1, phase1Calls || targetArcs.length));
   const estMinMs = totalCalls > 0 ? Math.round((phase1Calls / effectiveWorkers + totalSeriesMeta) * 2500) : 0;
   const estMaxMs = totalCalls > 0 ? Math.round((phase1Calls / effectiveWorkers + totalSeriesMeta) * 8000) : 0;
   return {
@@ -613,10 +614,14 @@ export async function openCorpusModal() {
           <div class="pane-sub" id="ccUpgCoverage">
             当前 LLM 目录覆盖度：<b>${llmScenes}</b> / ${totalScenes} 幕（单幕章节自动复用幕级摘要，支持断点续传与分卷补全）
           </div>
+          <div class="fld-group">
+            <label class="fld">目标分卷范围</label>
+            <select id="ccUpgSeries" class="fld-sel">${seriesOptions}</select>
+          </div>
           <div class="fld-row-2">
             <div class="fld-group">
-              <label class="fld">目标分卷范围</label>
-              <select id="ccUpgSeries" class="fld-sel">${seriesOptions}</select>
+              <label class="fld">并发数（推荐 6~12）</label>
+              <input id="ccUpgWorkers" type="number" min="1" max="24" value="8" />
             </div>
             <div class="fld-group">
               <label class="fld">限量章数（0 = 所选范围全部）</label>
@@ -670,9 +675,11 @@ export async function openCorpusModal() {
     const updateUpgEstimate = () => {
       const estEl = $('#ccUpgEstimate');
       if (!estEl) return;
+      const workersVal = Math.min(Math.max(Number($('#ccUpgWorkers')?.value) || 8, 1), 24);
       const est = estimateIndexUpgradePlan(state.index, {
         series: $('#ccUpgSeries')?.value || '',
         limitArcs: Math.max(0, Number($('#ccUpgLimit')?.value) || 0),
+        workers: workersVal,
         force: Boolean($('#ccUpgForce')?.checked),
         skipMeta: !$('#ccUpgSynthMeta')?.checked,
       });
@@ -684,6 +691,7 @@ export async function openCorpusModal() {
     };
     updateUpgEstimate();
     $('#ccUpgSeries')?.addEventListener('change', updateUpgEstimate);
+    $('#ccUpgWorkers')?.addEventListener('input', updateUpgEstimate);
     $('#ccUpgLimit')?.addEventListener('input', updateUpgEstimate);
     $('#ccUpgSynthMeta')?.addEventListener('change', updateUpgEstimate);
     $('#ccUpgForce')?.addEventListener('change', updateUpgEstimate);
@@ -697,6 +705,7 @@ export async function openCorpusModal() {
       try {
         const res = await upgradeCorpus(c.id, {
           series: $('#ccUpgSeries').value,
+          workers: Math.min(Math.max(Number($('#ccUpgWorkers')?.value) || 8, 1), 24),
           limitArcs: Math.max(0, Number($('#ccUpgLimit').value) || 0),
           skipMeta: !$('#ccUpgSynthMeta').checked,
           force: $('#ccUpgForce').checked,
@@ -868,11 +877,15 @@ export function openImportModal() {
 
       <div id="impSplitPreviewWrap" class="split-preview-wrap" style="display:none;"></div>
 
-      <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;justify-content:space-between;font-size:12px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:220px;">
           <input id="impUseLlm" type="checkbox" checked />
           <span><b>启用 LLM 智能目录构建</b>（自动生成分幕摘要、卷总览、人物别名对照表与术语表；数百万字大书可先取消勾选切好分卷，再在「语料配置 -> LLM 目录补全」按卷升级）</span>
         </label>
+        <div class="fld-group" style="width:130px;flex-shrink:0;">
+          <label class="fld">LLM 建库并发数</label>
+          <input id="impWorkers" type="number" min="1" max="24" value="8" />
+        </div>
       </div>
 
       <div id="impJobWrap" style="display:none;flex-direction:column;gap:6px;">
@@ -931,6 +944,7 @@ export function openImportModal() {
         corpusId: $('#impCorpusId').value.trim() || 'preview',
         name: $('#impName').value.trim() || file.name,
         category: $('#impCategory').value.trim(),
+        workers: Math.min(Math.max(Number($('#impWorkers')?.value) || 8, 1), 24),
       });
       if (seq !== previewSeq) return;
       if (!res?.ok || !res.report) {
@@ -956,6 +970,9 @@ export function openImportModal() {
 
   $('#impKind').addEventListener('change', () => {
     updateModeUi();
+    if (selectedFile) runFileSplitPreview(selectedFile);
+  });
+  $('#impWorkers')?.addEventListener('input', () => {
     if (selectedFile) runFileSplitPreview(selectedFile);
   });
 
@@ -1046,6 +1063,7 @@ export function openImportModal() {
         category: $('#impCategory').value.trim(),
         mergeInto,
         useLlm: $('#impUseLlm').checked,
+        workers: Math.min(Math.max(Number($('#impWorkers')?.value) || 8, 1), 24),
         allowLlmOnAnomaly: userExplicitlyEnabledLlm,
         filterGameStats: $('#impFilterStats').checked,
       });

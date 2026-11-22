@@ -47,7 +47,7 @@ VOL_TEASER_EXCLUDE_RE = re.compile(r"敬请期待|·完$|完结|求订阅|求月
 CHAP_RE = re.compile(
     r"^(?:##\s+(.+)|"
     r"(?:【\s*)?(?:正文[\s　]*)?第([零〇一二三四五六七八九十百千万两\d]+)[章节回幕话](?:\s*】)?(?:[\s　:：\-—\.、]*[^\n]*)?|"
-    r"(?:序章|楔子|引子|终章|尾声|后记|番外[零〇一二三四五六七八九十两\d]*)(?:[\s　:：\-—:：].*)?|"
+    r"(?:序章|楔子|引子|终章|尾声|后记|外传|间章|幕间|番外)(?:[零〇一二三四五六七八九十两\d]*)(?:[\s　:：·•、\-—].*)?|"
     r"(?:Prologue|Epilogue|Interlude|Intermission|Chapter\s+(\d+)|Ch\.?\s*(\d+))(?:[:.\-\s]+.*)?)$",
     re.IGNORECASE,
 )
@@ -456,7 +456,7 @@ def parse_structure(lines, default_series_name="正文卷", book_name="", clean_
     return volumes
 
 
-def split_chapter_to_scenes(lines, min_chars=1800, target_chars=3400, max_chars=4800):
+def split_chapter_to_scenes(lines, min_chars=1800, target_chars=3600, max_chars=6500):
     segments = []
     cur_seg = []
     for l in lines:
@@ -471,6 +471,11 @@ def split_chapter_to_scenes(lines, min_chars=1800, target_chars=3400, max_chars=
             cur_seg.append(s)
     if cur_seg:
         segments.append(cur_seg)
+
+    if len(segments) == 1:
+        single_txt = "\n".join(segments[0]).strip()
+        if single_txt and len(single_txt) <= max_chars:
+            return [single_txt]
 
     scenes = []
     for seg in segments:
@@ -882,8 +887,8 @@ def main():
     parser.add_argument("--config", default="config.json", help="Config file with chatBase/chatKey/chatModel")
     parser.add_argument("--category", default="正文", help="Default category label (default: 正文)")
     parser.add_argument("--min-chars", type=int, default=1800)
-    parser.add_argument("--target-chars", type=int, default=3400)
-    parser.add_argument("--max-chars", type=int, default=4800)
+    parser.add_argument("--target-chars", type=int, default=3600)
+    parser.add_argument("--max-chars", type=int, default=6500)
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--no-llm", action="store_true", help="Build deterministically without calling LLM API")
     parser.add_argument("--no-clean-ads", action="store_true", help="Disable web-novel ad/watermark line stripping")
@@ -1090,7 +1095,7 @@ def main():
 
         def _run_leaf(item):
             a, sc, key = item
-            txt = texts_map[sc["node_id"]]["text"][:5400]
+            txt = texts_map[sc["node_id"]]["text"][:7000]
             prompt = (
                 f"你是《{args.name}》文本目录索引员。请为下面这段完整场景生成检索索引（注意把人称代词消解为具体人名）：\n"
                 "1. title: 6-14字场景标题，概括地点/人物或核心事件；\n"
