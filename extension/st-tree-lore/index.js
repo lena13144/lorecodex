@@ -33,6 +33,7 @@ const [
         upgradeBrowserCorpusWithLLM,
         estimateBrowserLlmUpgradePlan,
         inspectCorpusStructure,
+        acquireCorpusBuildLock,
         formatDurationZh,
     },
 ] = await Promise.all([
@@ -1547,6 +1548,15 @@ jQuery(async () => {
             return;
         }
 
+        const buildLock = acquireCorpusBuildLock(pack.id, '酒馆扩展抽屉');
+        if (!buildLock.ok) {
+            const holderOwner = buildLock.holder?.owner || '其他窗口';
+            const lockMsg = `书库「${pack.config.name}」正在「${holderOwner}」执行 LLM 构建，请勿重复启动`;
+            st.text(lockMsg);
+            if (typeof toastr !== 'undefined') toastr.warning(lockMsg);
+            return;
+        }
+
         localUpgAbortCtrl = new AbortController();
         const ctrl = localUpgAbortCtrl;
         $('#lorecodex_local_upg_btn').prop('disabled', true);
@@ -1647,6 +1657,7 @@ jQuery(async () => {
                 toastr.info(isPaused ? '已暂停 LLM 构建并保存断点' : `LLM 构建已暂停/中断: ${errMsg}`);
             }
         } finally {
+            buildLock.release();
             clearInterval(progTicker);
             localUpgAbortCtrl = null;
             $('#lorecodex_local_upg_btn').prop('disabled', false);

@@ -8,6 +8,7 @@ import {
   importCorpus,
   upgradeCorpus,
   cancelJob,
+  findRunningJobForCorpus,
   previewLocalImportFile,
   fetchJob,
   fetchCorpora,
@@ -696,9 +697,73 @@ export async function openCorpusModal() {
     $('#ccUpgSynthMeta')?.addEventListener('change', updateUpgEstimate);
     $('#ccUpgForce')?.addEventListener('change', updateUpgEstimate);
 
+    const upgBtn = $('#ccUpgStartBtn');
+    const stopBtn = $('#ccUpgStopBtn');
+
+    const refreshAfterUpg = async (isAborted = false) => {
+      const [listRes, freshDetail] = await Promise.all([
+        fetchCorpora(),
+        fetchCorpusDetail(c.id).catch(() => null),
+      ]);
+      state.corpora = listRes.corpora || [];
+      await actions.switchCorpus?.(c.id, { keepRun: true });
+      if (freshDetail?.config) {
+        const fc = freshDetail.config;
+        if ($('#ccAliases')) $('#ccAliases').value = (fc.aliases || []).map((g) => g.join(', ')).join('\n');
+        if ($('#ccGlossary')) $('#ccGlossary').value = (fc.glossary || []).join('\n');
+      }
+      const newLlm = state.index?.stats?.llm_scenes || 0;
+      const newTot = state.index?.stats?.scenes || totalScenes;
+      $('#ccUpgCoverage').innerHTML = isAborted
+        ? `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已暂停并保存断点，可随时点击「开始原地补全 LLM 目录」续传）`
+        : `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已完成本轮补全并重载，新增别名与设定已同步至左侧标签页）`;
+      updateUpgEstimate();
+    };
+
+    const attachUpgJob = (jobObj, reused = false) => {
+      upgBtn.disabled = true;
+      $('#ccUpgJobWrap').style.display = 'flex';
+      if (reused) {
+        $('#ccUpgJobStatus').textContent = '已接管正在后台进行的 LLM 目录构建任务...';
+      }
+      startModalJobPoll({
+        jobId: jobObj.id,
+        initialJob: jobObj,
+        progPrefix: 'ccUpg',
+        logsEl: $('#ccUpgJobLogs'),
+        statusEl: $('#ccUpgJobStatus'),
+        stopBtnEl: stopBtn,
+        runningText: (job) => {
+          const p = job?.progress;
+          if (p && p.totalCalls > 0) {
+            const etaStr = p.etaMs !== null && p.etaMs !== undefined ? ` · 剩余约 ${formatDurationZh(p.etaMs)}` : '';
+            return `正在执行 LLM 目录补全（${p.percent}%${etaStr}，可切回主页面或随时暂停）`;
+          }
+          return '正在执行 LLM 目录补全（可切回主页面或稍候）...';
+        },
+        onDone: async (job) => {
+          $('#ccUpgJobStatus').textContent = `补全完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！正在热重载书库索引...`;
+          await refreshAfterUpg(false);
+          showToast(`书库「${c.id}」LLM 目录补全完成！`, 'ok');
+          upgBtn.disabled = false;
+        },
+        onAborted: async () => {
+          await refreshAfterUpg(true);
+          showToast('已暂停 LLM 补全并保存断点', 'ok');
+          upgBtn.disabled = false;
+        },
+        onError: () => {
+          upgBtn.disabled = false;
+        },
+      });
+    };
+
+    const existingActiveJob = findRunningJobForCorpus(c.id);
+    if (existingActiveJob) {
+      attachUpgJob(existingActiveJob, true);
+    }
+
     $('#ccUpgStartBtn')?.addEventListener('click', async () => {
-      const upgBtn = $('#ccUpgStartBtn');
-      const stopBtn = $('#ccUpgStopBtn');
       upgBtn.disabled = true;
       $('#ccUpgJobWrap').style.display = 'flex';
       $('#ccUpgJobStatus').textContent = '正在提交 LLM 目录补全任务...';
@@ -710,56 +775,7 @@ export async function openCorpusModal() {
           skipMeta: !$('#ccUpgSynthMeta').checked,
           force: $('#ccUpgForce').checked,
         });
-        const refreshAfterUpg = async (isAborted = false) => {
-          const [listRes, freshDetail] = await Promise.all([
-            fetchCorpora(),
-            fetchCorpusDetail(c.id).catch(() => null),
-          ]);
-          state.corpora = listRes.corpora || [];
-          await actions.switchCorpus?.(c.id, { keepRun: true });
-          if (freshDetail?.config) {
-            const fc = freshDetail.config;
-            if ($('#ccAliases')) $('#ccAliases').value = (fc.aliases || []).map((g) => g.join(', ')).join('\n');
-            if ($('#ccGlossary')) $('#ccGlossary').value = (fc.glossary || []).join('\n');
-          }
-          const newLlm = state.index?.stats?.llm_scenes || 0;
-          const newTot = state.index?.stats?.scenes || totalScenes;
-          $('#ccUpgCoverage').innerHTML = isAborted
-            ? `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已暂停并保存断点，可随时点击「开始原地补全 LLM 目录」续传）`
-            : `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已完成本轮补全并重载，新增别名与设定已同步至左侧标签页）`;
-          updateUpgEstimate();
-        };
-
-        startModalJobPoll({
-          jobId: res.job.id,
-          initialJob: res.job,
-          progPrefix: 'ccUpg',
-          logsEl: $('#ccUpgJobLogs'),
-          statusEl: $('#ccUpgJobStatus'),
-          stopBtnEl: stopBtn,
-          runningText: (job) => {
-            const p = job?.progress;
-            if (p && p.totalCalls > 0) {
-              const etaStr = p.etaMs !== null && p.etaMs !== undefined ? ` · 剩余约 ${formatDurationZh(p.etaMs)}` : '';
-              return `正在执行 LLM 目录补全（${p.percent}%${etaStr}，可切回主页面或随时暂停）`;
-            }
-            return '正在执行 LLM 目录补全（可切回主页面或稍候）...';
-          },
-          onDone: async (job) => {
-            $('#ccUpgJobStatus').textContent = `补全完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！正在热重载书库索引...`;
-            await refreshAfterUpg(false);
-            showToast(`书库「${c.id}」LLM 目录补全完成！`, 'ok');
-            upgBtn.disabled = false;
-          },
-          onAborted: async () => {
-            await refreshAfterUpg(true);
-            showToast('已暂停 LLM 补全并保存断点', 'ok');
-            upgBtn.disabled = false;
-          },
-          onError: () => {
-            upgBtn.disabled = false;
-          },
-        });
+        attachUpgJob(res.job, Boolean(res.reused));
       } catch (e) {
         $('#ccUpgJobStatus').textContent = '提交失败: ' + e.message;
         upgBtn.disabled = false;

@@ -371,6 +371,17 @@ export function cancelJob(jobId) {
   return true;
 }
 
+export function findRunningJobForCorpus(corpusId) {
+  const cid = String(corpusId || '').trim();
+  if (!cid) return null;
+  for (const job of localJobsMap.values()) {
+    if (job.corpusId === cid && job.status === 'running') {
+      return job;
+    }
+  }
+  return null;
+}
+
 export async function previewLocalImportFile({ filename = 'upload.txt', buffer, kind = 'novel', corpusId = 'preview', name = '预览书库', category = '', workers = 8 }) {
   try {
     const be = await getBrowserEngine();
@@ -467,6 +478,7 @@ export async function importCorpus(payload) {
 
   (async () => {
     let pack = null;
+    let buildLock = null;
     try {
       const rawBytes = decodeBase64ToBytes(payload.contentBase64);
       const fnameLower = String(payload.filename || '').toLowerCase();
@@ -511,54 +523,59 @@ export async function importCorpus(payload) {
         if (!isJson && report.shouldBlockAutoLlm && !payload.allowLlmOnAnomaly) {
           job.logs.push('[护栏拦截] 检测到高危切分异常，已跳过自动 LLM 构建。请检查目录结构后，在「语料配置 -> LLM 目录补全」手动确认启动。');
         } else {
-          const apiCfg = await getLocalApiConfig(be);
-          if (apiCfg.chatBase && apiCfg.chatKey) {
-            const workers = Math.min(Math.max(Number(payload.workers) || 8, 1), 24);
-            const plan = be.estimateBrowserLlmUpgradePlan(pack, { workers });
-            job.progress = {
-              ...job.progress,
-              phase: 'arcs',
-              totalArcs: plan.totalArcs,
-              totalScenes: plan.totalScenes,
-              totalCalls: plan.totalCalls,
-              totalSeries: plan.totalSeriesMeta,
-              workers: plan.effectiveWorkers,
-              estMinMs: plan.estMinMs,
-              estMaxMs: plan.estMaxMs,
-              updatedAtMs: Date.now(),
-              currentLabel: '准备启动 LLM 目录构建...',
-            };
-            job.logs.push(
-              `[browser-idb] 启动 LLM 智能目录构建：${plan.totalArcs} 章 / ${plan.totalScenes} 幕 / 预计 ${plan.totalCalls} 次请求（并发 ${plan.effectiveWorkers}，参考耗时 ${be.formatDurationZh(plan.estMinMs)} ~ ${be.formatDurationZh(plan.estMaxMs)}）`
-            );
-            const res = await be.upgradeBrowserCorpusWithLLM(pack, apiCfg, {
-              workers,
-              signal: abortCtrl.signal,
-              onProgress(prog) {
-                job.progress = {
-                  ...prog,
-                  updatedAtMs: Date.now(),
-                  currentLabel: buildProgressLabel(prog, job.progress.currentLabel),
-                };
-                if (prog.event === 'start') {
-                  job.logs.push(`[browser-idb] 已派发首批 ${prog.workers} 路并发请求...`);
-                } else if (prog.arcCompleted) {
-                  const etaStr = prog.etaMs !== null && prog.etaMs !== undefined ? ` | 剩余约 ${be.formatDurationZh(prog.etaMs)}` : '';
-                  job.logs.push(`[${prog.doneArcs}/${prog.totalArcs}] 已完成《${prog.arcTitle}》(${prog.percent}%${etaStr})`);
-                } else if (prog.event === 'series_meta_start') {
-                  job.logs.push(`[series_meta] 正在提炼「${prog.series}」全卷总览、人物别名与设定术语...`);
-                }
-              },
-              async onSave(updatedPack) {
-                await be.idbSaveCorpus(updatedPack);
-                localAgentsCache.clear();
-              },
-            });
-            job.logs.push(
-              `[browser-idb] LLM 目录构建完成（耗时 ${be.formatDurationZh(res.elapsedMs)}）：${res.upgradedArcs} 章 / ${res.upgradedScenes} 幕，${res.aliasesCount} 组别名，${res.glossaryCount} 条术语`
-            );
+          buildLock = be.acquireCorpusBuildLock(pack.id, '书阁导入');
+          if (!buildLock.ok) {
+            job.logs.push(`[并发保护] 书库「${pack.id}」正在「${buildLock.holder?.owner || '其他窗口'}」执行构建，已保存切分结构并跳过自动 LLM 启动。`);
           } else {
-            job.logs.push('[提示] 尚未配置 API Key，已先保存结构树；请在右上角「模型」配置 API Key 后打开「语料配置 -> LLM 目录补全」');
+            const apiCfg = await getLocalApiConfig(be);
+            if (apiCfg.chatBase && apiCfg.chatKey) {
+              const workers = Math.min(Math.max(Number(payload.workers) || 8, 1), 24);
+              const plan = be.estimateBrowserLlmUpgradePlan(pack, { workers });
+              job.progress = {
+                ...job.progress,
+                phase: 'arcs',
+                totalArcs: plan.totalArcs,
+                totalScenes: plan.totalScenes,
+                totalCalls: plan.totalCalls,
+                totalSeries: plan.totalSeriesMeta,
+                workers: plan.effectiveWorkers,
+                estMinMs: plan.estMinMs,
+                estMaxMs: plan.estMaxMs,
+                updatedAtMs: Date.now(),
+                currentLabel: '准备启动 LLM 目录构建...',
+              };
+              job.logs.push(
+                `[browser-idb] 启动 LLM 智能目录构建：${plan.totalArcs} 章 / ${plan.totalScenes} 幕 / 预计 ${plan.totalCalls} 次请求（并发 ${plan.effectiveWorkers}，参考耗时 ${be.formatDurationZh(plan.estMinMs)} ~ ${be.formatDurationZh(plan.estMaxMs)}）`
+              );
+              const res = await be.upgradeBrowserCorpusWithLLM(pack, apiCfg, {
+                workers,
+                signal: abortCtrl.signal,
+                onProgress(prog) {
+                  job.progress = {
+                    ...prog,
+                    updatedAtMs: Date.now(),
+                    currentLabel: buildProgressLabel(prog, job.progress.currentLabel),
+                  };
+                  if (prog.event === 'start') {
+                    job.logs.push(`[browser-idb] 已派发首批 ${prog.workers} 路并发请求...`);
+                  } else if (prog.arcCompleted) {
+                    const etaStr = prog.etaMs !== null && prog.etaMs !== undefined ? ` | 剩余约 ${be.formatDurationZh(prog.etaMs)}` : '';
+                    job.logs.push(`[${prog.doneArcs}/${prog.totalArcs}] 已完成《${prog.arcTitle}》(${prog.percent}%${etaStr})`);
+                  } else if (prog.event === 'series_meta_start') {
+                    job.logs.push(`[series_meta] 正在提炼「${prog.series}」全卷总览、人物别名与设定术语...`);
+                  }
+                },
+                async onSave(updatedPack) {
+                  await be.idbSaveCorpus(updatedPack);
+                  localAgentsCache.clear();
+                },
+              });
+              job.logs.push(
+                `[browser-idb] LLM 目录构建完成（耗时 ${be.formatDurationZh(res.elapsedMs)}）：${res.upgradedArcs} 章 / ${res.upgradedScenes} 幕，${res.aliasesCount} 组别名，${res.glossaryCount} 条术语`
+              );
+            } else {
+              job.logs.push('[提示] 尚未配置 API Key，已先保存结构树；请在右上角「模型」配置 API Key 后打开「语料配置 -> LLM 目录补全」');
+            }
           }
         }
       }
@@ -597,6 +614,7 @@ export async function importCorpus(payload) {
       }
       job.finishedAt = new Date().toISOString();
     } finally {
+      buildLock?.release?.();
       localJobControllers.delete(jobId);
     }
   })();
@@ -613,9 +631,17 @@ export async function upgradeCorpus(id, payload = {}) {
     });
   }
   const { be, pack } = await getLocalAgentAndPack(id);
+  const existingJob = findRunningJobForCorpus(pack.id);
+  if (existingJob) {
+    return { ok: true, job: existingJob, reused: true };
+  }
   const apiCfg = await getLocalApiConfig(be);
   if (!apiCfg.chatBase || !apiCfg.chatKey) {
     throw new Error('请先点击右上角「模型」配置 API Base URL 与 API Key 后再执行 LLM 目录补全');
+  }
+  const buildLock = be.acquireCorpusBuildLock(pack.id, '书阁工作台');
+  if (!buildLock.ok) {
+    throw new Error(`书库「${pack.config?.name || pack.id}」正在「${buildLock.holder?.owner || '其他窗口'}」执行构建，请勿重复启动`);
   }
   const jobId = 'job_upg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
   const abortCtrl = new AbortController();
@@ -743,6 +769,7 @@ export async function upgradeCorpus(id, payload = {}) {
       }
       job.finishedAt = new Date().toISOString();
     } finally {
+      buildLock.release();
       localJobControllers.delete(jobId);
     }
   })();

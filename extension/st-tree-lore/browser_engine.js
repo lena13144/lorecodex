@@ -2017,6 +2017,129 @@ function buildSeriesDigestInBrowser(serArcs, maxSamples = 80, maxChars = 6500) {
     return { digestText: lines.join('\n'), topChars };
 }
 
+function sleepWithSignal(ms, signal) {
+    if (signal?.aborted) {
+        return Promise.reject(new Error('用户已暂停/终止 LLM 建库'));
+    }
+    return new Promise((resolve, reject) => {
+        const cleanup = () => {
+            if (signal) signal.removeEventListener('abort', onAbort);
+        };
+        const onAbort = () => {
+            clearTimeout(timer);
+            cleanup();
+            reject(new Error('用户已暂停/终止 LLM 建库'));
+        };
+        const timer = setTimeout(() => {
+            cleanup();
+            resolve();
+        }, Math.max(0, ms));
+        if (signal) {
+            signal.addEventListener('abort', onAbort, { once: true });
+        }
+    });
+}
+
+function parseRetryAfterMs(resp) {
+    const raw = resp?.headers?.get?.('retry-after');
+    if (!raw) return 0;
+    const sec = Number(raw);
+    if (Number.isFinite(sec) && sec > 0) {
+        return Math.min(15000, Math.max(1000, Math.round(sec * 1000)));
+    }
+    const ts = Date.parse(raw);
+    if (Number.isFinite(ts)) {
+        const diff = ts - Date.now();
+        if (diff > 0) return Math.min(15000, Math.max(1000, diff));
+    }
+    return 0;
+}
+
+const BUILD_LOCK_PREFIX = 'lorecodex_build_lock_';
+const BUILD_LOCK_TTL_MS = 25000;
+const BUILD_LOCK_HEARTBEAT_MS = 5000;
+
+export function getCorpusBuildLock(corpusId) {
+    const cid = String(corpusId || '').trim();
+    if (!cid) return null;
+    try {
+        const ls = globalThis?.localStorage;
+        if (!ls) return null;
+        const raw = ls.getItem(`${BUILD_LOCK_PREFIX}${cid}`);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || !parsed.token) return null;
+        if (Date.now() - Number(parsed.heartbeatAt || 0) > BUILD_LOCK_TTL_MS) {
+            ls.removeItem(`${BUILD_LOCK_PREFIX}${cid}`);
+            return null;
+        }
+        return parsed;
+    } catch (_) {
+        return null;
+    }
+}
+
+export function acquireCorpusBuildLock(corpusId, ownerLabel = '当前窗口') {
+    const cid = String(corpusId || '').trim() || 'default';
+    const token = `lock_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let ls = null;
+    try {
+        ls = globalThis?.localStorage || null;
+    } catch (_) {
+        ls = null;
+    }
+    if (!ls) {
+        return { ok: true, token, release() {} };
+    }
+    const key = `${BUILD_LOCK_PREFIX}${cid}`;
+    const existing = getCorpusBuildLock(cid);
+    if (existing && existing.token !== token) {
+        return { ok: false, holder: existing };
+    }
+    const writeLock = () => {
+        try {
+            ls.setItem(key, JSON.stringify({
+                token,
+                owner: String(ownerLabel || '当前窗口'),
+                heartbeatAt: Date.now(),
+            }));
+        } catch (_) {}
+    };
+    writeLock();
+    const hbTimer = setInterval(() => {
+        try {
+            const curRaw = ls.getItem(key);
+            if (curRaw) {
+                const cur = JSON.parse(curRaw);
+                if (cur?.token && cur.token !== token) return;
+            }
+            writeLock();
+        } catch (_) {}
+    }, BUILD_LOCK_HEARTBEAT_MS);
+    if (typeof hbTimer?.unref === 'function') {
+        hbTimer.unref();
+    }
+    let released = false;
+    return {
+        ok: true,
+        token,
+        release() {
+            if (released) return;
+            released = true;
+            clearInterval(hbTimer);
+            try {
+                const curRaw = ls.getItem(key);
+                if (curRaw) {
+                    const cur = JSON.parse(curRaw);
+                    if (cur?.token === token) {
+                        ls.removeItem(key);
+                    }
+                }
+            } catch (_) {}
+        },
+    };
+}
+
 async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
     const cleanBase = String(apiCfg.chatBase || '')
         .trim()
@@ -2029,8 +2152,9 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
     const hasTemp = rawTemp !== undefined && rawTemp !== null && rawTemp !== '' && Number.isFinite(Number(rawTemp));
     const re = String(apiCfg.reasoningEffort || apiCfg.reasoning_effort || '').trim().toLowerCase();
     let lastErr = null;
+    let maxAttempts = Math.max(1, Number(retries) || 3);
 
-    for (let attempt = 0; attempt < retries; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
         if (signal?.aborted) throw new Error('用户已暂停/终止 LLM 建库');
         const body = {
             model,
@@ -2039,6 +2163,7 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
         if (hasTemp) body.temperature = Number(rawTemp);
         if (re) body.reasoning_effort = re;
         if (Number.isFinite(mt) && mt > 0) body.max_tokens = Math.floor(mt);
+        let suggestedWaitMs = 0;
         try {
             const resp = await fetch(`${cleanBase}/chat/completions`, {
                 method: 'POST',
@@ -2051,6 +2176,11 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
             });
             if (!resp.ok) {
                 const errTxt = await resp.text().catch(() => '');
+                if (resp.status === 429) {
+                    maxAttempts = Math.max(maxAttempts, 5);
+                    const ra = parseRetryAfterMs(resp);
+                    suggestedWaitMs = ra || Math.min(15000, 2000 * (attempt + 1) + Math.floor(Math.random() * 500));
+                }
                 throw new Error(`HTTP ${resp.status}: ${errTxt.slice(0, 140)}`);
             }
             const data = await resp.json();
@@ -2063,8 +2193,9 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
         } catch (err) {
             if (signal?.aborted) throw new Error('用户已暂停/终止 LLM 建库');
             lastErr = err;
-            if (attempt + 1 < retries) {
-                await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+            if (attempt + 1 < maxAttempts) {
+                const waitMs = suggestedWaitMs || 1000 * (attempt + 1);
+                await sleepWithSignal(waitMs, signal);
             }
         }
     }
@@ -2234,6 +2365,20 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
     let phase2DoneCalls = 0;
     let unsavedCounter = 0;
 
+    const runAbortCtrl = new AbortController();
+    const runSignal = runAbortCtrl.signal;
+    const onExternalAbort = () => runAbortCtrl.abort();
+    if (signal) {
+        if (signal.aborted) {
+            runAbortCtrl.abort();
+        } else {
+            signal.addEventListener('abort', onExternalAbort, { once: true });
+        }
+    }
+    let firstFatalErr = null;
+    let saveInFlight = null;
+    let savePending = false;
+
     const buildProgressPayload = (extra = {}) => {
         const now = Date.now();
         const elapsedMs = Math.max(0, now - startedAtMs);
@@ -2310,7 +2455,7 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
         };
     };
 
-    const persistStatsAndCheckpoint = async (forceSave = false) => {
+    const recomputeStats = () => {
         let llmScenesCount = 0;
         let llmArcsCount = 0;
         for (const a of allArcs) {
@@ -2327,10 +2472,37 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             llm_arcs: llmArcsCount,
             llm_scenes: llmScenesCount,
         };
-        if (onSave && (forceSave || unsavedCounter >= Math.max(4, workers))) {
-            unsavedCounter = 0;
-            await onSave(pack);
+    };
+
+    const persistStatsAndCheckpoint = async (forceSave = false) => {
+        if (!forceSave && unsavedCounter < Math.max(4, workers)) {
+            return;
         }
+        if (!onSave) {
+            recomputeStats();
+            unsavedCounter = 0;
+            return;
+        }
+        if (saveInFlight) {
+            savePending = true;
+            if (forceSave) {
+                await saveInFlight;
+            }
+            return;
+        }
+        saveInFlight = (async () => {
+            try {
+                do {
+                    savePending = false;
+                    unsavedCounter = 0;
+                    recomputeStats();
+                    await onSave(pack);
+                } while (savePending);
+            } finally {
+                saveInFlight = null;
+            }
+        })();
+        await saveInFlight;
     };
 
     const finalizeSingleSceneArc = (arc) => {
@@ -2391,85 +2563,95 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             let sCursor = 0;
             const leafWorkerCount = Math.min(workers, sceneTasks.length);
             const leafLoops = Array.from({ length: leafWorkerCount }, async () => {
-                while (sCursor < sceneTasks.length) {
-                    if (signal?.aborted) break;
-                    const taskIdx = sCursor++;
-                    const { arc, sc, scIdx, sceneCount } = sceneTasks[taskIdx];
-                    const rawText = String(textsData[sc.node_id]?.text || '').slice(0, 7000);
-                    const leafPrompt =
-                        `你是《${bookName}》文本目录索引员。请为下面这段完整场景生成检索索引（注意把人称代词消解为具体人名）：\n` +
-                        `1. title: 6-14字场景标题，概括地点/人物或核心事件；\n` +
-                        `2. summary: 2句话（70-140字），保留人名、化名/外号、专有名词、重要物品、数字和事件转折；若角色在对话中回忆或提及往事、身世、救援、小队组建等过往经历，必须明确记录“回忆当年/提及某人某事”等线索；\n` +
-                        `3. characters: 本幕直接出场或对话中明确提及的关键/过往人物数组（最多6人）；\n` +
-                        `4. tone_tags: 从 [战斗/危机, 温情/日常, 心理/独白, 权谋/悬疑, 设定/档案, 叙事/剧情] 中选 1-2 个标签。\n` +
-                        `只输出严格 JSON：{"title":"...","summary":"...","characters":[],"tone_tags":[]}\n\n` +
-                        `所属篇章：${arc.series || ''} / ${arc.title}\n正文：\n${rawText}`;
-                    const tCall = Date.now();
-                    const parsed = await callLlmJsonInBrowser(apiCfg, leafPrompt, signal);
-                    const dt = Math.max(1, Date.now() - tCall);
-                    sc.title = String(parsed.title || '').trim() || sc.title || `${arc.title}·片段`;
-                    sc.summary = String(parsed.summary || '').trim() || sc.summary;
-                    sc.tone_tags = Array.isArray(parsed.tone_tags)
-                        ? parsed.tone_tags.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 2)
-                        : sc.tone_tags || ['叙事/剧情'];
-                    sc._chars = Array.isArray(parsed.characters)
-                        ? parsed.characters.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 6)
-                        : [];
-                    sc._llm_done = true;
-                    upgradedScenes += 1;
-                    doneScenes += 1;
-                    doneCalls += 1;
-                    donePhase1Calls += 1;
-                    unsavedCounter += 1;
-                    totalCallMs += dt;
-                    phase1CallMs += dt;
+                try {
+                    while (sCursor < sceneTasks.length) {
+                        if (runSignal.aborted) break;
+                        const taskIdx = sCursor++;
+                        const { arc, sc, scIdx, sceneCount } = sceneTasks[taskIdx];
+                        const rawText = String(textsData[sc.node_id]?.text || '').slice(0, 7000);
+                        const leafPrompt =
+                            `你是《${bookName}》文本目录索引员。请为下面这段完整场景生成检索索引（注意把人称代词消解为具体人名）：\n` +
+                            `1. title: 6-14字场景标题，概括地点/人物或核心事件；\n` +
+                            `2. summary: 2句话（70-140字），保留人名、化名/外号、专有名词、重要物品、数字和事件转折；若角色在对话中回忆或提及往事、身世、救援、小队组建等过往经历，必须明确记录“回忆当年/提及某人某事”等线索；\n` +
+                            `3. characters: 本幕直接出场或对话中明确提及的关键/过往人物数组（最多6人）；\n` +
+                            `4. tone_tags: 从 [战斗/危机, 温情/日常, 心理/独白, 权谋/悬疑, 设定/档案, 叙事/剧情] 中选 1-2 个标签。\n` +
+                            `只输出严格 JSON：{"title":"...","summary":"...","characters":[],"tone_tags":[]}\n\n` +
+                            `所属篇章：${arc.series || ''} / ${arc.title}\n正文：\n${rawText}`;
+                        const tCall = Date.now();
+                        const parsed = await callLlmJsonInBrowser(apiCfg, leafPrompt, runSignal);
+                        if (runSignal.aborted) break;
+                        const dt = Math.max(1, Date.now() - tCall);
+                        sc.title = String(parsed.title || '').trim() || sc.title || `${arc.title}·片段`;
+                        sc.summary = String(parsed.summary || '').trim() || sc.summary;
+                        sc.tone_tags = Array.isArray(parsed.tone_tags)
+                            ? parsed.tone_tags.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 2)
+                            : sc.tone_tags || ['叙事/剧情'];
+                        sc._chars = Array.isArray(parsed.characters)
+                            ? parsed.characters.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 6)
+                            : [];
+                        sc._llm_done = true;
+                        upgradedScenes += 1;
+                        doneScenes += 1;
+                        doneCalls += 1;
+                        donePhase1Calls += 1;
+                        unsavedCounter += 1;
+                        totalCallMs += dt;
+                        phase1CallMs += dt;
 
-                    const remForArc = (arcPendingScenes.get(arc.arc_id) || 1) - 1;
-                    arcPendingScenes.set(arc.arc_id, remForArc);
+                        const remForArc = (arcPendingScenes.get(arc.arc_id) || 1) - 1;
+                        arcPendingScenes.set(arc.arc_id, remForArc);
 
-                    if (remForArc === 0) {
-                        if ((arc.scenes || []).length <= 1) {
-                            finalizeSingleSceneArc(arc);
-                            await persistStatsAndCheckpoint(false);
-                            onProgress(
-                                buildProgressPayload({
-                                    phase: 'arcs',
-                                    event: 'arc',
-                                    arcCompleted: true,
-                                    arcTitle: arc.title,
-                                    series: arc.series || '',
-                                    sceneTitle: sc.title,
-                                    sceneIdx: scIdx + 1,
-                                    sceneCount,
-                                })
-                            );
-                            continue;
+                        if (remForArc === 0) {
+                            if ((arc.scenes || []).length <= 1) {
+                                finalizeSingleSceneArc(arc);
+                                void persistStatsAndCheckpoint(false).catch(() => {});
+                                onProgress(
+                                    buildProgressPayload({
+                                        phase: 'arcs',
+                                        event: 'arc',
+                                        arcCompleted: true,
+                                        arcTitle: arc.title,
+                                        series: arc.series || '',
+                                        sceneTitle: sc.title,
+                                        sceneIdx: scIdx + 1,
+                                        sceneCount,
+                                    })
+                                );
+                                continue;
+                            }
+                            readyMultiArcs.push(arc);
                         }
-                        readyMultiArcs.push(arc);
-                    }
 
-                    if (unsavedCounter >= Math.max(8, workers)) {
-                        await persistStatsAndCheckpoint(true);
+                        if (unsavedCounter >= Math.max(8, workers)) {
+                            await persistStatsAndCheckpoint(true);
+                        }
+                        onProgress(
+                            buildProgressPayload({
+                                phase: 'arcs',
+                                event: 'scene',
+                                arcTitle: arc.title,
+                                series: arc.series || '',
+                                sceneTitle: sc.title,
+                                sceneIdx: scIdx + 1,
+                                sceneCount,
+                            })
+                        );
                     }
-                    onProgress(
-                        buildProgressPayload({
-                            phase: 'arcs',
-                            event: 'scene',
-                            arcTitle: arc.title,
-                            series: arc.series || '',
-                            sceneTitle: sc.title,
-                            sceneIdx: scIdx + 1,
-                            sceneCount,
-                        })
-                    );
+                } catch (err) {
+                    if (!firstFatalErr && !signal?.aborted) {
+                        firstFatalErr = err;
+                    }
+                    runAbortCtrl.abort();
                 }
             });
-            await Promise.all(leafLoops);
+            await Promise.allSettled(leafLoops);
+            if (signal?.aborted) throw new Error('用户已暂停/终止 LLM 建库');
+            if (firstFatalErr) throw firstFatalErr;
             await persistStatsAndCheckpoint(true);
         }
 
-        if (signal?.aborted) {
-            throw new Error('用户已暂停/终止 LLM 建库');
+        if (runSignal.aborted) {
+            throw new Error(signal?.aborted ? '用户已暂停/终止 LLM 建库' : (firstFatalErr?.message || 'LLM 构建已中断'));
         }
 
         // Phase 1B: Concurrent multi-scene arc summary synthesis (all scenes fed, no 25-scene cap)
@@ -2477,64 +2659,74 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             let aCursor = 0;
             const arcWorkerCount = Math.min(workers, readyMultiArcs.length);
             const arcLoops = Array.from({ length: arcWorkerCount }, async () => {
-                while (aCursor < readyMultiArcs.length) {
-                    if (signal?.aborted) break;
-                    const idx = aCursor++;
-                    const arc = readyMultiArcs[idx];
-                    const scenes = arc.scenes || [];
-                    const scLines = scenes
-                        .map((s) => `- [${s.node_id}] ${s.title}: ${s.summary}`)
-                        .join('\n');
-                    const arcPrompt =
-                        `根据《${bookName}》篇章的子场景摘要提炼篇章总目信息：\n` +
-                        `1. description: 1-2句话（60-120字）概括全章核心人物与事件，必须保留团队/势力/身份变动（如队长交接、更名、分队重组、吸纳新成员）与重要往事揭秘；\n` +
-                        `2. characters: 核心出场及关键提及人物数组（最多8人）；\n` +
-                        `3. tone_tags: 1-2个氛围标签。\n` +
-                        `只输出 JSON：{"description":"...","characters":[],"tone_tags":[]}\n\n` +
-                        `篇章：${arc.series || ''} / ${arc.title}\n子场景：\n${scLines}`;
-                    const tArc = Date.now();
-                    const parsedArc = await callLlmJsonInBrowser(apiCfg, arcPrompt, signal);
-                    const dtArc = Math.max(1, Date.now() - tArc);
-                    arc.description = String(parsedArc.description || '').trim() || arc.description;
-                    const chars = Array.isArray(parsedArc.characters)
-                        ? parsedArc.characters.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 8)
-                        : [];
-                    if (chars.length) arc.characters = chars;
-                    arc.tone_tags = Array.isArray(parsedArc.tone_tags)
-                        ? parsedArc.tone_tags.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 2)
-                        : arc.tone_tags || ['叙事/剧情'];
-                    arc.key_items = scenes
-                        .slice(0, 8)
-                        .map((s) => s.title)
-                        .filter(Boolean);
-                    arc._llm_done = true;
-                    for (const sc of scenes) delete sc._chars;
-                    completedArcs += 1;
-                    doneCalls += 1;
-                    donePhase1Calls += 1;
-                    unsavedCounter += 1;
-                    totalCallMs += dtArc;
-                    phase1CallMs += dtArc;
-                    if (unsavedCounter >= Math.max(4, Math.ceil(workers / 2))) {
-                        await persistStatsAndCheckpoint(true);
+                try {
+                    while (aCursor < readyMultiArcs.length) {
+                        if (runSignal.aborted) break;
+                        const idx = aCursor++;
+                        const arc = readyMultiArcs[idx];
+                        const scenes = arc.scenes || [];
+                        const scLines = scenes
+                            .map((s) => `- [${s.node_id}] ${s.title}: ${s.summary}`)
+                            .join('\n');
+                        const arcPrompt =
+                            `根据《${bookName}》篇章的子场景摘要提炼篇章总目信息：\n` +
+                            `1. description: 1-2句话（60-120字）概括全章核心人物与事件，必须保留团队/势力/身份变动（如队长交接、更名、分队重组、吸纳新成员）与重要往事揭秘；\n` +
+                            `2. characters: 核心出场及关键提及人物数组（最多8人）；\n` +
+                            `3. tone_tags: 1-2个氛围标签。\n` +
+                            `只输出 JSON：{"description":"...","characters":[],"tone_tags":[]}\n\n` +
+                            `篇章：${arc.series || ''} / ${arc.title}\n子场景：\n${scLines}`;
+                        const tArc = Date.now();
+                        const parsedArc = await callLlmJsonInBrowser(apiCfg, arcPrompt, runSignal);
+                        if (runSignal.aborted) break;
+                        const dtArc = Math.max(1, Date.now() - tArc);
+                        arc.description = String(parsedArc.description || '').trim() || arc.description;
+                        const chars = Array.isArray(parsedArc.characters)
+                            ? parsedArc.characters.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 8)
+                            : [];
+                        if (chars.length) arc.characters = chars;
+                        arc.tone_tags = Array.isArray(parsedArc.tone_tags)
+                            ? parsedArc.tone_tags.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 2)
+                            : arc.tone_tags || ['叙事/剧情'];
+                        arc.key_items = scenes
+                            .slice(0, 8)
+                            .map((s) => s.title)
+                            .filter(Boolean);
+                        arc._llm_done = true;
+                        for (const sc of scenes) delete sc._chars;
+                        completedArcs += 1;
+                        doneCalls += 1;
+                        donePhase1Calls += 1;
+                        unsavedCounter += 1;
+                        totalCallMs += dtArc;
+                        phase1CallMs += dtArc;
+                        if (unsavedCounter >= Math.max(4, Math.ceil(workers / 2))) {
+                            await persistStatsAndCheckpoint(true);
+                        }
+                        onProgress(
+                            buildProgressPayload({
+                                phase: 'arcs',
+                                event: 'arc',
+                                arcCompleted: true,
+                                arcTitle: arc.title,
+                                series: arc.series || '',
+                            })
+                        );
                     }
-                    onProgress(
-                        buildProgressPayload({
-                            phase: 'arcs',
-                            event: 'arc',
-                            arcCompleted: true,
-                            arcTitle: arc.title,
-                            series: arc.series || '',
-                        })
-                    );
+                } catch (err) {
+                    if (!firstFatalErr && !signal?.aborted) {
+                        firstFatalErr = err;
+                    }
+                    runAbortCtrl.abort();
                 }
             });
-            await Promise.all(arcLoops);
+            await Promise.allSettled(arcLoops);
+            if (signal?.aborted) throw new Error('用户已暂停/终止 LLM 建库');
+            if (firstFatalErr) throw firstFatalErr;
             await persistStatsAndCheckpoint(true);
         }
 
-        if (signal?.aborted) {
-            throw new Error('用户已暂停/终止 LLM 建库');
+        if (runSignal.aborted) {
+            throw new Error(signal?.aborted ? '用户已暂停/终止 LLM 建库' : (firstFatalErr?.message || 'LLM 构建已中断'));
         }
 
         // Phase 2: Series summary + character aliases + glossary synthesis per touched series
@@ -2554,7 +2746,7 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             const extractedRelations = [];
 
             for (const [serName] of groupedSeries.entries()) {
-                if (signal?.aborted) throw new Error('用户已暂停/终止 LLM 建库');
+                if (runSignal.aborted) throw new Error('用户已暂停/终止 LLM 建库');
                 const fullSerArcs = allArcs.filter((a) => String(a.series || a.category || '正文卷').trim() === serName);
                 const { digestText, topChars } = buildSeriesDigestInBrowser(fullSerArcs);
                 onProgress(
@@ -2575,7 +2767,7 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
                     `章节脉络（共 ${fullSerArcs.length} 章）：\n${digestText}`;
                 const tMeta = Date.now();
                 try {
-                    const parsedMeta = await callLlmJsonInBrowser(apiCfg, metaPrompt, signal);
+                    const parsedMeta = await callLlmJsonInBrowser(apiCfg, metaPrompt, runSignal);
                     const serSum = String(parsedMeta.series_summary || '').trim();
                     if (serSum) {
                         pack.indexData.series_summaries[serName] = serSum;
@@ -2591,7 +2783,7 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
                         extractedRelations.push(...parsedMeta.relations);
                     }
                 } catch (err) {
-                    if (signal?.aborted) throw err;
+                    if (signal?.aborted || runSignal.aborted) throw err;
                     // Non-fatal if series meta synthesis fails on a single volume
                 } finally {
                     const dtMeta = Math.max(1, Date.now() - tMeta);
@@ -2626,6 +2818,10 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             await persistStatsAndCheckpoint(true).catch(() => {});
         }
         throw err;
+    } finally {
+        if (signal) {
+            signal.removeEventListener('abort', onExternalAbort);
+        }
     }
 
     onProgress(
