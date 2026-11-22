@@ -29,7 +29,11 @@ const [
         buildNovelCorpusInBrowser,
         buildLoreCorpusInBrowser,
         createBrowserTreeAgent,
+        isArcLlmDone,
         upgradeBrowserCorpusWithLLM,
+        estimateBrowserLlmUpgradePlan,
+        inspectCorpusStructure,
+        formatDurationZh,
     },
 ] = await Promise.all([
     import(new URL('script.js', stRootUrl).href),
@@ -821,15 +825,37 @@ jQuery(async () => {
         }
     };
 
+    const renderLocalUpgradeEstimate = () => {
+        const el = $('#lorecodex_local_upg_estimate');
+        if (!el.length) return;
+        const pack = localPacksMap.get(cfg.corpus);
+        if (!pack) {
+            el.text('');
+            return;
+        }
+        const series = String($('#lorecodex_local_upg_series').val() || '').trim();
+        const workers = Math.min(Math.max(Number($('#lorecodex_local_upg_workers').val()) || 4, 1), 12);
+        const limitArcs = Math.max(0, Number($('#lorecodex_local_upg_limit').val()) || 0);
+        const plan = estimateBrowserLlmUpgradePlan(pack, { series, workers, limitArcs });
+        if (!plan.totalArcs) {
+            el.text('当前所选范围均已完成 LLM 目录构建（支持自动跳过已完成章节）');
+            return;
+        }
+        el.text(
+            `待构建 ${plan.totalArcs} 章 / ${plan.totalScenes} 幕 · 预计 ${plan.totalCalls} 次请求（并发 ${plan.effectiveWorkers}）· 启动前参考耗时约 ${formatDurationZh(plan.estMinMs)} ~ ${formatDurationZh(plan.estMaxMs)}`
+        );
+    };
+
     const renderLocalSeriesOptions = () => {
         const sel = $('#lorecodex_local_upg_series').empty();
         const pack = localPacksMap.get(cfg.corpus);
         if (!pack) {
             sel.append('<option value="">（请先选择或导入一个内置书库）</option>');
+            renderLocalUpgradeEstimate();
             return;
         }
         const arcs = pack.indexData?.arcs || [];
-        const totalDone = arcs.filter((a) => a._llm_done).length;
+        const totalDone = arcs.filter((a) => isArcLlmDone(a, pack.indexData)).length;
         sel.append(`<option value="">全部章节 (${totalDone}/${arcs.length} 章已构建 LLM 目录)</option>`);
         const seriesMap = new Map();
         for (const a of arcs) {
@@ -837,11 +863,91 @@ jQuery(async () => {
             if (!seriesMap.has(sk)) seriesMap.set(sk, { total: 0, done: 0 });
             const st = seriesMap.get(sk);
             st.total += 1;
-            if (a._llm_done) st.done += 1;
+            if (isArcLlmDone(a, pack.indexData)) st.done += 1;
         }
         for (const [sk, st] of seriesMap.entries()) {
             sel.append(`<option value="${escHtml(sk)}">${escHtml(sk)} (${st.done}/${st.total} 章已构建)</option>`);
         }
+        renderLocalUpgradeEstimate();
+    };
+
+    const renderLocalSplitPreview = (pack, { openDetails = false, blockedAutoLlm = false } = {}) => {
+        const wrap = $('#lorecodex_local_split_wrap');
+        if (!wrap.length) return;
+        if (!pack || !pack.indexData) {
+            wrap.hide().empty();
+            return;
+        }
+        const report = inspectCorpusStructure(pack);
+        const badgeCls = report.severity === 'error' ? 'err' : report.severity === 'warn' ? 'warn' : 'ok';
+        const badgeText = report.severity === 'error' ? '高危异常' : report.severity === 'warn' ? '建议检查' : '切分正常';
+        const volLabel = report.hasNamedSeries ? `${report.seriesCount} 卷` : (report.isLorePack ? '设定集' : '未分卷');
+        const statsLine = `${volLabel} · ${report.arcCount} 章 · ${report.sceneCount} 幕 · ${report.totalChars.toLocaleString()} 字 · 均章 ${report.avgArcChars.toLocaleString()} 字`;
+
+        const warnsHtml = report.warnings.length
+            ? `<div class="lorecodex-split-warns">${report.warnings
+                  .map((w) => `<div class="lorecodex-split-warn-item ${w.level === 'error' ? 'err' : 'warn'}">${escHtml(w.message)}</div>`)
+                  .join('')}</div>`
+            : '';
+
+        const blockedHtml = blockedAutoLlm
+            ? `<div class="lorecodex-split-warn-item err"><b>已暂停自动 LLM 构建</b>：检测到高危切分异常，为避免浪费 API，请先确认下方切分结构无误后再手动启动。</div>`
+            : '';
+
+        const seriesHtml = report.seriesBreakdown.length
+            ? `<div class="lorecodex-split-series">${report.seriesBreakdown
+                  .slice(0, 18)
+                  .map((s) => `<span class="lorecodex-split-chip">${escHtml(s.name)} (${s.arcs}章/${s.scenes}幕)</span>`)
+                  .join('')}${report.seriesBreakdown.length > 18 ? `<span class="lorecodex-split-chip">…共 ${report.seriesBreakdown.length} 卷</span>` : ''}</div>`
+            : '';
+
+        const samplesHtml = report.sampleArcs.length
+            ? `<div class="lorecodex-split-samples">${report.sampleArcs
+                  .map((item) => {
+                      if (item.separator) {
+                          return `<div class="lorecodex-split-sep">··· 省略中间 ${item.omittedCount} 章 ···</div>`;
+                      }
+                      const meta = `${item.series ? escHtml(item.series) + ' · ' : ''}${item.sceneCount}幕 / ${item.chars.toLocaleString()}字`;
+                      return `<div class="lorecodex-split-arc">
+                          <div class="lorecodex-split-arc-head">
+                              <span>[${escHtml(item.arc_id)}] ${escHtml(item.title)}</span>
+                              <span class="lorecodex-muted">${meta}</span>
+                          </div>
+                          ${item.snippet ? `<div class="lorecodex-split-snippet">${escHtml(item.snippet)}</div>` : ''}
+                      </div>`;
+                  })
+                  .join('')}</div>`
+            : '';
+
+        const autoOpen = Boolean(openDetails || report.severity === 'error');
+        const actionsHtml = `<div class="lorecodex-row" style="margin-top:4px;">
+            <button type="button" id="lorecodex_split_open_wb" class="menu_button" style="flex:1;padding:4px 8px;">打开书阁查看完整目录</button>
+            ${blockedAutoLlm ? `<button type="button" id="lorecodex_split_force_llm" class="menu_button" style="flex:1;padding:4px 8px;">确认无误，仍然启动 LLM 构建</button>` : ''}
+        </div>`;
+
+        wrap.html(`
+            <div class="lorecodex-split-head">
+                <span><b>切分结构体检 · ${escHtml(pack.config?.name || pack.id)}</b></span>
+                <span class="lorecodex-split-badge ${badgeCls}">${badgeText}</span>
+            </div>
+            <div class="lorecodex-split-stats">${statsLine}</div>
+            ${blockedHtml}
+            ${warnsHtml}
+            <details class="lorecodex-split-details" ${autoOpen ? 'open' : ''}>
+                <summary>查看分卷分布与章节抽样预览（前 5 章 + 尾 2 章）</summary>
+                ${!report.hasNamedSeries && !report.isLorePack ? '<div class="lorecodex-muted" style="margin-top:4px;">提示：文本中未匹配到“第X卷/部/篇”标记，所有章节暂归为同一卷。</div>' : ''}
+                ${seriesHtml}
+                ${samplesHtml}
+            </details>
+            ${actionsHtml}
+        `).show();
+
+        $('#lorecodex_split_open_wb').on('click', () => {
+            openWorkbenchModal(cfg, { corpusId: pack.id });
+        });
+        $('#lorecodex_split_force_llm').on('click', () => {
+            runLocalLlmUpgrade(pack.id);
+        });
     };
 
     const renderCorpusDropdown = () => {
@@ -858,6 +964,7 @@ jQuery(async () => {
         }
         if (cfg.corpus && corporaMap.has(cfg.corpus)) sel.val(cfg.corpus);
         renderLocalSeriesOptions();
+        renderLocalSplitPreview(localPacksMap.get(cfg.corpus));
     };
 
     const updateBindingLabel = () => {
@@ -1174,12 +1281,30 @@ jQuery(async () => {
                                     <input id="lorecodex_local_upg_limit" class="text_pole" type="number" min="0" value="0" />
                                 </div>
                             </div>
+                            <div id="lorecodex_local_upg_estimate" class="lorecodex-muted"></div>
                             <div class="lorecodex-row">
                                 <button id="lorecodex_local_upg_btn" type="button" class="menu_button" style="flex:2;">开始 / 继续 LLM 目录构建</button>
                                 <button id="lorecodex_local_upg_stop_btn" type="button" class="menu_button" style="flex:1;display:none;">暂停并保存进度</button>
                             </div>
                         </div>
                     </details>
+                    <div id="lorecodex_local_split_wrap" class="lorecodex-split-wrap" style="display:none;"></div>
+                    <div id="lorecodex_local_prog_wrap" class="lorecodex-prog-wrap" style="display:none;">
+                        <div class="lorecodex-prog-head">
+                            <span id="lorecodex_local_prog_title" class="lorecodex-prog-title">准备构建...</span>
+                            <div class="lorecodex-prog-head-right">
+                                <span id="lorecodex_local_prog_time" class="lorecodex-prog-time"></span>
+                                <button id="lorecodex_local_prog_stop_btn" type="button" class="menu_button" style="width:auto;padding:2px 8px;font-size:0.86em;display:none;">暂停</button>
+                            </div>
+                        </div>
+                        <div class="lorecodex-prog-track">
+                            <div id="lorecodex_local_prog_fill" class="lorecodex-prog-fill"></div>
+                        </div>
+                        <div class="lorecodex-prog-sub">
+                            <span id="lorecodex_local_prog_cur" class="lorecodex-prog-current"></span>
+                            <span id="lorecodex_local_prog_meta"></span>
+                        </div>
+                    </div>
                     <div id="lorecodex_local_status" class="lorecodex-status"></div>
                 </div>
             </details>
@@ -1304,6 +1429,87 @@ jQuery(async () => {
 
     let localUpgAbortCtrl = null;
 
+    const renderLocalProgUi = (prog, stateMode = 'running', customCurText = '') => {
+        const wrap = $('#lorecodex_local_prog_wrap');
+        if (!wrap.length) return;
+        wrap.show();
+        const fill = $('#lorecodex_local_prog_fill');
+        const titleEl = $('#lorecodex_local_prog_title');
+        const timeEl = $('#lorecodex_local_prog_time');
+        const curEl = $('#lorecodex_local_prog_cur');
+        const metaEl = $('#lorecodex_local_prog_meta');
+        const stopMiniBtn = $('#lorecodex_local_prog_stop_btn');
+
+        const pct = stateMode === 'done'
+            ? 100
+            : Math.min(100, Math.max(0, Number(prog?.percent) || 0));
+        fill.removeClass('running done paused err').addClass(stateMode);
+        fill.css('width', `${pct.toFixed(1)}%`);
+
+        const now = Date.now();
+        const startedAtMs = prog?.startedAtMs || now;
+        const elapsedMs = stateMode === 'running'
+            ? Math.max(0, now - startedAtMs)
+            : Math.max(0, Number(prog?.elapsedMs ?? (now - startedAtMs)));
+
+        let etaStr = '';
+        if (stateMode === 'done') {
+            etaStr = '已完成';
+        } else if (stateMode === 'paused') {
+            etaStr = '已暂停';
+        } else if (stateMode === 'err') {
+            etaStr = '已中断';
+        } else if (prog?.etaMs !== null && prog?.etaMs !== undefined) {
+            const sinceUpdate = prog?.updatedAtMs ? Math.max(0, now - prog.updatedAtMs) : 0;
+            const liveEta = Math.max(0, Number(prog.etaMs) - sinceUpdate);
+            etaStr = `剩余约 ${formatDurationZh(liveEta)}`;
+        } else if (prog?.estMaxMs > 0) {
+            etaStr = `参考 ${formatDurationZh(prog.estMinMs)}~${formatDurationZh(prog.estMaxMs)}`;
+        } else {
+            etaStr = '测速中...';
+        }
+
+        const totalArcs = Number(prog?.totalArcs) || 0;
+        const doneArcs = Number(prog?.doneArcs) || 0;
+        const totalCalls = Number(prog?.totalCalls) || 0;
+        const doneCalls = Number(prog?.doneCalls) || 0;
+        const pctLabel = `${pct.toFixed(1)}%`;
+
+        if (stateMode === 'done') {
+            titleEl.text(`LLM 目录构建完成 · ${pctLabel} (${doneArcs}/${totalArcs} 章)`);
+            stopMiniBtn.hide();
+        } else if (stateMode === 'paused') {
+            titleEl.text(`已暂停并保存断点 · ${pctLabel} (${doneArcs}/${totalArcs} 章)`);
+            stopMiniBtn.hide();
+        } else if (stateMode === 'err') {
+            titleEl.text(`构建中断（已保存断点）· ${pctLabel} (${doneArcs}/${totalArcs} 章)`);
+            stopMiniBtn.hide();
+        } else if (prog?.phase === 'series_meta') {
+            titleEl.text(`提炼全卷总览 · ${pctLabel} (${prog.doneSeries || 0}/${prog.totalSeries || 0} 卷)`);
+            stopMiniBtn.show();
+        } else {
+            titleEl.text(`正在构建 LLM 目录 · ${pctLabel} (${doneArcs}/${totalArcs} 章)`);
+            stopMiniBtn.show();
+        }
+
+        timeEl.text(`已用 ${formatDurationZh(elapsedMs)} · ${etaStr}`);
+
+        if (customCurText) {
+            curEl.text(customCurText);
+        } else if (prog?.phase === 'series_meta') {
+            curEl.text(`当前分卷：${prog.series || '默认分卷'}`);
+        } else if (prog?.arcTitle) {
+            const scHint = prog.sceneTitle ? ` · ${prog.sceneTitle}` : '';
+            curEl.text(`当前：${prog.series ? prog.series + ' / ' : ''}${prog.arcTitle}${scHint}`);
+        } else {
+            curEl.text('正在调度首批并发请求...');
+        }
+
+        const reqPart = totalCalls > 0 ? `请求 ${doneCalls}/${totalCalls}` : '';
+        const avgPart = prog?.avgCallMs ? ` · 均速 ${(prog.avgCallMs / 1000).toFixed(1)}s/次` : '';
+        metaEl.text(`${reqPart}${avgPart}`);
+    };
+
     const runLocalLlmUpgrade = async (targetCorpusId) => {
         const st = $('#lorecodex_local_status');
         const pack = localPacksMap.get(targetCorpusId);
@@ -1324,23 +1530,78 @@ jQuery(async () => {
         const series = String($('#lorecodex_local_upg_series').val() || '').trim();
         const workers = Math.min(Math.max(Number($('#lorecodex_local_upg_workers').val()) || 4, 1), 12);
         const limitArcs = Math.max(0, Number($('#lorecodex_local_upg_limit').val()) || 0);
+        const plan = estimateBrowserLlmUpgradePlan(pack, { series, workers, limitArcs });
+
+        if (!plan.totalArcs) {
+            const msg = '所选范围内的章节均已完成 LLM 目录构建（无需重复构建）';
+            st.text(msg);
+            renderLocalProgUi({
+                totalArcs: 0,
+                doneArcs: 0,
+                totalCalls: 0,
+                doneCalls: 0,
+                percent: 100,
+                elapsedMs: 0,
+                startedAtMs: Date.now(),
+            }, 'done', msg);
+            return;
+        }
 
         localUpgAbortCtrl = new AbortController();
+        const ctrl = localUpgAbortCtrl;
         $('#lorecodex_local_upg_btn').prop('disabled', true);
         $('#lorecodex_local_upg_stop_btn').show();
-        st.text(`正在启动「${pack.config.name}」LLM 目录构建 (并发=${workers}${series ? `, 分卷=${series}` : ''})...`);
+
+        let latestProg = {
+            phase: 'arcs',
+            doneArcs: 0,
+            totalArcs: plan.totalArcs,
+            doneScenes: 0,
+            totalScenes: plan.totalScenes,
+            doneCalls: 0,
+            totalCalls: plan.totalCalls,
+            doneSeries: 0,
+            totalSeries: plan.totalSeriesMeta,
+            percent: 0,
+            etaMs: null,
+            estMinMs: plan.estMinMs,
+            estMaxMs: plan.estMaxMs,
+            startedAtMs: Date.now(),
+            updatedAtMs: Date.now(),
+            arcTitle: plan.targetArcs[0]?.title || '',
+            series: plan.targetArcs[0]?.series || '',
+        };
+        let progStateMode = 'running';
+
+        renderLocalProgUi(latestProg, 'running');
+        st.text(
+            `已启动「${pack.config.name}」LLM 目录构建：共 ${plan.totalArcs} 章 / ${plan.totalScenes} 幕 / ${plan.totalCalls} 次请求（并发 ${plan.effectiveWorkers}，启动前参考耗时约 ${formatDurationZh(plan.estMinMs)} ~ ${formatDurationZh(plan.estMaxMs)}）`
+        );
+
+        const progTicker = setInterval(() => {
+            if (progStateMode === 'running') {
+                renderLocalProgUi(latestProg, 'running');
+            }
+        }, 1000);
 
         try {
             const res = await upgradeBrowserCorpusWithLLM(pack, apiCfg, {
                 series,
                 workers,
                 limitArcs,
-                signal: localUpgAbortCtrl.signal,
+                signal: ctrl.signal,
                 onProgress(prog) {
+                    latestProg = { ...prog, updatedAtMs: Date.now() };
+                    const mode = prog.event === 'done' ? 'done' : 'running';
+                    progStateMode = mode;
+                    renderLocalProgUi(latestProg, mode);
                     if (prog.phase === 'series_meta') {
                         st.text(`正在提炼「${prog.series}」全卷大纲、人物别名对照表与专有术语...`);
-                    } else {
-                        st.text(`LLM 目录构建中：已完成 ${prog.done}/${prog.total} 章 (${prog.series ? prog.series + ' · ' : ''}${prog.arcTitle}) [进度已实时写入 IndexedDB]`);
+                    } else if (prog.event !== 'done') {
+                        const etaPart = prog.etaMs !== null && prog.etaMs !== undefined
+                            ? `，剩余约 ${formatDurationZh(prog.etaMs)}`
+                            : '';
+                        st.text(`LLM 目录构建中：${prog.doneArcs}/${prog.totalArcs} 章（请求 ${prog.doneCalls}/${prog.totalCalls}${etaPart}）· ${prog.arcTitle} [已自动写入断点]`);
                     }
                 },
                 async onSave(updatedPack) {
@@ -1353,10 +1614,14 @@ jQuery(async () => {
             const ok = await fetchCorporaAndHealth(cfg);
             renderConnStatus(ok);
             renderCorpusDropdown();
+            progStateMode = 'done';
             if (res.message) {
                 st.text(res.message);
+                renderLocalProgUi({ ...latestProg, percent: 100 }, 'done', res.message);
             } else {
-                const msg = `LLM 目录构建完成：升级 ${res.upgradedArcs} 章 / ${res.upgradedScenes} 幕，合成 ${res.synthesizedSeries} 卷总览，累计 ${res.aliasesCount} 组人物别名、${res.glossaryCount} 条术语`;
+                const durStr = formatDurationZh(res.elapsedMs);
+                const msg = `LLM 目录构建完成（总耗时 ${durStr}）：升级 ${res.upgradedArcs} 章 / ${res.upgradedScenes} 幕，合成 ${res.synthesizedSeries} 卷总览，累计 ${res.aliasesCount} 组人物别名、${res.glossaryCount} 条术语`;
+                renderLocalProgUi({ ...latestProg, percent: 100, elapsedMs: res.elapsedMs }, 'done', `全部完成，总耗时 ${durStr}`);
                 st.text(msg);
                 if (typeof toastr !== 'undefined') toastr.success(msg);
             }
@@ -1365,20 +1630,38 @@ jQuery(async () => {
             localAgentsCache.delete(pack.id);
             await fetchCorporaAndHealth(cfg);
             renderCorpusDropdown();
+            const isPaused = ctrl.signal.aborted;
+            progStateMode = isPaused ? 'paused' : 'err';
             const errMsg = err?.message || String(err);
-            st.text(`LLM 构建已中断（已完成章节均已保存在 IndexedDB，可随时点击继续）: ${errMsg}`);
-            if (typeof toastr !== 'undefined') toastr.info(`LLM 构建已暂停/中断: ${errMsg}`);
+            renderLocalProgUi(
+                latestProg,
+                progStateMode,
+                isPaused ? '已手动暂停，进度已写入 IndexedDB，可随时续传' : `出错中断: ${errMsg}`
+            );
+            st.text(
+                isPaused
+                    ? `已暂停并保存断点（已完成 ${latestProg.doneArcs}/${latestProg.totalArcs} 章，可随时点击「开始 / 继续 LLM 目录构建」断点续传）`
+                    : `LLM 构建已中断（已完成章节均已保存在 IndexedDB，可随时点击继续）: ${errMsg}`
+            );
+            if (typeof toastr !== 'undefined') {
+                toastr.info(isPaused ? '已暂停 LLM 构建并保存断点' : `LLM 构建已暂停/中断: ${errMsg}`);
+            }
         } finally {
+            clearInterval(progTicker);
             localUpgAbortCtrl = null;
             $('#lorecodex_local_upg_btn').prop('disabled', false);
             $('#lorecodex_local_upg_stop_btn').hide();
         }
     };
 
-    $('#lorecodex_local_upg_btn').on('click', () => runLocalLlmUpgrade(cfg.corpus));
-    $('#lorecodex_local_upg_stop_btn').on('click', () => {
+    const stopLocalLlmUpgrade = () => {
         if (localUpgAbortCtrl) localUpgAbortCtrl.abort();
-    });
+    };
+
+    $('#lorecodex_local_upg_btn').on('click', () => runLocalLlmUpgrade(cfg.corpus));
+    $('#lorecodex_local_upg_stop_btn').on('click', stopLocalLlmUpgrade);
+    $('#lorecodex_local_prog_stop_btn').on('click', stopLocalLlmUpgrade);
+    $('#lorecodex_local_upg_series, #lorecodex_local_upg_workers, #lorecodex_local_upg_limit').on('change input', renderLocalUpgradeEstimate);
 
     const doLocalImport = async (file) => {
         const st = $('#lorecodex_local_status');
@@ -1416,15 +1699,30 @@ jQuery(async () => {
             renderConnStatus(ok);
             renderCorpusDropdown();
             const stats = pack.indexData?.stats || {};
-            st.text(`已存入浏览器 IndexedDB：${pack.config.name} (${stats.arcs || 0}卷 / ${stats.scenes || 0}幕 / ${(stats.total_chars || 0).toLocaleString()}字)`);
+            const splitReport = inspectCorpusStructure(pack);
+            const volText = splitReport.hasNamedSeries ? `${splitReport.seriesCount}卷 / ` : '';
+            st.text(`已存入浏览器 IndexedDB：${pack.config.name} (${volText}${stats.arcs || 0}章 / ${stats.scenes || 0}幕 / ${(stats.total_chars || 0).toLocaleString()}字)`);
             if (typeof toastr !== 'undefined') toastr.success(`本地书库「${pack.config.name}」导入完成`);
 
+            const blockAuto = autoLlm && !isLorepack && !isJson && splitReport.shouldBlockAutoLlm;
+            renderLocalSplitPreview(pack, {
+                openDetails: splitReport.severity !== 'ok',
+                blockedAutoLlm: blockAuto,
+            });
+
             if (autoLlm && !isLorepack) {
+                if (blockAuto) {
+                    st.text(`已切分入库（${volText}${stats.arcs || 0}章 / ${stats.scenes || 0}幕），但检测到高危切分异常，已暂停自动启动 LLM 构建。请先核对上方切分预览后手动确认启动。`);
+                    if (typeof toastr !== 'undefined') {
+                        toastr.warning('检测到高危切分异常，已暂停自动启动 LLM 构建，请先查看切分结构预览');
+                    }
+                    return;
+                }
                 const apiCfg = buildApiConfig(cfg);
                 if (apiCfg.chatBase && apiCfg.chatKey) {
                     await runLocalLlmUpgrade(pack.id);
                 } else {
-                    st.text(`已切分入库 (${stats.arcs || 0}章)。请先在上方「旁路模型 API 配置」填写 API Base URL 与 API Key，再点击「开始 / 继续 LLM 目录构建」补全目录摘要与别名表。`);
+                    st.text(`已切分入库 (${volText}${stats.arcs || 0}章 / ${stats.scenes || 0}幕)。请先在上方「旁路模型 API 配置」填写 API Base URL 与 API Key，再点击「开始 / 继续 LLM 目录构建」补全目录摘要与别名表。`);
                 }
             }
         } catch (err) {
@@ -1494,6 +1792,7 @@ jQuery(async () => {
         cfg.corpus = $(this).val();
         saveSettingsDebounced();
         renderLocalSeriesOptions();
+        renderLocalSplitPreview(localPacksMap.get(cfg.corpus));
     });
     bind('#lorecodex_max_order', 'maxOrder', el => normalizeMaxOrder(el.val()));
     bind('#lorecodex_max_scenes', 'maxScenes', el => normalizeMaxScenes(el.val()));

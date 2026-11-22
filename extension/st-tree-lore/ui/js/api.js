@@ -2,6 +2,7 @@ const IS_LOCAL_QUERY = typeof window !== 'undefined' && new URLSearchParams(wind
 let forceLocalMode = IS_LOCAL_QUERY;
 let browserEnginePromise = null;
 const localJobsMap = new Map();
+const localJobControllers = new Map();
 const localAgentsCache = new Map();
 
 async function getBrowserEngine() {
@@ -363,6 +364,57 @@ export async function fetchModels(baseUrl, apiKey) {
   }
 }
 
+export function cancelJob(jobId) {
+  const ctrl = localJobControllers.get(jobId);
+  if (!ctrl) return false;
+  ctrl.abort();
+  return true;
+}
+
+export async function previewLocalImportFile({ filename = 'upload.txt', buffer, kind = 'novel', corpusId = 'preview', name = '预览书库', category = '' }) {
+  try {
+    const be = await getBrowserEngine();
+    const rawBytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    const fnameLower = String(filename || '').toLowerCase();
+    const isLorepack = fnameLower.endsWith('.lorepack.json');
+    if (isLorepack) return { ok: false, skipped: true };
+    const isEpub = fnameLower.endsWith('.epub');
+    const isJson = kind === 'lore' || fnameLower.endsWith('.json') || fnameLower.endsWith('.jsonl');
+    const rawText = isEpub
+      ? await be.extractEpubTextInBrowser(rawBytes)
+      : be.decodeTextBufferAuto(rawBytes);
+    const pack = isJson
+      ? be.buildLoreCorpusInBrowser({
+          rawJson: rawText,
+          corpusId: corpusId || 'preview',
+          name: name || corpusId || '预览书库',
+          category: category || '档案设定',
+        })
+      : be.buildNovelCorpusInBrowser({
+          rawText,
+          corpusId: corpusId || 'preview',
+          name: name || corpusId || '预览书库',
+          category: category || '正文',
+        });
+    const report = be.inspectCorpusStructure(pack);
+    const estimate = isJson ? null : be.estimateBrowserLlmUpgradePlan(pack, { workers: 4 });
+    return { ok: true, report, estimate };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+function buildProgressLabel(prog, fallbackLabel = '') {
+  if (!prog) return fallbackLabel;
+  if (prog.event === 'done' || prog.phase === 'done') return '全部构建完成';
+  if (prog.phase === 'series_meta') {
+    return `提炼全卷总览：${prog.series || '默认分卷'}`;
+  }
+  const serPrefix = prog.series ? `${prog.series} / ` : '';
+  const scSuffix = prog.sceneTitle ? ` · ${prog.sceneTitle}` : '';
+  return prog.arcTitle ? `${serPrefix}${prog.arcTitle}${scSuffix}` : fallbackLabel;
+}
+
 export async function importCorpus(payload) {
   if (!forceLocalMode) {
     return reqJson('/corpora/import', {
@@ -373,20 +425,47 @@ export async function importCorpus(payload) {
   }
   const be = await getBrowserEngine();
   const jobId = 'job_local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  const abortCtrl = new AbortController();
+  localJobControllers.set(jobId, abortCtrl);
+  const startedAtMs = Date.now();
   const job = {
     id: jobId,
     status: 'running',
+    canCancel: true,
     kind: payload.kind || 'novel',
     corpusId: payload.corpusId,
     filename: payload.filename || 'upload.txt',
-    startedAt: new Date().toISOString(),
+    startedAt: new Date(startedAtMs).toISOString(),
     finishedAt: null,
     logs: [`[browser-idb] 正在浏览器内解析与切分「${payload.name || payload.corpusId}」...`],
+    progress: {
+      phase: 'init',
+      event: 'init',
+      percent: 0,
+      doneArcs: 0,
+      totalArcs: 0,
+      doneScenes: 0,
+      totalScenes: 0,
+      doneCalls: 0,
+      totalCalls: 0,
+      doneSeries: 0,
+      totalSeries: 0,
+      workers: 4,
+      elapsedMs: 0,
+      etaMs: null,
+      avgCallMs: null,
+      estMinMs: 0,
+      estMaxMs: 0,
+      startedAtMs,
+      updatedAtMs: startedAtMs,
+      currentLabel: '正在解析并切分文本...',
+    },
     error: '',
   };
   localJobsMap.set(jobId, job);
 
   (async () => {
+    let pack = null;
     try {
       const rawBytes = decodeBase64ToBytes(payload.contentBase64);
       const fnameLower = String(payload.filename || '').toLowerCase();
@@ -399,7 +478,7 @@ export async function importCorpus(payload) {
       const mergeTarget = payload.mergeInto
         ? existingRows.find((r) => r.id === payload.mergeInto) || null
         : null;
-      const pack = isJson
+      pack = isJson
         ? be.buildLoreCorpusInBrowser({
             rawJson: rawText,
             corpusId: payload.corpusId,
@@ -416,40 +495,108 @@ export async function importCorpus(payload) {
       await be.idbSaveCorpus(pack);
       localAgentsCache.clear();
       const st = pack.indexData?.stats || {};
-      job.logs.push(`[browser-idb] 切分完成：${st.arcs || 0} 章 / ${st.scenes || 0} 幕 (${st.total_chars || 0} 字)`);
+      const report = be.inspectCorpusStructure(pack);
+      job.structureReport = report;
+      const volStr = report.hasNamedSeries ? `${report.seriesCount} 卷 / ` : '';
+      job.logs.push(
+        `[browser-idb] 切分完成：${volStr}${st.arcs || 0} 章 / ${st.scenes || 0} 幕 (${(st.total_chars || 0).toLocaleString()} 字，均章 ${report.avgArcChars.toLocaleString()} 字)`
+      );
+      for (const w of report.warnings) {
+        job.logs.push(`[${w.level === 'error' ? '高危异常' : '提示'}] ${w.message}`);
+      }
 
-      if (payload.useLlm && !String(payload.filename || '').toLowerCase().endsWith('.lorepack.json')) {
-        const apiCfg = await getLocalApiConfig(be);
-        if (apiCfg.chatBase && apiCfg.chatKey) {
-          job.logs.push('[browser-idb] 正在启动纯前端 LLM 智能目录构建 (含断点续传)...');
-          const res = await be.upgradeBrowserCorpusWithLLM(pack, apiCfg, {
-            workers: 4,
-            onProgress(prog) {
-              if (prog.phase === 'series_meta') {
-                job.logs.push(`[series_meta] 正在提炼「${prog.series}」全卷总览、人物别名与设定术语...`);
-              } else {
-                job.logs.push(`[${prog.done}/${prog.total}] 已完成《${prog.arcTitle}》`);
-              }
-            },
-            async onSave(updatedPack) {
-              await be.idbSaveCorpus(updatedPack);
-              localAgentsCache.clear();
-            },
-          });
-          job.logs.push(
-            `[browser-idb] LLM 目录构建完成：${res.upgradedArcs} 章 / ${res.upgradedScenes} 幕，${res.aliasesCount} 组别名，${res.glossaryCount} 条术语`
-          );
+      const isLorepack = fnameLower.endsWith('.lorepack.json');
+      if (payload.useLlm && !isLorepack) {
+        if (!isJson && report.shouldBlockAutoLlm && !payload.allowLlmOnAnomaly) {
+          job.logs.push('[护栏拦截] 检测到高危切分异常，已跳过自动 LLM 构建。请检查目录结构后，在「语料配置 -> LLM 目录补全」手动确认启动。');
         } else {
-          job.logs.push('[提示] 尚未配置 API Key，已先保存结构树；请在右上角「模型」配置 API Key 后打开「语料配置 -> LLM 目录补全」');
+          const apiCfg = await getLocalApiConfig(be);
+          if (apiCfg.chatBase && apiCfg.chatKey) {
+            const workers = 4;
+            const plan = be.estimateBrowserLlmUpgradePlan(pack, { workers });
+            job.progress = {
+              ...job.progress,
+              phase: 'arcs',
+              totalArcs: plan.totalArcs,
+              totalScenes: plan.totalScenes,
+              totalCalls: plan.totalCalls,
+              totalSeries: plan.totalSeriesMeta,
+              workers: plan.effectiveWorkers,
+              estMinMs: plan.estMinMs,
+              estMaxMs: plan.estMaxMs,
+              updatedAtMs: Date.now(),
+              currentLabel: '准备启动 LLM 目录构建...',
+            };
+            job.logs.push(
+              `[browser-idb] 启动 LLM 智能目录构建：${plan.totalArcs} 章 / ${plan.totalScenes} 幕 / 预计 ${plan.totalCalls} 次请求（并发 ${plan.effectiveWorkers}，参考耗时 ${be.formatDurationZh(plan.estMinMs)} ~ ${be.formatDurationZh(plan.estMaxMs)}）`
+            );
+            const res = await be.upgradeBrowserCorpusWithLLM(pack, apiCfg, {
+              workers,
+              signal: abortCtrl.signal,
+              onProgress(prog) {
+                job.progress = {
+                  ...prog,
+                  updatedAtMs: Date.now(),
+                  currentLabel: buildProgressLabel(prog, job.progress.currentLabel),
+                };
+                if (prog.event === 'start') {
+                  job.logs.push(`[browser-idb] 已派发首批 ${prog.workers} 路并发请求...`);
+                } else if (prog.arcCompleted) {
+                  const etaStr = prog.etaMs !== null && prog.etaMs !== undefined ? ` | 剩余约 ${be.formatDurationZh(prog.etaMs)}` : '';
+                  job.logs.push(`[${prog.doneArcs}/${prog.totalArcs}] 已完成《${prog.arcTitle}》(${prog.percent}%${etaStr})`);
+                } else if (prog.event === 'series_meta_start') {
+                  job.logs.push(`[series_meta] 正在提炼「${prog.series}」全卷总览、人物别名与设定术语...`);
+                }
+              },
+              async onSave(updatedPack) {
+                await be.idbSaveCorpus(updatedPack);
+                localAgentsCache.clear();
+              },
+            });
+            job.logs.push(
+              `[browser-idb] LLM 目录构建完成（耗时 ${be.formatDurationZh(res.elapsedMs)}）：${res.upgradedArcs} 章 / ${res.upgradedScenes} 幕，${res.aliasesCount} 组别名，${res.glossaryCount} 条术语`
+            );
+          } else {
+            job.logs.push('[提示] 尚未配置 API Key，已先保存结构树；请在右上角「模型」配置 API Key 后打开「语料配置 -> LLM 目录补全」');
+          }
         }
       }
+      job.progress = {
+        ...job.progress,
+        phase: 'done',
+        event: 'done',
+        percent: 100,
+        etaMs: 0,
+        elapsedMs: Date.now() - startedAtMs,
+        updatedAtMs: Date.now(),
+        currentLabel: '构建完成',
+      };
       job.status = 'done';
       job.finishedAt = new Date().toISOString();
     } catch (e) {
-      job.status = 'error';
+      if (pack) {
+        await be.idbSaveCorpus(pack).catch(() => {});
+        localAgentsCache.clear();
+      }
+      const aborted = abortCtrl.signal.aborted;
       job.error = e?.message || String(e);
-      job.logs.push(`[error] ${job.error}`);
+      job.progress = {
+        ...job.progress,
+        phase: aborted ? 'aborted' : 'error',
+        elapsedMs: Date.now() - (job.progress?.startedAtMs || startedAtMs),
+        updatedAtMs: Date.now(),
+        currentLabel: aborted ? '已暂停，断点已保存' : `出错中断: ${job.error}`,
+      };
+      if (aborted) {
+        job.status = 'aborted';
+        job.logs.push('[paused] 用户已暂停，当前已完成章节已写入 IndexedDB，可在「语料配置 -> LLM 目录补全」断点续传');
+      } else {
+        job.status = 'error';
+        job.logs.push(`[error] ${job.error}`);
+      }
       job.finishedAt = new Date().toISOString();
+    } finally {
+      localJobControllers.delete(jobId);
     }
   })();
 
@@ -470,15 +617,56 @@ export async function upgradeCorpus(id, payload = {}) {
     throw new Error('请先点击右上角「模型」配置 API Base URL 与 API Key 后再执行 LLM 目录补全');
   }
   const jobId = 'job_upg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  const abortCtrl = new AbortController();
+  localJobControllers.set(jobId, abortCtrl);
+  const workers = Math.min(Math.max(Number(payload.workers) || 4, 1), 16);
+  const limitArcs = Number(payload.limitArcs) || 0;
+  const force = Boolean(payload.force);
+  const skipMeta = Boolean(payload.skipMeta);
+  const plan = be.estimateBrowserLlmUpgradePlan(pack, {
+    series: payload.series || '',
+    limitArcs,
+    workers,
+    force,
+    skipMeta,
+  });
+  const startedAtMs = Date.now();
   const job = {
     id: jobId,
     status: 'running',
+    canCancel: true,
     kind: 'upgrade',
     corpusId: pack.id,
     filename: payload.series ? `upgrade:${payload.series}` : 'upgrade:all',
-    startedAt: new Date().toISOString(),
+    startedAt: new Date(startedAtMs).toISOString(),
     finishedAt: null,
-    logs: [`[browser-idb] 开始原地补全「${pack.config?.name || pack.id}」LLM 目录...`],
+    logs: [
+      plan.totalArcs > 0
+        ? `[browser-idb] 开始原地补全「${pack.config?.name || pack.id}」LLM 目录：${plan.totalArcs} 章 / ${plan.totalScenes} 幕 / 预计 ${plan.totalCalls} 次请求（并发 ${plan.effectiveWorkers}，参考耗时 ${be.formatDurationZh(plan.estMinMs)} ~ ${be.formatDurationZh(plan.estMaxMs)}）`
+        : `[browser-idb] 开始原地补全「${pack.config?.name || pack.id}」LLM 目录...`,
+    ],
+    progress: {
+      phase: 'arcs',
+      event: 'init',
+      percent: plan.totalArcs ? 0 : 100,
+      doneArcs: 0,
+      totalArcs: plan.totalArcs,
+      doneScenes: 0,
+      totalScenes: plan.totalScenes,
+      doneCalls: 0,
+      totalCalls: plan.totalCalls,
+      doneSeries: 0,
+      totalSeries: plan.totalSeriesMeta,
+      workers: plan.effectiveWorkers,
+      elapsedMs: 0,
+      etaMs: null,
+      avgCallMs: null,
+      estMinMs: plan.estMinMs,
+      estMaxMs: plan.estMaxMs,
+      startedAtMs,
+      updatedAtMs: startedAtMs,
+      currentLabel: plan.targetArcs[0]?.title ? `准备构建：${plan.targetArcs[0].title}` : '准备构建...',
+    },
     error: '',
   };
   localJobsMap.set(jobId, job);
@@ -487,14 +675,24 @@ export async function upgradeCorpus(id, payload = {}) {
     try {
       const res = await be.upgradeBrowserCorpusWithLLM(pack, apiCfg, {
         series: payload.series || '',
-        limitArcs: Number(payload.limitArcs) || 0,
-        force: Boolean(payload.force),
-        workers: 4,
+        limitArcs,
+        force,
+        skipMeta,
+        workers,
+        signal: abortCtrl.signal,
         onProgress(prog) {
-          if (prog.phase === 'series_meta') {
+          job.progress = {
+            ...prog,
+            updatedAtMs: Date.now(),
+            currentLabel: buildProgressLabel(prog, job.progress.currentLabel),
+          };
+          if (prog.event === 'start') {
+            job.logs.push(`[browser-idb] 已派发首批 ${prog.workers} 路并发请求...`);
+          } else if (prog.arcCompleted) {
+            const etaStr = prog.etaMs !== null && prog.etaMs !== undefined ? ` | 剩余约 ${be.formatDurationZh(prog.etaMs)}` : '';
+            job.logs.push(`[${prog.doneArcs}/${prog.totalArcs}] 已补全《${prog.arcTitle}》(${prog.percent}%${etaStr})`);
+          } else if (prog.event === 'series_meta_start') {
             job.logs.push(`[series_meta] 正在提炼「${prog.series}」全卷总览、人物别名与设定术语...`);
-          } else {
-            job.logs.push(`[${prog.done}/${prog.total}] 已补全《${prog.arcTitle}》`);
           }
         },
         async onSave(updatedPack) {
@@ -502,20 +700,49 @@ export async function upgradeCorpus(id, payload = {}) {
           localAgentsCache.clear();
         },
       });
+      await be.idbSaveCorpus(pack);
+      localAgentsCache.clear();
       if (res.message) {
         job.logs.push(res.message);
       } else {
         job.logs.push(
-          `[browser-idb] 完成：升级 ${res.upgradedArcs} 章 / ${res.upgradedScenes} 幕，合成 ${res.synthesizedSeries} 卷总览，累计 ${res.aliasesCount} 组别名、${res.glossaryCount} 条术语`
+          `[browser-idb] 完成（总耗时 ${be.formatDurationZh(res.elapsedMs)}）：升级 ${res.upgradedArcs} 章 / ${res.upgradedScenes} 幕，合成 ${res.synthesizedSeries} 卷总览，累计 ${res.aliasesCount} 组别名、${res.glossaryCount} 条术语`
         );
       }
+      job.progress = {
+        ...job.progress,
+        phase: 'done',
+        event: 'done',
+        percent: 100,
+        etaMs: 0,
+        elapsedMs: res.elapsedMs ?? (Date.now() - startedAtMs),
+        updatedAtMs: Date.now(),
+        currentLabel: res.message || '全部补全完成',
+      };
       job.status = 'done';
       job.finishedAt = new Date().toISOString();
     } catch (e) {
-      job.status = 'error';
+      await be.idbSaveCorpus(pack).catch(() => {});
+      localAgentsCache.clear();
+      const aborted = abortCtrl.signal.aborted;
       job.error = e?.message || String(e);
-      job.logs.push(`[error] ${job.error}`);
+      job.progress = {
+        ...job.progress,
+        phase: aborted ? 'aborted' : 'error',
+        elapsedMs: Date.now() - (job.progress?.startedAtMs || startedAtMs),
+        updatedAtMs: Date.now(),
+        currentLabel: aborted ? '已暂停，断点已保存' : `出错中断: ${job.error}`,
+      };
+      if (aborted) {
+        job.status = 'aborted';
+        job.logs.push('[paused] 用户已暂停，已完成章节已写入 IndexedDB，可随时点击开始继续断点续传');
+      } else {
+        job.status = 'error';
+        job.logs.push(`[error] ${job.error}`);
+      }
       job.finishedAt = new Date().toISOString();
+    } finally {
+      localJobControllers.delete(jobId);
     }
   })();
 

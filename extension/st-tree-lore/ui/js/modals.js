@@ -7,10 +7,280 @@ import {
   saveCorpusConfig,
   importCorpus,
   upgradeCorpus,
+  cancelJob,
+  previewLocalImportFile,
   fetchJob,
   fetchCorpora,
   exportCorpusLorepack,
 } from './api.js';
+
+function formatDurationZh(ms) {
+  if (ms === null || ms === undefined || !Number.isFinite(Number(ms)) || Number(ms) < 0) {
+    return '计算中...';
+  }
+  const n = Number(ms);
+  if (n <= 0) return '0秒';
+  if (n < 1000) return '<1秒';
+  const totalSec = Math.round(n / 1000);
+  if (totalSec < 60) return `${totalSec}秒`;
+  const totalMin = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (totalMin < 60) {
+    return sec === 0 ? `${totalMin}分钟` : `${totalMin}分${String(sec).padStart(2, '0')}秒`;
+  }
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  return mins === 0 ? `${hours}小时` : `${hours}小时${String(mins).padStart(2, '0')}分`;
+}
+
+function isArcDoneInIndex(arc, indexData) {
+  if (!arc) return false;
+  if (arc._llm_done === true) return true;
+  if (arc._llm_done === false) return false;
+  const stats = indexData?.stats || {};
+  if (stats.llm_arcs === 0 && stats.llm_scenes === 0) return false;
+  if (typeof stats.llm_arcs === 'number' && stats.llm_arcs < (indexData?.arcs?.length || 0)) {
+    return false;
+  }
+  return Boolean(String(arc.description || '').trim());
+}
+
+function estimateIndexUpgradePlan(indexData, { series = '', limitArcs = 0, workers = 4, force = false, skipMeta = false } = {}) {
+  const allArcs = indexData?.arcs || [];
+  const serFilter = String(series || '').trim();
+  let targetArcs = allArcs.filter((a) => !serFilter || String(a.series || a.category || '').trim() === serFilter);
+  if (!force) {
+    targetArcs = targetArcs.filter((a) => !isArcDoneInIndex(a, indexData));
+  }
+  const lim = Number(limitArcs) > 0 ? Math.floor(Number(limitArcs)) : 0;
+  if (lim > 0) targetArcs = targetArcs.slice(0, lim);
+
+  let totalScenes = 0;
+  let arcSummaryCalls = 0;
+  const touchedSeries = new Set();
+  for (const arc of targetArcs) {
+    const scenes = arc.scenes || [];
+    const arcDone = isArcDoneInIndex(arc, indexData);
+    for (const sc of scenes) {
+      if (!force && (sc._llm_done || arcDone) && sc.summary) continue;
+      totalScenes += 1;
+    }
+    if (scenes.length > 1) arcSummaryCalls += 1;
+    touchedSeries.add(String(arc.series || arc.category || '正文卷').trim());
+  }
+  const totalSeriesMeta = skipMeta ? 0 : touchedSeries.size;
+  const phase1Calls = totalScenes + arcSummaryCalls;
+  const totalCalls = phase1Calls + totalSeriesMeta;
+  const effectiveWorkers = Math.min(Math.max(Number(workers) || 4, 1), Math.max(1, targetArcs.length));
+  const estMinMs = totalCalls > 0 ? Math.round((phase1Calls / effectiveWorkers + totalSeriesMeta) * 2500) : 0;
+  const estMaxMs = totalCalls > 0 ? Math.round((phase1Calls / effectiveWorkers + totalSeriesMeta) * 8000) : 0;
+  return {
+    totalArcs: targetArcs.length,
+    totalScenes,
+    totalCalls,
+    effectiveWorkers,
+    estMinMs,
+    estMaxMs,
+  };
+}
+
+function renderJobProgressMarkup(prefix) {
+  return `
+    <div id="${prefix}ProgWrap" class="job-prog-wrap">
+      <div class="job-prog-head">
+        <span id="${prefix}ProgTitle" class="job-prog-title">准备构建...</span>
+        <span id="${prefix}ProgTime" class="job-prog-time">已用 0秒</span>
+      </div>
+      <div class="job-prog-track">
+        <div id="${prefix}ProgFill" class="job-prog-fill running indeterminate"></div>
+      </div>
+      <div class="job-prog-sub">
+        <span id="${prefix}ProgCur" class="job-prog-cur">等待开始...</span>
+        <span id="${prefix}ProgMeta"></span>
+      </div>
+    </div>
+  `;
+}
+
+function renderJobProgressUi(prefix, job, fallbackStartMs) {
+  const wrap = $(`#${prefix}ProgWrap`);
+  if (!wrap) return;
+  const fill = $(`#${prefix}ProgFill`);
+  const titleEl = $(`#${prefix}ProgTitle`);
+  const timeEl = $(`#${prefix}ProgTime`);
+  const curEl = $(`#${prefix}ProgCur`);
+  const metaEl = $(`#${prefix}ProgMeta`);
+
+  const now = Date.now();
+  const startedAtMs = job?.progress?.startedAtMs || (job?.startedAt ? Date.parse(job.startedAt) : fallbackStartMs) || now;
+  const status = job?.status || 'running';
+
+  let prog = job?.progress || null;
+  if (!prog) {
+    // Fallback for external Node server jobs that only emit logs like "[12/100] ..."
+    const logs = Array.isArray(job?.logs) ? job.logs : [];
+    let parsedDone = 0;
+    let parsedTotal = 0;
+    let lastLine = logs[logs.length - 1] || '';
+    for (let i = logs.length - 1; i >= 0; i--) {
+      const m = String(logs[i] || '').match(/\[(\d+)\/(\d+)\]/);
+      if (m) {
+        parsedDone = Number(m[1]);
+        parsedTotal = Number(m[2]);
+        lastLine = logs[i];
+        break;
+      }
+    }
+    const elapsed = Math.max(0, now - startedAtMs);
+    const pct = status === 'done'
+      ? 100
+      : (parsedTotal > 0 ? Math.min(99.9, Number(((parsedDone / parsedTotal) * 100).toFixed(1))) : null);
+    const etaMs = status === 'done'
+      ? 0
+      : (parsedDone > 0 && parsedTotal > parsedDone ? Math.round((elapsed / parsedDone) * (parsedTotal - parsedDone)) : null);
+    prog = {
+      phase: status === 'done' ? 'done' : 'arcs',
+      percent: pct,
+      doneArcs: parsedDone,
+      totalArcs: parsedTotal,
+      doneCalls: parsedDone,
+      totalCalls: parsedTotal,
+      elapsedMs: elapsed,
+      etaMs,
+      startedAtMs,
+      currentLabel: lastLine || '服务端处理中...',
+    };
+  }
+
+  const modeClass = status === 'done'
+    ? 'done'
+    : status === 'aborted'
+      ? 'paused'
+      : status === 'error'
+        ? 'err'
+        : 'running';
+  fill.classList.remove('running', 'indeterminate', 'done', 'paused', 'err');
+  fill.classList.add(modeClass);
+
+  const hasPct = prog.percent !== null && prog.percent !== undefined && Number.isFinite(Number(prog.percent));
+  if (!hasPct && status === 'running') {
+    fill.classList.add('indeterminate');
+  } else {
+    const pct = status === 'done' ? 100 : Math.min(100, Math.max(0, Number(prog.percent) || 0));
+    fill.style.width = `${pct.toFixed(1)}%`;
+  }
+
+  const elapsedMs = status === 'running'
+    ? Math.max(0, now - startedAtMs)
+    : Math.max(0, Number(prog.elapsedMs ?? (now - startedAtMs)));
+
+  let etaPart = '';
+  if (status === 'done') {
+    etaPart = '已完成';
+  } else if (status === 'aborted') {
+    etaPart = '已暂停';
+  } else if (status === 'error') {
+    etaPart = '已中断';
+  } else if (prog.etaMs !== null && prog.etaMs !== undefined) {
+    const sinceUpd = prog.updatedAtMs ? Math.max(0, now - prog.updatedAtMs) : 0;
+    const liveEta = Math.max(0, Number(prog.etaMs) - sinceUpd);
+    etaPart = `剩余约 ${formatDurationZh(liveEta)}`;
+  } else if (prog.estMaxMs > 0) {
+    etaPart = `参考 ${formatDurationZh(prog.estMinMs)}~${formatDurationZh(prog.estMaxMs)}`;
+  } else {
+    etaPart = '测速中...';
+  }
+
+  const pctStr = hasPct ? `${(status === 'done' ? 100 : Number(prog.percent)).toFixed(1)}%` : '进行中';
+  const arcSpan = Number(prog.totalArcs) > 0 ? ` (${prog.doneArcs || 0}/${prog.totalArcs} 章)` : '';
+  if (status === 'done') {
+    titleEl.textContent = `构建完成 · 100.0%${arcSpan}`;
+  } else if (status === 'aborted') {
+    titleEl.textContent = `已暂停并保存断点 · ${pctStr}${arcSpan}`;
+  } else if (status === 'error') {
+    titleEl.textContent = `构建中断（断点已保存）· ${pctStr}${arcSpan}`;
+  } else if (prog.phase === 'series_meta') {
+    titleEl.textContent = `提炼全卷总览 · ${pctStr} (${prog.doneSeries || 0}/${prog.totalSeries || 0} 卷)`;
+  } else if (prog.phase === 'init') {
+    titleEl.textContent = `准备构建 · ${prog.currentLabel || '解析文本中...'}`;
+  } else {
+    titleEl.textContent = `正在构建 LLM 目录 · ${pctStr}${arcSpan}`;
+  }
+
+  timeEl.textContent = `已用 ${formatDurationZh(elapsedMs)} · ${etaPart}`;
+  curEl.textContent = prog.currentLabel || '处理中...';
+
+  const reqPart = Number(prog.totalCalls) > 0 ? `请求 ${prog.doneCalls || 0}/${prog.totalCalls}` : '';
+  const avgPart = prog.avgCallMs ? ` · 均速 ${(prog.avgCallMs / 1000).toFixed(1)}s/次` : '';
+  metaEl.textContent = `${reqPart}${avgPart}`;
+}
+
+function renderSplitPreviewHtml(report, estimate, { autoUncheckedLlm = false } = {}) {
+  if (!report) return '';
+  const badgeCls = report.severity === 'error' ? 'err' : report.severity === 'warn' ? 'warn' : 'ok';
+  const badgeText = report.severity === 'error' ? '高危异常' : report.severity === 'warn' ? '建议检查' : '切分正常';
+  const volLabel = report.hasNamedSeries ? `${report.seriesCount} 卷` : (report.isLorePack ? '设定集' : '未分卷');
+  const statsText = `${volLabel} · ${report.arcCount} 章 · ${report.sceneCount} 幕 · ${report.totalChars.toLocaleString()} 字 · 均章 ${report.avgArcChars.toLocaleString()} 字`;
+
+  const estHtml = estimate && estimate.totalArcs > 0
+    ? `<div class="pane-sub" style="margin:0;">若勾选下方 LLM 构建：预计 ${estimate.totalCalls} 次请求（并发 ${estimate.effectiveWorkers}）· 参考耗时约 ${formatDurationZh(estimate.estMinMs)} ~ ${formatDurationZh(estimate.estMaxMs)}</div>`
+    : '';
+
+  const blockNotice = autoUncheckedLlm
+    ? `<div class="split-warn-item err"><b>防误烧护栏已拦截</b>：已自动取消勾选「启用 LLM 智能目录构建」，避免按异常切分白白调用 API。如确认无误仍要构建，可手动重新勾选后再导入。</div>`
+    : '';
+
+  const warnsHtml = report.warnings.length
+    ? `<div class="split-warns">${report.warnings
+        .map((w) => `<div class="split-warn-item ${w.level === 'error' ? 'err' : 'warn'}">${esc(w.message)}</div>`)
+        .join('')}</div>`
+    : '';
+
+  const seriesHtml = report.seriesBreakdown.length
+    ? `<div class="split-series-row">${report.seriesBreakdown
+        .slice(0, 16)
+        .map((s) => `<span class="split-chip">${esc(s.name)} (${s.arcs}章/${s.scenes}幕)</span>`)
+        .join('')}${report.seriesBreakdown.length > 16 ? `<span class="split-chip">…共 ${report.seriesBreakdown.length} 卷</span>` : ''}</div>`
+    : '';
+
+  const samplesHtml = report.sampleArcs.length
+    ? `<div class="split-samples">${report.sampleArcs
+        .map((item) => {
+          if (item.separator) {
+            return `<div class="split-sep">··· 省略中间 ${item.omittedCount} 章 ···</div>`;
+          }
+          const meta = `${item.series ? esc(item.series) + ' · ' : ''}${item.sceneCount}幕 / ${item.chars.toLocaleString()}字`;
+          return `<div class="split-sample-row">
+            <div class="split-sample-head">
+              <span>[${esc(item.arc_id)}] ${esc(item.title)}</span>
+              <span style="font-weight:400;color:var(--ink-muted);">${meta}</span>
+            </div>
+            ${item.snippet ? `<div class="split-snippet">${esc(item.snippet)}</div>` : ''}
+          </div>`;
+        })
+        .join('')}</div>`
+    : '';
+
+  const shouldOpen = report.severity !== 'ok';
+  return `
+    <div class="split-preview-head">
+      <span>切分结构预检（构建前预览）</span>
+      <span class="split-badge ${badgeCls}">${badgeText}</span>
+    </div>
+    <div class="split-stats">${statsText}</div>
+    ${estHtml}
+    ${blockNotice}
+    ${warnsHtml}
+    <details ${shouldOpen ? 'open' : ''} style="margin-top:2px;">
+      <summary style="cursor:pointer;font-size:11.5px;color:var(--ink-soft);user-select:none;">查看分卷分布与章节抽样（前 5 章 + 尾 2 章）</summary>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+        ${!report.hasNamedSeries && !report.isLorePack ? '<div class="pane-sub" style="margin:0;">提示：未匹配到“第X卷/部/篇”标记，所有章节暂归入同一卷。</div>' : ''}
+        ${seriesHtml}
+        ${samplesHtml}
+      </div>
+    </details>
+  `;
+}
 
 let activeModalPoll = null;
 function clearModalPoll() {
@@ -20,21 +290,56 @@ function clearModalPoll() {
   }
 }
 
-function startModalJobPoll({ jobId, logsEl, statusEl, runningText, onDone, onError }) {
+function startModalJobPoll({
+  jobId,
+  initialJob,
+  progPrefix,
+  logsEl,
+  statusEl,
+  stopBtnEl,
+  runningText,
+  onDone,
+  onAborted,
+  onError,
+}) {
   clearModalPoll();
+  const fallbackStartMs = Date.now();
+  if (progPrefix && initialJob) {
+    renderJobProgressUi(progPrefix, initialJob, fallbackStartMs);
+  }
+  if (stopBtnEl) {
+    stopBtnEl.style.display = initialJob?.canCancel ? 'inline-flex' : 'none';
+    stopBtnEl.disabled = false;
+    stopBtnEl.onclick = () => {
+      stopBtnEl.disabled = true;
+      cancelJob(jobId);
+      if (statusEl) statusEl.textContent = '正在暂停并写入断点，请稍候...';
+    };
+  }
+
   activeModalPoll = setInterval(async () => {
     try {
       const jr = await fetchJob(jobId);
       const job = jr.job;
+      if (progPrefix) {
+        renderJobProgressUi(progPrefix, job, fallbackStartMs);
+      }
       if (logsEl) {
         logsEl.textContent = (job.logs || []).join('\n');
         logsEl.scrollTop = logsEl.scrollHeight;
       }
       if (job.status === 'done') {
         clearModalPoll();
+        if (stopBtnEl) stopBtnEl.style.display = 'none';
         if (onDone) await onDone(job);
+      } else if (job.status === 'aborted') {
+        clearModalPoll();
+        if (stopBtnEl) stopBtnEl.style.display = 'none';
+        if (statusEl) statusEl.textContent = '已暂停并保存断点（已完成章节已入库，可随时继续）';
+        if (onAborted) await onAborted(job);
       } else if (job.status === 'error') {
         clearModalPoll();
+        if (stopBtnEl) stopBtnEl.style.display = 'none';
         if (statusEl) statusEl.textContent = `任务失败: ${job.error}`;
         if (onError) await onError(job);
       } else if (statusEl) {
@@ -328,10 +633,13 @@ export async function openCorpusModal() {
               <span>强制重生成已有摘要</span>
             </label>
           </div>
-          <div>
+          <div id="ccUpgEstimate" class="pane-sub"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
             <button id="ccUpgStartBtn" type="button" class="btn-seal">开始原地补全 LLM 目录</button>
+            <button id="ccUpgStopBtn" type="button" class="btn-sm" style="display:none;">暂停并保存断点</button>
           </div>
           <div id="ccUpgJobWrap" style="display:none;flex-direction:column;gap:6px;">
+            ${renderJobProgressMarkup('ccUpg')}
             <div id="ccUpgJobStatus" style="font-size:12px;font-weight:600;">准备补全...</div>
             <div id="ccUpgJobLogs" class="job-logs"></div>
           </div>
@@ -359,8 +667,30 @@ export async function openCorpusModal() {
         });
       });
 
+    const updateUpgEstimate = () => {
+      const estEl = $('#ccUpgEstimate');
+      if (!estEl) return;
+      const est = estimateIndexUpgradePlan(state.index, {
+        series: $('#ccUpgSeries')?.value || '',
+        limitArcs: Math.max(0, Number($('#ccUpgLimit')?.value) || 0),
+        force: Boolean($('#ccUpgForce')?.checked),
+        skipMeta: !$('#ccUpgSynthMeta')?.checked,
+      });
+      if (!est.totalArcs) {
+        estEl.textContent = '所选范围均已完成 LLM 目录构建（如需重跑请勾选“强制重生成已有摘要”）';
+        return;
+      }
+      estEl.textContent = `本次待补全 ${est.totalArcs} 章 / ${est.totalScenes} 幕 · 预计 ${est.totalCalls} 次请求（并发 ${est.effectiveWorkers}）· 启动前参考耗时约 ${formatDurationZh(est.estMinMs)} ~ ${formatDurationZh(est.estMaxMs)}`;
+    };
+    updateUpgEstimate();
+    $('#ccUpgSeries')?.addEventListener('change', updateUpgEstimate);
+    $('#ccUpgLimit')?.addEventListener('input', updateUpgEstimate);
+    $('#ccUpgSynthMeta')?.addEventListener('change', updateUpgEstimate);
+    $('#ccUpgForce')?.addEventListener('change', updateUpgEstimate);
+
     $('#ccUpgStartBtn')?.addEventListener('click', async () => {
       const upgBtn = $('#ccUpgStartBtn');
+      const stopBtn = $('#ccUpgStopBtn');
       upgBtn.disabled = true;
       $('#ccUpgJobWrap').style.display = 'flex';
       $('#ccUpgJobStatus').textContent = '正在提交 LLM 目录补全任务...';
@@ -371,28 +701,50 @@ export async function openCorpusModal() {
           skipMeta: !$('#ccUpgSynthMeta').checked,
           force: $('#ccUpgForce').checked,
         });
+        const refreshAfterUpg = async (isAborted = false) => {
+          const [listRes, freshDetail] = await Promise.all([
+            fetchCorpora(),
+            fetchCorpusDetail(c.id).catch(() => null),
+          ]);
+          state.corpora = listRes.corpora || [];
+          await actions.switchCorpus?.(c.id, { keepRun: true });
+          if (freshDetail?.config) {
+            const fc = freshDetail.config;
+            if ($('#ccAliases')) $('#ccAliases').value = (fc.aliases || []).map((g) => g.join(', ')).join('\n');
+            if ($('#ccGlossary')) $('#ccGlossary').value = (fc.glossary || []).join('\n');
+          }
+          const newLlm = state.index?.stats?.llm_scenes || 0;
+          const newTot = state.index?.stats?.scenes || totalScenes;
+          $('#ccUpgCoverage').innerHTML = isAborted
+            ? `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已暂停并保存断点，可随时点击「开始原地补全 LLM 目录」续传）`
+            : `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已完成本轮补全并重载，新增别名与设定已同步至左侧标签页）`;
+          updateUpgEstimate();
+        };
+
         startModalJobPoll({
           jobId: res.job.id,
+          initialJob: res.job,
+          progPrefix: 'ccUpg',
           logsEl: $('#ccUpgJobLogs'),
           statusEl: $('#ccUpgJobStatus'),
-          runningText: () => '正在执行 LLM 目录补全（可切回主页面或稍候）...',
-          onDone: async () => {
-            $('#ccUpgJobStatus').textContent = '补全完成！正在热重载书库索引...';
-            const [listRes, freshDetail] = await Promise.all([
-              fetchCorpora(),
-              fetchCorpusDetail(c.id).catch(() => null),
-            ]);
-            state.corpora = listRes.corpora || [];
-            await actions.switchCorpus?.(c.id, { keepRun: true });
-            if (freshDetail?.config) {
-              const fc = freshDetail.config;
-              if ($('#ccAliases')) $('#ccAliases').value = (fc.aliases || []).map((g) => g.join(', ')).join('\n');
-              if ($('#ccGlossary')) $('#ccGlossary').value = (fc.glossary || []).join('\n');
+          stopBtnEl: stopBtn,
+          runningText: (job) => {
+            const p = job?.progress;
+            if (p && p.totalCalls > 0) {
+              const etaStr = p.etaMs !== null && p.etaMs !== undefined ? ` · 剩余约 ${formatDurationZh(p.etaMs)}` : '';
+              return `正在执行 LLM 目录补全（${p.percent}%${etaStr}，可切回主页面或随时暂停）`;
             }
-            const newLlm = state.index?.stats?.llm_scenes || 0;
-            const newTot = state.index?.stats?.scenes || totalScenes;
-            $('#ccUpgCoverage').innerHTML = `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已完成本轮补全并重载，新增别名与设定已同步至左侧标签页）`;
+            return '正在执行 LLM 目录补全（可切回主页面或稍候）...';
+          },
+          onDone: async (job) => {
+            $('#ccUpgJobStatus').textContent = `补全完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！正在热重载书库索引...`;
+            await refreshAfterUpg(false);
             showToast(`书库「${c.id}」LLM 目录补全完成！`, 'ok');
+            upgBtn.disabled = false;
+          },
+          onAborted: async () => {
+            await refreshAfterUpg(true);
+            showToast('已暂停 LLM 补全并保存断点', 'ok');
             upgBtn.disabled = false;
           },
           onError: () => {
@@ -514,6 +866,8 @@ export function openImportModal() {
         </div>
       </div>
 
+      <div id="impSplitPreviewWrap" class="split-preview-wrap" style="display:none;"></div>
+
       <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
           <input id="impUseLlm" type="checkbox" checked />
@@ -522,7 +876,11 @@ export function openImportModal() {
       </div>
 
       <div id="impJobWrap" style="display:none;flex-direction:column;gap:6px;">
-        <div id="impJobStatus" style="font-size:12px;font-weight:600;">准备构建...</div>
+        ${renderJobProgressMarkup('imp')}
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <div id="impJobStatus" style="font-size:12px;font-weight:600;">准备构建...</div>
+          <button id="impStopBtn" type="button" class="btn-sm" style="display:none;">暂停并保存断点</button>
+        </div>
         <div id="impJobLogs" class="job-logs"></div>
       </div>
     </div>
@@ -544,7 +902,62 @@ export function openImportModal() {
     if (isLore && $('#impCategory').value === '正文') $('#impCategory').value = '档案设定';
     if (!isLore && $('#impCategory').value === '档案设定') $('#impCategory').value = '正文';
   };
-  $('#impKind').addEventListener('change', updateModeUi);
+
+  let previewSeq = 0;
+  let userExplicitlyEnabledLlm = false;
+
+  $('#impUseLlm').addEventListener('change', (e) => {
+    userExplicitlyEnabledLlm = Boolean(e.target.checked);
+  });
+
+  const runFileSplitPreview = async (file) => {
+    const wrap = $('#impSplitPreviewWrap');
+    if (!wrap) return;
+    if (!file || file.name.toLowerCase().endsWith('.lorepack.json')) {
+      wrap.style.display = 'none';
+      wrap.innerHTML = '';
+      return;
+    }
+    const seq = ++previewSeq;
+    wrap.style.display = 'flex';
+    wrap.innerHTML = '<div class="pane-sub" style="margin:0;">正在解析并预检切分结构...</div>';
+    try {
+      const ab = await file.arrayBuffer();
+      if (seq !== previewSeq) return;
+      const res = await previewLocalImportFile({
+        filename: file.name,
+        buffer: ab,
+        kind: $('#impKind').value,
+        corpusId: $('#impCorpusId').value.trim() || 'preview',
+        name: $('#impName').value.trim() || file.name,
+        category: $('#impCategory').value.trim(),
+      });
+      if (seq !== previewSeq) return;
+      if (!res?.ok || !res.report) {
+        wrap.style.display = 'none';
+        wrap.innerHTML = '';
+        return;
+      }
+      let autoUncheckedLlm = false;
+      const useLlmEl = $('#impUseLlm');
+      if (res.report.shouldBlockAutoLlm && !res.report.isLorePack && useLlmEl.checked && !userExplicitlyEnabledLlm) {
+        useLlmEl.checked = false;
+        autoUncheckedLlm = true;
+      }
+      wrap.innerHTML = renderSplitPreviewHtml(res.report, res.estimate, { autoUncheckedLlm });
+      wrap.style.display = 'flex';
+    } catch (_) {
+      if (seq === previewSeq) {
+        wrap.style.display = 'none';
+        wrap.innerHTML = '';
+      }
+    }
+  };
+
+  $('#impKind').addEventListener('change', () => {
+    updateModeUi();
+    if (selectedFile) runFileSplitPreview(selectedFile);
+  });
 
   let lastAutoSlug = '';
   let lastAutoName = '';
@@ -552,6 +965,7 @@ export function openImportModal() {
   const handleFile = (file) => {
     if (!file) return;
     selectedFile = file;
+    userExplicitlyEnabledLlm = false;
     const lower = file.name.toLowerCase();
     const isLorepack = lower.endsWith('.lorepack.json');
     if (isLorepack) {
@@ -574,6 +988,7 @@ export function openImportModal() {
     if (isLorepack || lower.endsWith('.json') || lower.endsWith('.jsonl')) $('#impKind').value = 'lore';
     else $('#impKind').value = 'novel';
     updateModeUi();
+    runFileSplitPreview(file);
   };
 
   const dz = $('#impDropzone');
@@ -631,6 +1046,7 @@ export function openImportModal() {
         category: $('#impCategory').value.trim(),
         mergeInto,
         useLlm: $('#impUseLlm').checked,
+        allowLlmOnAnomaly: userExplicitlyEnabledLlm,
         filterGameStats: $('#impFilterStats').checked,
       });
 
@@ -638,20 +1054,50 @@ export function openImportModal() {
       const targetId = res.job.corpusId;
       startModalJobPoll({
         jobId,
+        initialJob: res.job,
+        progPrefix: 'imp',
         logsEl: $('#impJobLogs'),
         statusEl: $('#impJobStatus'),
-        runningText: (job) => `正在运行 (${job.kind})...`,
-        onDone: async () => {
-          $('#impJobStatus').textContent = `构建完成！书库 "${targetId}" 已入库`;
+        stopBtnEl: $('#impStopBtn'),
+        runningText: (job) => {
+          const p = job?.progress;
+          if (p && p.totalCalls > 0) {
+            const etaStr = p.etaMs !== null && p.etaMs !== undefined ? ` · 剩余约 ${formatDurationZh(p.etaMs)}` : '';
+            return `正在构建 (${p.percent}%${etaStr})...`;
+          }
+          return `正在运行 (${job.kind})...`;
+        },
+        onDone: async (job) => {
+          const wrap = $('#impSplitPreviewWrap');
+          if (wrap && !wrap.innerHTML.trim() && job?.structureReport) {
+            wrap.innerHTML = renderSplitPreviewHtml(job.structureReport, null);
+            wrap.style.display = 'flex';
+          }
+          const wasBlocked = job?.structureReport?.shouldBlockAutoLlm && $('#impUseLlm').checked && !userExplicitlyEnabledLlm;
+          $('#impJobStatus').textContent = wasBlocked
+            ? `已切分入库 "${targetId}"（高危异常已拦截自动 LLM 构建）`
+            : `构建完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！书库 "${targetId}" 已入库`;
           const listRes = await fetchCorpora();
           state.corpora = listRes.corpora || [];
-          showToast(`书库「${targetId}」导入建树成功！`, 'ok');
+          showToast(wasBlocked ? `书库「${targetId}」已切分入库，请检查结构后构建` : `书库「${targetId}」导入建树成功！`, 'ok');
           const switchBtn = $('#impDoneSwitchBtn');
           switchBtn.style.display = 'inline-flex';
           switchBtn.onclick = async () => {
             await actions.switchCorpus?.(targetId);
             cleanupClose();
           };
+        },
+        onAborted: async () => {
+          const listRes = await fetchCorpora();
+          state.corpora = listRes.corpora || [];
+          showToast(`书库「${targetId}」已保存断点，打开后可在语料配置继续补全`, 'ok');
+          const switchBtn = $('#impDoneSwitchBtn');
+          switchBtn.style.display = 'inline-flex';
+          switchBtn.onclick = async () => {
+            await actions.switchCorpus?.(targetId);
+            cleanupClose();
+          };
+          startBtn.disabled = false;
         },
         onError: (job) => {
           $('#impJobStatus').textContent = `构建失败: ${job.error}`;

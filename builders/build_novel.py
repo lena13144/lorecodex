@@ -1171,7 +1171,7 @@ def main():
 
         def _run_arc(item):
             a, key = item
-            sc_lines = "\n".join(f"- [{s['node_id']}] {s['title']}: {s['summary']}" for s in a["scenes"][:25])
+            sc_lines = "\n".join(f"- [{s['node_id']}] {s['title']}: {s['summary']}" for s in a["scenes"])
             prompt = (
                 f"根据《{args.name}》篇章的子场景摘要提炼篇章总目信息：\n"
                 "1. description: 1-2句话（60-120字）概括全章核心人物与事件，必须保留团队/势力/身份变动（如队长交接、更名、分队重组、吸纳新成员）与重要往事揭秘；\n"

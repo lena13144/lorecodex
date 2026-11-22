@@ -608,6 +608,100 @@ pre.raw-pre {
   max-height: 180px; overflow-y: auto; white-space: pre-wrap;
 }
 
+.job-prog-wrap {
+  display: flex; flex-direction: column; gap: 6px; padding: 9px 11px;
+  border-radius: var(--radius); border: 1px solid var(--rule-strong); background: var(--paper-alt);
+}
+.job-prog-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 12px; color: var(--ink);
+}
+.job-prog-title {
+  font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.job-prog-time {
+  font-family: var(--mono); font-size: 11px; color: var(--ink-muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0;
+}
+.job-prog-track {
+  position: relative; width: 100%; height: 9px; border-radius: 999px; overflow: hidden;
+  background: var(--paper); border: 1px solid var(--rule);
+}
+.job-prog-fill {
+  height: 100%; width: 0%; border-radius: 999px; background: var(--seal);
+  transition: width 0.25s ease, background-color 0.2s ease; position: relative;
+}
+.job-prog-fill.running::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  animation: jobProgShimmer 1.4s ease-in-out infinite;
+}
+.job-prog-fill.indeterminate {
+  width: 36% !important;
+  animation: jobProgIndet 1.35s ease-in-out infinite;
+}
+.job-prog-fill.done { background: var(--read-ink, #2b8a3e); }
+.job-prog-fill.paused { background: #e67700; }
+.job-prog-fill.err { background: #d94848; }
+.job-prog-sub {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 11px; color: var(--ink-muted); font-variant-numeric: tabular-nums;
+}
+.job-prog-cur {
+  min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+@keyframes jobProgShimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+@keyframes jobProgIndet {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+.split-preview-wrap {
+  display: flex; flex-direction: column; gap: 7px; padding: 10px 12px;
+  border-radius: var(--radius); border: 1px solid var(--rule-strong); background: var(--paper-alt);
+}
+.split-preview-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12.5px; font-weight: 600;
+}
+.split-badge {
+  display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; border: 1px solid transparent; flex-shrink: 0;
+}
+.split-badge.ok { color: var(--read-ink, #2b8a3e); border-color: rgba(43, 138, 62, 0.45); background: rgba(43, 138, 62, 0.1); }
+.split-badge.warn { color: #d97706; border-color: rgba(217, 119, 6, 0.45); background: rgba(217, 119, 6, 0.1); }
+.split-badge.err { color: #d94848; border-color: rgba(217, 72, 72, 0.5); background: rgba(217, 72, 72, 0.12); }
+.split-stats {
+  font-size: 11.5px; color: var(--ink-muted); font-variant-numeric: tabular-nums;
+}
+.split-warns { display: flex; flex-direction: column; gap: 4px; }
+.split-warn-item {
+  font-size: 11.5px; line-height: 1.45; padding: 5px 8px; border-radius: var(--radius); border-left: 3px solid transparent;
+}
+.split-warn-item.warn { color: #b45309; border-left-color: #d97706; background: rgba(217, 119, 6, 0.1); }
+.split-warn-item.err { color: #c92a2a; border-left-color: #d94848; background: rgba(217, 72, 72, 0.11); }
+.split-series-row { display: flex; flex-wrap: wrap; gap: 5px; }
+.split-chip {
+  font-size: 11px; padding: 2px 7px; border-radius: 5px;
+  border: 1px solid var(--rule); background: var(--paper); color: var(--ink-soft);
+}
+.split-samples {
+  display: flex; flex-direction: column; gap: 4px; max-height: 185px; overflow-y: auto;
+}
+.split-sample-row {
+  padding: 5px 8px; border-radius: var(--radius); border: 1px solid var(--rule); background: var(--paper);
+}
+.split-sample-head {
+  display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; font-weight: 600; color: var(--ink);
+}
+.split-snippet {
+  font-size: 11px; color: var(--ink-muted); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.split-sep { text-align: center; font-size: 11px; color: var(--ink-muted); padding: 2px 0; }
+
 .cmd-dialog { width: min(600px, 100%); max-height: 70vh; }
 .cmd-input { padding: 12px 16px; font-size: 14px; border: none; border-bottom: 1px solid var(--rule-strong); border-radius: 0; }
 .cmd-list { overflow-y: auto; max-height: 400px; padding: 6px; }
