@@ -246,6 +246,200 @@ export async function idbDeleteCorpus(id) {
     });
 }
 
+/**
+ * Auto-detect UTF-8 / UTF-16LE / UTF-16BE / GB18030 (GBK) from raw Uint8Array / ArrayBuffer in browser.
+ */
+export function decodeTextBufferAuto(inputBuffer) {
+    const bytes = inputBuffer instanceof Uint8Array ? inputBuffer : new Uint8Array(inputBuffer);
+    if (!bytes.length) return '';
+    if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+        return new TextDecoder('utf-8').decode(bytes.subarray(3));
+    }
+    if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+        return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+    }
+    if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+        return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+    }
+    try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (_) {
+        try {
+            return new TextDecoder('gb18030').decode(bytes);
+        } catch (_) {
+            return new TextDecoder('utf-8').decode(bytes);
+        }
+    }
+}
+
+async function inflateRawBytes(compressedBytes) {
+    if (typeof DecompressionStream !== 'undefined') {
+        const ds = new DecompressionStream('deflate-raw');
+        const writer = ds.writable.getWriter();
+        writer.write(compressedBytes);
+        writer.close();
+        const ab = await new Response(ds.readable).arrayBuffer();
+        return new Uint8Array(ab);
+    }
+    throw new Error('当前环境不支持 DecompressionStream 解压 EPUB');
+}
+
+function parseZipEntries(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let eocdOffset = -1;
+    const minEocd = Math.max(0, bytes.length - 65557);
+    for (let i = bytes.length - 22; i >= minEocd; i--) {
+        if (view.getUint32(i, true) === 0x06054b50) {
+            eocdOffset = i;
+            break;
+        }
+    }
+    if (eocdOffset < 0) throw new Error('无效的 EPUB/ZIP 文件结构');
+    const cdCount = view.getUint16(eocdOffset + 10, true);
+    const cdOffset = view.getUint32(eocdOffset + 16, true);
+    const entries = new Map();
+    let ptr = cdOffset;
+    const utf8 = new TextDecoder('utf-8');
+
+    for (let i = 0; i < cdCount && ptr + 46 <= bytes.length; i++) {
+        if (view.getUint32(ptr, true) !== 0x02014b50) break;
+        const method = view.getUint16(ptr + 10, true);
+        const compSize = view.getUint32(ptr + 20, true);
+        const uncompSize = view.getUint32(ptr + 24, true);
+        const nameLen = view.getUint16(ptr + 28, true);
+        const extraLen = view.getUint16(ptr + 30, true);
+        const commentLen = view.getUint16(ptr + 32, true);
+        const localHeaderOffset = view.getUint32(ptr + 42, true);
+        const name = utf8.decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen)).replace(/\\/g, '/');
+        entries.set(name, { name, method, compSize, uncompSize, localHeaderOffset });
+        ptr += 46 + nameLen + extraLen + commentLen;
+    }
+
+    const readEntryBytes = async (entry) => {
+        const lh = entry.localHeaderOffset;
+        if (view.getUint32(lh, true) !== 0x04034b50) throw new Error(`损坏的 ZIP 条目: ${entry.name}`);
+        const lNameLen = view.getUint16(lh + 26, true);
+        const lExtraLen = view.getUint16(lh + 28, true);
+        const dataStart = lh + 30 + lNameLen + lExtraLen;
+        const rawSlice = bytes.subarray(dataStart, dataStart + entry.compSize);
+        if (entry.method === 0) return rawSlice;
+        if (entry.method === 8) return await inflateRawBytes(rawSlice);
+        throw new Error(`不支持的 EPUB 压缩算法 method=${entry.method}`);
+    };
+
+    return { entries, readEntryBytes };
+}
+
+function htmlToPlainLines(xhtml) {
+    let s = String(xhtml || '')
+        .replace(/<head[\s\S]*?<\/head>/gi, '')
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '');
+    let headingTitle = '';
+    const hm = s.match(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i);
+    if (hm) {
+        headingTitle = hm[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    }
+    s = s
+        .replace(/<\/(?:p|div|h[1-6]|li|tr|blockquote|section|article)>/gi, '\n')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&amp;/gi, '&')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'");
+    const lines = s
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+    return { headingTitle, lines };
+}
+
+/**
+ * Pure-browser zero-dependency EPUB parser using native DecompressionStream('deflate-raw').
+ * Extracts chapters in OPF spine order (or sorted XHTML fallback) and converts to novel text lines.
+ */
+export async function extractEpubTextInBrowser(inputBuffer) {
+    const bytes = inputBuffer instanceof Uint8Array ? inputBuffer : new Uint8Array(inputBuffer);
+    const { entries, readEntryBytes } = parseZipEntries(bytes);
+
+    let opfPath = '';
+    if (entries.has('META-INF/container.xml')) {
+        const cTxt = decodeTextBufferAuto(await readEntryBytes(entries.get('META-INF/container.xml')));
+        const m = cTxt.match(/full-path=["']([^"']+\.opf)["']/i);
+        if (m) opfPath = m[1];
+    }
+    if (!opfPath) {
+        for (const k of entries.keys()) {
+            if (k.toLowerCase().endsWith('.opf')) {
+                opfPath = k;
+                break;
+            }
+        }
+    }
+
+    let orderedHtmlPaths = [];
+    if (opfPath && entries.has(opfPath)) {
+        const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+        const opfTxt = decodeTextBufferAuto(await readEntryBytes(entries.get(opfPath)));
+        const manifest = new Map();
+        const itemRe = /<item\b([^>]+?)\/?>/gi;
+        let im;
+        while ((im = itemRe.exec(opfTxt)) !== null) {
+            const attrs = im[1];
+            const idM = attrs.match(/\bid=["']([^"']+)["']/i);
+            const hrefM = attrs.match(/\bhref=["']([^"']+)["']/i);
+            const typeM = attrs.match(/\bmedia-type=["']([^"']+)["']/i);
+            if (idM && hrefM) {
+                const hrefClean = decodeURIComponent(hrefM[1].split('#')[0]);
+                const mediaType = typeM ? typeM[1].toLowerCase() : '';
+                if (mediaType.includes('html') || /\.(?:xhtml|html|htm)$/i.test(hrefClean)) {
+                    const resolved = (opfDir + hrefClean).replace(/\/\.\//g, '/');
+                    manifest.set(idM[1], resolved);
+                }
+            }
+        }
+        const itemrefRe = /<itemref\b[^>]*?\bidref=["']([^"']+)["']/gi;
+        let rm;
+        while ((rm = itemrefRe.exec(opfTxt)) !== null) {
+            const p = manifest.get(rm[1]);
+            if (p && entries.has(p)) orderedHtmlPaths.push(p);
+        }
+    }
+
+    if (!orderedHtmlPaths.length) {
+        orderedHtmlPaths = [...entries.keys()]
+            .filter((k) => /\.(?:xhtml|html|htm)$/i.test(k) && !/(?:nav|toc|cover)\.(?:xhtml|html|htm)$/i.test(k))
+            .sort();
+    }
+
+    const outLines = [];
+    const chapCheckRe = /^(?:##+\s*)?(第[零一二三四五六七八九十百千万0-9]+(?:章|节|回|幕|话)|(?:Chapter|Episode)\s+\d+|序章|楔子|尾声|终章)/i;
+    let chapCounter = 1;
+    for (const p of orderedHtmlPaths) {
+        const ent = entries.get(p);
+        if (!ent) continue;
+        const rawHtml = decodeTextBufferAuto(await readEntryBytes(ent));
+        const { headingTitle, lines } = htmlToPlainLines(rawHtml);
+        if (!lines.length || lines.join('').length < 15) continue;
+        const hasChapHeader = lines.slice(0, 5).some((l) => chapCheckRe.test(l));
+        if (!hasChapHeader) {
+            if (headingTitle && chapCheckRe.test(headingTitle)) {
+                outLines.push(`## ${headingTitle}`);
+            } else if (headingTitle) {
+                outLines.push(`## 第${chapCounter}章 ${headingTitle}`);
+            } else {
+                outLines.push(`## 第${chapCounter}章`);
+            }
+        }
+        chapCounter += 1;
+        outLines.push(...lines);
+    }
+    return outLines.join('\n');
+}
+
 // Pure-JS Heuristic Novel Builder (.txt / .md) for In-Browser Serverless Mode
 const CN_NUM_MAP = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10, 百: 100, 千: 1000 };
 function parseChineseOrArabicInt(raw) {

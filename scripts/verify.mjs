@@ -507,6 +507,36 @@ async function testMcpAndBrowserEngine() {
   assert.strictEqual(builtNovelPack.indexData.arcs.length, 2, 'In-Browser novel builder should parse 2 chapters');
   assert.strictEqual(builtNovelPack.indexData.arcs[0].series, '第一卷 星港篇');
 
+  // Test In-Browser GB18030 decoding & pure-JS EPUB extraction (extractEpubTextInBrowser)
+  const gbkHex = 'b5da31d5c220c0e8c3f7d0c5bac5'; // GBK for "第1章 黎明信号"
+  const gbkDecoded = browserMod.decodeTextBufferAuto(Buffer.from(gbkHex, 'hex'));
+  assert.strictEqual(gbkDecoded, '第1章 黎明信号', 'In-Browser decodeTextBufferAuto must decode GB18030/GBK cleanly');
+
+  const tmpEpubPath = path.join(ROOT, '.tmp-browser-smoke.epub');
+  try {
+    const pyBin = detectPythonBin();
+    const pyMakeEpub = [
+      'import sys, zipfile',
+      'with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as z:',
+      '    z.writestr("META-INF/container.xml", \'<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>\')',
+      '    z.writestr("OEBPS/content.opf", \'<package><manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="ch2.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>\')',
+      '    z.writestr("OEBPS/ch1.xhtml", "<html><body><h1>第1章 星门微光</h1><p>苏璃在观测台凝视着远方的星环信标。</p></body></html>")',
+      '    z.writestr("OEBPS/ch2.xhtml", "<html><body><h1>第2章 旧历残响</h1><p>林夜打开了尘封的Zero-7档案袋。</p></body></html>")',
+    ].join('\n');
+    execFileSync(pyBin, ['-c', pyMakeEpub, tmpEpubPath], { stdio: 'inherit' });
+    const epubBytes = new Uint8Array(fs.readFileSync(tmpEpubPath));
+    const epubExtractedText = await browserMod.extractEpubTextInBrowser(epubBytes);
+    const epubPack = browserMod.buildNovelCorpusInBrowser({
+      rawText: epubExtractedText,
+      corpusId: 'browser-epub-smoke',
+      name: '浏览器EPUB测试',
+    });
+    assert.strictEqual(epubPack.indexData.arcs.length, 2, 'In-Browser EPUB extractor must parse 2 spine chapters');
+    assert(epubExtractedText.includes('星环信标') && epubExtractedText.includes('Zero-7档案袋'));
+  } finally {
+    fs.rmSync(tmpEpubPath, { force: true });
+  }
+
   // Test In-Browser LLM Corpus Directory Upgrader (upgradeBrowserCorpusWithLLM)
   const browserMockSrv = http.createServer((req, res) => {
     if (req.method === 'POST' && req.url.endsWith('/chat/completions')) {

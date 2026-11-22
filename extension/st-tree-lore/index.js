@@ -24,6 +24,8 @@ const [
         idbGetMeta,
         idbSetMeta,
         idbRecordRun,
+        decodeTextBufferAuto,
+        extractEpubTextInBrowser,
         buildNovelCorpusInBrowser,
         buildLoreCorpusInBrowser,
         createBrowserTreeAgent,
@@ -42,7 +44,7 @@ const PROMPT_TAG = 'lorecodex_context';
 
 const defaultSettings = {
     enabled: true,
-    localMode: false,
+    localMode: true,
     ragServer: 'http://127.0.0.1:5240',
     corpus: '',
     maxOrder: 0,
@@ -356,7 +358,23 @@ async function probeServerHealthAndCorpora(base) {
 
 async function refreshLocalPacks() {
     try {
-        const rows = await idbListCorpora();
+        let rows = await idbListCorpora();
+        if (!rows.length) {
+            try {
+                const demoUrl = new URL('./ui/demo-chronicles.lorepack.json', import.meta.url).href;
+                const r = await fetch(demoUrl);
+                if (r.ok) {
+                    const rawPack = await r.json();
+                    const demoPack = buildLoreCorpusInBrowser({
+                        rawJson: rawPack,
+                        corpusId: rawPack.id || rawPack.corpus_id || 'demo-chronicles',
+                        name: rawPack.corpus_name || rawPack.indexData?.corpus_name || '苍穹残响·灰烬星港编年史',
+                    });
+                    await idbSaveCorpus(demoPack);
+                    rows = await idbListCorpora();
+                }
+            } catch (_) {}
+        }
         localPacksCache = rows;
         localPacksMap.clear();
         localAgentsCache.clear();
@@ -371,7 +389,7 @@ async function refreshLocalPacks() {
 function isUsingLocalEngine(cfg) {
     if (cfg.localMode) return true;
     if (!lastHealthInfo?.ok && localPacksMap.size > 0) return true;
-    if (cfg.corpus && localPacksMap.has(cfg.corpus) && !corporaMap.has(cfg.corpus)) return true;
+    if (cfg.corpus && localPacksMap.has(cfg.corpus) && !corporaCache.some(c => c.id === cfg.corpus)) return true;
     return false;
 }
 
@@ -386,33 +404,38 @@ function getLocalAgent(corpusId) {
 
 async function fetchCorporaAndHealth(cfg) {
     await refreshLocalPacks();
-    const primary = getConfiguredServerBase(cfg);
     let srvOk = false;
-    try {
-        let { hr, cr } = await probeServerHealthAndCorpora(primary);
-        if (cr && hr?.ok) {
-            resolvedServerBase = primary;
-            srvOk = true;
-        } else {
-            const lanAlt = getLanFallbackBase(primary);
-            if (lanAlt) {
-                const altRes = await probeServerHealthAndCorpora(lanAlt);
-                if (altRes.cr && altRes.hr?.ok) {
-                    hr = altRes.hr;
-                    cr = altRes.cr;
-                    resolvedServerBase = lanAlt;
-                    srvOk = true;
+    if (!cfg.localMode) {
+        const primary = getConfiguredServerBase(cfg);
+        try {
+            let { hr, cr } = await probeServerHealthAndCorpora(primary);
+            if (cr && hr?.ok) {
+                resolvedServerBase = primary;
+                srvOk = true;
+            } else {
+                const lanAlt = getLanFallbackBase(primary);
+                if (lanAlt) {
+                    const altRes = await probeServerHealthAndCorpora(lanAlt);
+                    if (altRes.cr && altRes.hr?.ok) {
+                        hr = altRes.hr;
+                        cr = altRes.cr;
+                        resolvedServerBase = lanAlt;
+                        srvOk = true;
+                    }
                 }
             }
-        }
-        lastHealthInfo = hr;
-        if (cr) {
-            corporaCache = Array.isArray(cr.corpora) ? cr.corpora : [];
-            serverDefaultCorpus = String(cr.defaultCorpus || '');
-        } else {
+            lastHealthInfo = hr;
+            if (cr) {
+                corporaCache = Array.isArray(cr.corpora) ? cr.corpora : [];
+                serverDefaultCorpus = String(cr.defaultCorpus || '');
+            } else {
+                corporaCache = [];
+            }
+        } catch (_) {
+            lastHealthInfo = null;
             corporaCache = [];
         }
-    } catch (_) {
+    } else {
         lastHealthInfo = null;
         corporaCache = [];
     }
@@ -430,7 +453,7 @@ async function fetchCorporaAndHealth(cfg) {
             };
             corporaMap.set(p.id, {
                 id: p.id,
-                name: `${p.config?.name || p.id} [内置]`,
+                name: `${p.config?.name || p.id}`,
                 stats: st,
                 prompt_framing: p.config?.prompt_framing,
                 db_scrubber: p.config?.db_scrubber,
@@ -758,13 +781,13 @@ jQuery(async () => {
         const tauriTag = isTauri ? ' · TauriTavern' : '';
         if (!cfg.localMode && ok && lastHealthInfo?.ok) {
             dot.addClass('ok');
-            txt.text(`已连接服务端${tauriTag} · ${corporaCache.length} 个服务端书库${localPacksCache.length ? ` (+${localPacksCache.length}本地)` : ''} · ${lastHealthInfo.boot_ms ?? '-'}ms`);
+            txt.text(`已连接外部服务端${tauriTag} · ${corporaCache.length} 个服务端书库 · ${lastHealthInfo.boot_ms ?? '-'}ms`);
         } else if (cfg.localMode || localPacksCache.length > 0) {
             dot.addClass('ok');
-            txt.text(`内置免服务端引擎就绪${tauriTag} · ${localPacksCache.length} 个本地书库 (IndexedDB)`);
+            txt.text(`内置书阁引擎就绪 (IndexedDB 免后台)${tauriTag} · 已挂载 ${localPacksCache.length} 个典籍`);
         } else {
             dot.addClass('err');
-            txt.text(`未连接到 ${getServerBase(cfg)}（也可在下方开启免服务端内置书库）`);
+            txt.text(`未连接到外部服务端 ${getServerBase(cfg)}（建议勾选纯前端免后台模式）`);
         }
     };
 
@@ -904,6 +927,20 @@ jQuery(async () => {
     }));
 
     const syncConfigFromServer = async ({ overwriteExisting = false } = {}) => {
+        if (cfg.localMode) {
+            const localCfg = await idbGetMeta('local_api_config', null);
+            if (localCfg && typeof localCfg === 'object') {
+                if ((overwriteExisting || !cfg.chatBase) && localCfg.chatBase) cfg.chatBase = localCfg.chatBase;
+                if ((overwriteExisting || !cfg.chatKey) && localCfg.chatKey && !/^\*+$/.test(localCfg.chatKey)) cfg.chatKey = localCfg.chatKey;
+                if ((overwriteExisting || !cfg.chatModel) && localCfg.chatModel) cfg.chatModel = localCfg.chatModel;
+                if (overwriteExisting) {
+                    cfg.maxTokens = Number(localCfg.maxTokens) > 0 ? Number(localCfg.maxTokens) : '';
+                } else if ((cfg.maxTokens === '' || cfg.maxTokens === undefined || cfg.maxTokens === null) && Number(localCfg.maxTokens) > 0) {
+                    cfg.maxTokens = Number(localCfg.maxTokens);
+                }
+            }
+            return;
+        }
         try {
             const r = await fetch(`${getServerBase(cfg)}/config`);
             if (!r.ok) return;
@@ -921,6 +958,21 @@ jQuery(async () => {
 
     const syncConfigToServer = async ({ silent = false } = {}) => {
         const st = $('#lorecodex_model_status');
+        await idbSetMeta('local_api_config', {
+            defaultCorpus: cfg.corpus || '',
+            chatBase: cfg.chatBase || '',
+            chatKey: cfg.chatKey || '',
+            chatModel: cfg.chatModel || 'deepseek-chat',
+            maxTokens: Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null,
+        }).catch(() => {});
+
+        if (cfg.localMode || !lastHealthInfo?.ok) {
+            if (!silent) {
+                st.text('已保存模型配置到浏览器内置书阁 (IndexedDB)');
+                if (typeof toastr !== 'undefined') toastr.success('已保存模型配置');
+            }
+            return true;
+        }
         try {
             const body = buildApiConfig(cfg);
             body.maxTokens = Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null;
@@ -932,12 +984,12 @@ jQuery(async () => {
             });
             const j = await r.json();
             if (!silent) {
-                st.text(j.ok ? '已保存配置到 LoreCodex 服务端 config.json' : ('保存失败: ' + j.error));
-                if (j.ok && typeof toastr !== 'undefined') toastr.success('已保存模型配置到 LoreCodex 服务端');
+                st.text(j.ok ? '已保存配置到内置书阁与外部服务端 config.json' : ('保存失败: ' + j.error));
+                if (j.ok && typeof toastr !== 'undefined') toastr.success('已保存模型配置到服务端');
             }
             return Boolean(j.ok);
         } catch (e) {
-            if (!silent) st.text('连接服务端失败: ' + e.message);
+            if (!silent) st.text('已保存到本地内置书阁（外部服务端未连接）');
             return false;
         }
     };
@@ -955,7 +1007,7 @@ jQuery(async () => {
                 <div class="lorecodex-conn-bar">
                     <div class="lorecodex-conn-left">
                         <span id="lorecodex_conn_dot" class="lorecodex-dot wait"></span>
-                        <span id="lorecodex_conn_text" class="lorecodex-conn-text">正在检测服务...</span>
+                        <span id="lorecodex_conn_text" class="lorecodex-conn-text">正在初始化内置书阁...</span>
                     </div>
                     <button id="lorecodex_open_ui" class="menu_button" style="width:auto;padding:3px 9px;">打开书阁</button>
                 </div>
@@ -964,15 +1016,11 @@ jQuery(async () => {
                     <span><b>启用生成前树形记忆检索注入</b></span>
                 </label>
                 <div class="lorecodex-row">
-                    <div style="flex:1;min-width:150px;">
-                        <small>服务端地址：</small>
-                        <input id="lorecodex_server" class="text_pole" type="text" value="${escHtml(cfg.ragServer)}" />
-                    </div>
                     <div style="flex:1;min-width:160px;">
-                        <small>挂载典籍书库：</small>
+                        <small>当前挂载典籍书库：</small>
                         <select id="lorecodex_corpus" class="text_pole"></select>
                     </div>
-                    <button id="lorecodex_refresh_corpora" class="menu_button" style="width:auto;margin-top:16px;padding:4px 8px;">刷新</button>
+                    <button id="lorecodex_refresh_corpora" class="menu_button" style="width:auto;margin-top:16px;padding:4px 10px;">刷新书库</button>
                 </div>
                 <div class="lorecodex-grid-4">
                     <div title="0 = 全库开放不拦截；>0 时拦截所有 order 大于该值的后续章节">
@@ -1012,15 +1060,11 @@ jQuery(async () => {
                 <div id="lorecodex_last_preview" style="display:flex;flex-direction:column;gap:6px;"></div>
             </div>
 
-            <details class="lorecodex-card">
-                <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">TauriTavern / 手机免服务端内置书库 (IndexedDB 纯前端引擎 + LLM 建库)</summary>
+            <details class="lorecodex-card" open>
+                <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">典籍书库导入与 LLM 目录构建（纯前端免后台 · 支持 TXT / EPUB / 世界书 / 角色卡）</summary>
                 <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                    <label class="checkbox_label">
-                        <input id="lorecodex_local_mode" type="checkbox" ${cfg.localMode ? 'checked' : ''} />
-                        <span><b>启用纯前端免服务端模式（无需运行 Node.js / Termux 后台）</b></span>
-                    </label>
-                    <div class="lorecodex-muted">可直接选择小说 (.txt / .md)、世界书/V2角色卡 (.json) 或单文件书库包 (.lorepack.json) 存入浏览器 IndexedDB。<b>注意：三层树检索依赖高质量 LLM 目录摘要与人物别名表，导入原始小说后请执行下方「LLM 智能目录构建」（支持按卷构建与断点续传）。</b></div>
-                    <input id="lorecodex_local_file" class="text_pole" type="file" accept=".txt,.md,.json" />
+                    <div class="lorecodex-muted">支持直接选择小说 (<b>.txt</b> 自动识别 UTF-8/GB18030、<b>.epub</b>、<b>.md</b>)、世界书/V2角色卡 (<b>.json</b>) 或单文件书库包 (<b>.lorepack.json</b>) 存入浏览器 IndexedDB。<b>三层树检索依赖高质量 LLM 目录摘要与人物别名表，导入原始小说后请执行 LLM 智能目录构建（支持按卷构建与断点续传）。</b></div>
+                    <input id="lorecodex_local_file" class="text_pole" type="file" accept=".txt,.md,.epub,.json" />
                     <div class="lorecodex-row">
                         <div style="flex:1;">
                             <small>书库 ID（英文/数字/连字符）：</small>
@@ -1036,12 +1080,12 @@ jQuery(async () => {
                         <span>导入后立即启动 LLM 智能目录构建（自动生成分幕摘要、卷总览、人物别名与术语表）</span>
                     </label>
                     <div class="lorecodex-row">
-                        <button id="lorecodex_local_import_btn" type="button" class="menu_button" style="flex:2;">导入并建树到浏览器</button>
+                        <button id="lorecodex_local_import_btn" type="button" class="menu_button" style="flex:2;">导入并建树到书阁</button>
                         <button id="lorecodex_local_export_btn" type="button" class="menu_button" style="flex:1;">导出 .lorepack</button>
                         <button id="lorecodex_local_delete_btn" type="button" class="menu_button" style="width:auto;padding:4px 8px;">删除</button>
                     </div>
                     <div style="border-top:1px solid rgba(128,128,128,0.25);padding-top:6px;margin-top:2px;display:flex;flex-direction:column;gap:6px;">
-                        <div style="font-weight:bold;font-size:0.84em;">当前内置书库 LLM 目录构建 / 原地补全（支持 IndexedDB 断点续传）</div>
+                        <div style="font-weight:bold;font-size:0.84em;">当前书库 LLM 目录构建 / 原地补全（支持 IndexedDB 断点续传）</div>
                         <div class="lorecodex-row">
                             <div style="flex:2;min-width:140px;">
                                 <small>目标分卷（推荐按卷逐卷构建）：</small>
@@ -1079,7 +1123,7 @@ jQuery(async () => {
             </details>
 
             <details class="lorecodex-card">
-                <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">旁路推理 Agent 模型配置（留空沿用服务端 config.json）</summary>
+                <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">旁路推理 Agent 模型配置</summary>
                 <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
                     <div>
                         <small>API Base URL (OpenAI 兼容)：</small>
@@ -1087,7 +1131,7 @@ jQuery(async () => {
                     </div>
                     <div>
                         <small>API Key：</small>
-                        <input id="lorecodex_chat_key" class="text_pole" type="password" value="${escHtml(cfg.chatKey || '')}" placeholder="留空沿用服务端密钥" />
+                        <input id="lorecodex_chat_key" class="text_pole" type="password" value="${escHtml(cfg.chatKey || '')}" placeholder="填入用于旁路翻树与建库的 API Key" />
                     </div>
                     <div class="lorecodex-row">
                         <div style="flex:1;">
@@ -1101,14 +1145,22 @@ jQuery(async () => {
                         <small>单次输出 Max Tokens（留空 = 不限制，沿用模型默认）：</small>
                         <input id="lorecodex_max_tokens" class="text_pole" type="number" min="0" step="256" value="${Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : ''}" placeholder="沿用模型默认" />
                     </div>
-                    <button id="lorecodex_save_srv" class="menu_button" style="width:100%;">保存当前模型与默认书库到服务端</button>
+                    <button id="lorecodex_save_srv" class="menu_button" style="width:100%;">保存当前模型与默认书库配置</button>
                     <div id="lorecodex_model_status" class="lorecodex-status"></div>
                 </div>
             </details>
 
             <details class="lorecodex-card">
-                <summary style="cursor:pointer;font-size:0.86em;opacity:0.85;">高级覆盖：注入包装与数据库状态清洗正则</summary>
+                <summary style="cursor:pointer;font-size:0.86em;opacity:0.85;">高级可选：连接外部独立 Node 服务端 & 注入包装正则</summary>
                 <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+                    <label class="checkbox_label">
+                        <input id="lorecodex_local_mode" type="checkbox" ${cfg.localMode ? 'checked' : ''} />
+                        <span><b>使用纯前端免后台引擎（默认推荐；取消勾选则连接下方外部 Node 服务端）</b></span>
+                    </label>
+                    <div>
+                        <small>外部 Node 服务端地址（仅在取消上方勾选、需与电脑本地磁盘 corpora/ 或 MCP 共享时使用）：</small>
+                        <input id="lorecodex_server" class="text_pole" type="text" value="${escHtml(cfg.ragServer)}" />
+                    </div>
                     <div>
                         <small>XML 标签名：</small>
                         <input id="lorecodex_xml_tag" class="text_pole" type="text" value="${escHtml(cfg.customXmlTag || '')}" placeholder="默认随当前语料 corpus.json" />
@@ -1253,7 +1305,7 @@ jQuery(async () => {
         const file = fileEl?.files?.[0];
         const st = $('#lorecodex_local_status');
         if (!file) {
-            st.text('请先选择一个 .txt / .md / .json / .lorepack.json 文件');
+            st.text('请先选择一个 .txt / .md / .epub / .json / .lorepack.json 文件');
             return;
         }
         const cid = ($('#lorecodex_local_id').val().trim() || 'local-book').replace(/[^a-zA-Z0-9_-]/g, '-');
@@ -1261,9 +1313,12 @@ jQuery(async () => {
         const autoLlm = $('#lorecodex_local_auto_llm').prop('checked');
         st.text(`正在浏览器内读取并切分「${cName}」...`);
         try {
-            const text = await file.text();
-            const isJson = file.name.toLowerCase().endsWith('.json');
-            const isLorepack = file.name.toLowerCase().endsWith('.lorepack.json');
+            const ab = await file.arrayBuffer();
+            const fnameLower = file.name.toLowerCase();
+            const isEpub = fnameLower.endsWith('.epub');
+            const isJson = fnameLower.endsWith('.json') || fnameLower.endsWith('.jsonl');
+            const isLorepack = fnameLower.endsWith('.lorepack.json');
+            const text = isEpub ? await extractEpubTextInBrowser(ab) : decodeTextBufferAuto(ab);
             const pack = isJson
                 ? buildLoreCorpusInBrowser({
                       rawJson: text,

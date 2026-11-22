@@ -58,12 +58,12 @@ async function getLocalApiConfig(be) {
   };
 }
 
-function decodeBase64Utf8(b64) {
+function decodeBase64ToBytes(b64) {
   const clean = String(b64 || '').replace(/^data:[^;]+;base64,/i, '').trim();
   const bin = atob(clean);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new TextDecoder('utf-8').decode(bytes);
+  return bytes;
 }
 
 async function reqJson(url, opts = {}) {
@@ -372,9 +372,13 @@ export async function importCorpus(payload) {
 
   (async () => {
     try {
-      const rawText = decodeBase64Utf8(payload.contentBase64);
-      const isJson =
-        payload.kind === 'lore' || String(payload.filename || '').toLowerCase().endsWith('.json');
+      const rawBytes = decodeBase64ToBytes(payload.contentBase64);
+      const fnameLower = String(payload.filename || '').toLowerCase();
+      const isEpub = fnameLower.endsWith('.epub');
+      const isJson = payload.kind === 'lore' || fnameLower.endsWith('.json') || fnameLower.endsWith('.jsonl');
+      const rawText = isEpub
+        ? await be.extractEpubTextInBrowser(rawBytes)
+        : be.decodeTextBufferAuto(rawBytes);
       const existingRows = await be.idbListCorpora();
       const mergeTarget = payload.mergeInto
         ? existingRows.find((r) => r.id === payload.mergeInto) || null
