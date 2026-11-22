@@ -1203,10 +1203,24 @@ export function createBrowserTreeAgent(pack) {
             }
         );
 
+        const aliasBlock = (corpusConfig.aliases || []).length
+            ? `\n【人物本名/化名/代号对照表】\n` +
+              corpusConfig.aliases
+                  .slice(0, 45)
+                  .map((g) => (Array.isArray(g) ? g.join(' = ') : ''))
+                  .filter(Boolean)
+                  .join(' ； ')
+            : '';
+        const glossaryBlock = (corpusConfig.glossary || []).length
+            ? `\n【核心世界观与设定术语】\n` + corpusConfig.glossary.slice(0, 30).join('\n')
+            : '';
+
         const sysPrompt = `你是《${corpusConfig.name}》后台树形记忆检索 Agent（当前运行于浏览器内置引擎）。
-语料规模：${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}。${maxOrder ? `当前防剧透锁定：order <= ${maxOrder}。` : ''}
-- 第一轮可并发调用 list_series / list_story_arcs 与 grep_scenes。
-- 调用 read_scene 时尽量一次批量传入多个候选 scene_node_ids（最多 10 个）。
+${corpusConfig.world_premise || ''}
+语料规模：${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}。${maxOrder ? `当前防剧透锁定：order <= ${maxOrder}。` : ''}${aliasBlock}${glossaryBlock}
+【检索策略】
+- 第一轮可并发调用 list_series / list_story_arcs 与 grep_scenes（支持利用人物旧代号/化名组合搜索）。
+- 调用 read_scene 时尽量一次批量传入多个候选 scene_node_ids（最多 10 个纯编号，如 ["0080","0601"]）。
 - 若无需检索或属未收录原创角色，直接输出 {"skip":true,"reason":"..."}。
 - 核实完毕后停止调工具，仅输出严格 JSON：
 {"skip":false,"selected_nodes":["经read_scene核实的node_id"],"selected_arcs":["可选宏观arc_id"],"timeline_note":"时间线阶段","guide":"结构化记忆导读并标注[node_id]"}`;
@@ -1295,7 +1309,10 @@ export function createBrowserTreeAgent(pack) {
                 };
             }
             if (fnName === 'read_scene') {
-                const ids = (Array.isArray(args?.scene_node_ids) ? args.scene_node_ids : []).map(String).slice(0, 10);
+                const ids = (Array.isArray(args?.scene_node_ids) ? args.scene_node_ids : [])
+                    .map((rawId) => String(rawId || '').replace(/^node:/i, '').split('|')[0].trim())
+                    .filter(Boolean)
+                    .slice(0, 10);
                 const out = [];
                 const nodeIds = [];
                 const arcIds = [];
@@ -1334,7 +1351,7 @@ export function createBrowserTreeAgent(pack) {
                 const text = !res.hits.length
                     ? `[全文扫描 ${res.took_ms}ms] 零命中`
                     : `[全文扫描 ${res.took_ms}ms | 命中 ${res.total} 幕]\n` +
-                      res.hits.map((h) => `- [${h.node_id}|${h.arc_id}] ${h.arc_title} · ${h.title}${h.cameo ? '[客串]' : ''} (${h.match_count}处): ${h.snippet}`).join('\n');
+                      res.hits.map((h) => `- [node_id=${h.node_id} | arc_id=${h.arc_id}] ${h.arc_title} · ${h.title}${h.cameo ? '[客串]' : ''} (${h.match_count}处): ${h.snippet}`).join('\n');
                 return {
                     text,
                     summary: `Grep "${args?.query || ''}" -> ${res.total} 幕 (${res.took_ms}ms)`,
@@ -1446,7 +1463,9 @@ export function createBrowserTreeAgent(pack) {
             };
         }
 
-        const wantedIds = Array.isArray(parsed?.selected_nodes) ? parsed.selected_nodes.map(String) : [];
+        const wantedIds = Array.isArray(parsed?.selected_nodes)
+            ? parsed.selected_nodes.map((rawId) => String(rawId || '').replace(/^node:/i, '').split('|')[0].trim())
+            : [];
         const finalScenes = [];
         for (const id of wantedIds) {
             if (readScenesMap.has(id) && finalScenes.length < maxScenes) {
@@ -1461,14 +1480,29 @@ export function createBrowserTreeAgent(pack) {
         }
         baseTraversal.selected_nodes = finalScenes.map((s) => s.node_id);
 
+        const wantedArcIds = Array.isArray(parsed?.selected_arcs) ? parsed.selected_arcs.map(String).slice(0, 10) : [];
+        const finalOutlines = [];
+        for (const aid of wantedArcIds) {
+            const found = visibleArcs.find((x) => x.arc.arc_id === aid);
+            if (!found) continue;
+            finalOutlines.push({
+                arc_id: found.arc.arc_id,
+                title: found.arc.title,
+                category: found.arc.category || '',
+                description: found.arc.description || '',
+                scene_count: found.scenes.length,
+                outline_text: found.scenes.map((s) => `  - [${s.node_id}] 《${s.title}》: ${s.summary}`).join('\n'),
+            });
+        }
+
         const guide = (parsed && typeof parsed.guide === 'string' ? parsed.guide : rawAnswer).trim();
         return {
             ok: true,
             corpus_id: corpusId,
             corpus_name: corpusConfig.name,
             max_order: maxOrder,
-            skip: !finalScenes.length && !guide,
-            reason: !finalScenes.length && !guide ? '无命中片段' : '',
+            skip: !finalScenes.length && !finalOutlines.length && !guide,
+            reason: !finalScenes.length && !finalOutlines.length && !guide ? '无命中片段' : '',
             took_ms,
             turns: finalTurn,
             trace,
@@ -1480,7 +1514,7 @@ export function createBrowserTreeAgent(pack) {
             timeline_note: parsed?.timeline_note || '',
             guide,
             scenes: finalScenes,
-            outlines: [],
+            outlines: finalOutlines,
         };
     }
 
