@@ -1,0 +1,8 @@
+{
+  "port": 5240,
+  "defaultCorpus": "demo-chronicles",
+  "chatBase": "https://api.openai.com/v1",
+  "chatKey": "",
+  "chatModel": "deepseek-chat",
+  "disableThinking": true
+}

@@ -1,0 +1,13 @@
+config.json
+.env
+node_modules/
+*.ckpt.jsonl
+*checkpoint*.jsonl
+corpora/gf2/
+builders/migrate_gf2.mjs
+.tmp*
+.tmp-uploads/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

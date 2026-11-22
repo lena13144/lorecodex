@@ -1,0 +1,34 @@
+{
+  "name": "lorecodex",
+  "version": "2.0.0",
+  "description": "Vectorless tree-reasoning, millisecond in-RAM grep, and sidecar memory agent for long-form fiction, game lore, and SillyTavern roleplay.",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js --tree-only",
+    "test": "node scripts/verify.mjs --offline",
+    "build:demo": "node scripts/create_demo_corpus.mjs",
+    "verify": "node scripts/verify.mjs"
+  },
+  "keywords": [
+    "rag",
+    "vectorless-rag",
+    "pageindex",
+    "sillytavern",
+    "roleplay",
+    "lorebook",
+    "llm-agent"
+  ],
+  "author": "lena13144",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lena13144/lorecodex.git"
+  },
+  "homepage": "https://github.com/lena13144/lorecodex#readme",
+  "bugs": {
+    "url": "https://github.com/lena13144/lorecodex/issues"
+  }
+}
