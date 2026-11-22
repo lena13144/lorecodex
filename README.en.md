@@ -141,6 +141,22 @@ python3 builders/build_lore.py --input path/to/worldbook.json --corpus-id my-nov
 | `GET /tree-index` \| `GET /tree-scene` \| `GET /tree-grep` | Tree TOC, verbatim scene (`403` if blocked by `maxOrder`), and millisecond grep |
 | `POST /tree-search` \| `GET /tree-runs` | Run sidecar tree reasoning agent and fetch recent 40 execution traces |
 | `GET /config` \| `POST /config` \| `POST /models` | Read/persist server configuration and proxy `/models` discovery |
+| `GET /corpora/:id/export` | Export a corpus as a single-file `.lorepack.json` bundle for TauriTavern / mobile IndexedDB |
+
+---
+
+## Standalone Release Packages & Native Agent Integrations (DeepSeek Harness `dsh` / MCP / Skill)
+
+[**GitHub Releases**](https://github.com/lena13144/lorecodex/releases) provides 3 targeted standalone packages so users only download what they need:
+
+1. **`lorecodex-sillytavern-tauritavern-extension-v2.1.0.zip`** — Pure frontend extension for SillyTavern & TauriTavern (mobile/desktop) with the built-in IndexedDB serverless engine + `demo-chronicles.lorepack.json`.
+2. **`lorecodex-full-server-workbench-v2.1.0.zip`** — Complete Node server + Archival Codex & Trace Workbench UI + Python offline/LLM builders + SillyTavern extension.
+3. **`lorecodex-agent-dsh-mcp-plugin-v2.1.0.zip`** — Lightweight package for AI Agents containing the **DeepSeek Harness (`@deepseek-ai/dsh` / Cordis)** plugin (`src/dsh_plugin.js` + `cordis.patch.yml`), zero-dependency **MCP stdio server** (`src/mcp_server.js`), and **Agent Skill** (`skills/lorecodex/SKILL.md`).
+
+```bash
+# Install directly into DeepSeek Harness (dsh):
+dsh plugin --profile web add "github:lena13144/lorecodex"
+```
 
 ---
 

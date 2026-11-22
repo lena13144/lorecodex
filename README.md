@@ -192,10 +192,29 @@ python3 builders/build_lore.py --input path/to/worldbook.json --corpus-id my-nov
 
 ---
 
-## 原生 Agent 接入：MCP Server 与 Agent Skill
+## 按需选择安装包（GitHub Releases 分包指南）
 
-除了给酒馆挂载记忆外，LoreCodex 原生内置了零依赖的 **MCP Server（`src/mcp_server.js`）** 与 **Agent Skill（`skills/lorecodex/SKILL.md`）**，可直接挂载到 Claude Code、Antigravity、Cursor、Codex 等原生 Agent 环境：
+为了让不同圈子的玩家与开发者都不需要下载多余的组件，[**GitHub Releases**](https://github.com/lena13144/lorecodex/releases) 提供了 3 套完全独立的按需发行包：
 
+| 发行包名称 | 适用人群 | 包含内容 |
+| :--- | :--- | :--- |
+| **`lorecodex-sillytavern-tauritavern-extension-v2.1.0.zip`** | **手机端 / TauriTavern / 纯酒馆前端玩家**（无需安装 Node.js 或 Python） | 仅含 `st-tree-lore` 酒馆扩展（内置 IndexedDB 免服务端建树与检索引擎）+ `demo-chronicles.lorepack.json` 单文件示例书库 |
+| **`lorecodex-full-server-workbench-v2.1.0.zip`** | **电脑端深度设定玩家 / 作者**（需要可视化书阁工作台与百万字网文 `--upgrade` LLM 目录合成） | 完整 Node 服务端 + 书阁与轨迹工作台 Web UI + Python 离线/LLM 建树器 + 酒馆扩展 |
+| **`lorecodex-agent-dsh-mcp-plugin-v2.1.0.zip`** | **AI Agent 开发者**（DeepSeek Harness `dsh` / Claude Code / Cursor / Antigravity） | 仅含 DeepSeek Harness (`@deepseek-ai/cordis`) 插件、零依赖 MCP Server、Agent Skill 与核心树引擎（剔除所有酒馆与 Web UI 资源） |
+
+---
+
+## 原生 Agent 接入：DeepSeek Harness (`dsh`) 插件、MCP Server 与 Agent Skill
+
+除了给酒馆与 TauriTavern 挂载记忆外，LoreCodex 原生内置了 **DeepSeek Harness (`@deepseek-ai/dsh` / Cordis) 插件（`src/dsh_plugin.js`）**、**MCP Server（`src/mcp_server.js`）** 与 **Agent Skill（`skills/lorecodex/SKILL.md`）**：
+
+### 1. 在 DeepSeek Harness (`dsh`) 中一键安装插件
+```bash
+dsh plugin --profile web add "github:lena13144/lorecodex"
+```
+仓库内置 `cordis.patch.yml` 与 `dsh.bundle` 声明，加载后会自动通过 `ctx.tools.register` 向 DeepSeek Harness 注入全部 8 个三级树与毫秒级 Grep 工具。
+
+### 2. 在 Claude Code / Antigravity / Cursor 中挂载 MCP Server
 ```json
 {
   "mcpServers": {
@@ -207,7 +226,7 @@ python3 builders/build_lore.py --input path/to/worldbook.json --corpus-id my-nov
 }
 ```
 
-暴露的 8 个 MCP 工具涵盖两种使用模式：
+暴露的 8 个工具涵盖两种使用模式：
 - **主 Agent 亲自翻书模式（零额外旁路 API 消耗）**：`lorecodex_list_corpora`、`lorecodex_list_series`、`lorecodex_list_arcs`、`lorecodex_expand_arc`、`lorecodex_grep_scenes`（毫秒级内存别名与客串扫描）、`lorecodex_read_scenes`（批量读取最多 10 幕无损原文）。
 - **子 Agent 蒸馏与在线建树模式**：`lorecodex_ask_agent`（由独立子 Agent 翻完目录树后仅向主 Agent 返回浓缩导读与证据原文，节省主 Agent 上下文窗口）、`lorecodex_build_corpus`（直接从本地小说/EPUB/世界书建树或执行 `--upgrade`）。
 

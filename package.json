@@ -1,8 +1,21 @@
 {
   "name": "lorecodex",
-  "version": "2.0.0",
-  "description": "Vectorless tree-reasoning, millisecond in-RAM grep, and sidecar memory agent for long-form fiction, game lore, and SillyTavern roleplay.",
-  "main": "src/server.js",
+  "version": "2.1.0",
+  "description": "Vectorless tree-reasoning, millisecond in-RAM grep, and sidecar memory agent for long-form fiction, game lore, SillyTavern / TauriTavern, and DeepSeek Harness / MCP agents.",
+  "main": "src/dsh_plugin.js",
+  "exports": {
+    ".": "./src/dsh_plugin.js",
+    "./dsh": "./src/dsh_plugin.js",
+    "./mcp": "./src/mcp_server.js",
+    "./server": "./src/server.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "bin": {
     "lorecodex": "./src/server.js",
     "lorecodex-mcp": "./src/mcp_server.js"
@@ -15,6 +28,7 @@
     "mcp": "node src/mcp_server.js",
     "test": "node scripts/verify.mjs --offline",
     "build:demo": "node scripts/create_demo_corpus.mjs",
+    "build:releases": "node scripts/build_releases.mjs",
     "verify": "node scripts/verify.mjs"
   },
   "keywords": [
@@ -22,9 +36,14 @@
     "vectorless-rag",
     "pageindex",
     "sillytavern",
+    "tauritavern",
     "roleplay",
     "lorebook",
-    "llm-agent"
+    "llm-agent",
+    "mcp",
+    "dsh-plugin",
+    "cordis",
+    "deepseek-harness"
   ],
   "author": "lena13144",
   "license": "MIT",

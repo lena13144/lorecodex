@@ -638,45 +638,60 @@ async function handleRpcRequest(msg) {
 
 let inputBuffer = Buffer.alloc(0);
 
-process.stdin.on('data', (chunk) => {
-  inputBuffer = Buffer.concat([inputBuffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+function startMcpStdioServer() {
+  process.stdin.on('data', (chunk) => {
+    inputBuffer = Buffer.concat([inputBuffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
 
-  while (inputBuffer.length > 0) {
-    const preview = inputBuffer.slice(0, Math.min(inputBuffer.length, 64)).toString('utf8');
-    if (/^Content-Length:/i.test(preview)) {
-      useHeaderFraming = true;
-      const sepIdx = inputBuffer.indexOf('\r\n\r\n');
-      const altSepIdx = inputBuffer.indexOf('\n\n');
-      const headerEnd = sepIdx >= 0 ? sepIdx : altSepIdx;
-      const sepLen = sepIdx >= 0 ? 4 : 2;
-      if (headerEnd < 0) break;
+    while (inputBuffer.length > 0) {
+      const preview = inputBuffer.slice(0, Math.min(inputBuffer.length, 64)).toString('utf8');
+      if (/^Content-Length:/i.test(preview)) {
+        useHeaderFraming = true;
+        const sepIdx = inputBuffer.indexOf('\r\n\r\n');
+        const altSepIdx = inputBuffer.indexOf('\n\n');
+        const headerEnd = sepIdx >= 0 ? sepIdx : altSepIdx;
+        const sepLen = sepIdx >= 0 ? 4 : 2;
+        if (headerEnd < 0) break;
 
-      const headerStr = inputBuffer.slice(0, headerEnd).toString('utf8');
-      const match = headerStr.match(/Content-Length:\s*(\d+)/i);
-      if (!match) {
-        inputBuffer = inputBuffer.slice(headerEnd + sepLen);
-        continue;
+        const headerStr = inputBuffer.slice(0, headerEnd).toString('utf8');
+        const match = headerStr.match(/Content-Length:\s*(\d+)/i);
+        if (!match) {
+          inputBuffer = inputBuffer.slice(headerEnd + sepLen);
+          continue;
+        }
+        const bodyLen = Number(match[1]);
+        const totalLen = headerEnd + sepLen + bodyLen;
+        if (inputBuffer.length < totalLen) break;
+
+        const bodyStr = inputBuffer.slice(headerEnd + sepLen, totalLen).toString('utf8');
+        inputBuffer = inputBuffer.slice(totalLen);
+        try {
+          const parsed = JSON.parse(bodyStr);
+          handleRpcRequest(parsed);
+        } catch (_) {}
+      } else {
+        const nlIdx = inputBuffer.indexOf('\n');
+        if (nlIdx < 0) break;
+        const line = inputBuffer.slice(0, nlIdx).toString('utf8').trim();
+        inputBuffer = inputBuffer.slice(nlIdx + 1);
+        if (!line) continue;
+        try {
+          const parsed = JSON.parse(line);
+          handleRpcRequest(parsed);
+        } catch (_) {}
       }
-      const bodyLen = Number(match[1]);
-      const totalLen = headerEnd + sepLen + bodyLen;
-      if (inputBuffer.length < totalLen) break;
-
-      const bodyStr = inputBuffer.slice(headerEnd + sepLen, totalLen).toString('utf8');
-      inputBuffer = inputBuffer.slice(totalLen);
-      try {
-        const parsed = JSON.parse(bodyStr);
-        handleRpcRequest(parsed);
-      } catch (_) {}
-    } else {
-      const nlIdx = inputBuffer.indexOf('\n');
-      if (nlIdx < 0) break;
-      const line = inputBuffer.slice(0, nlIdx).toString('utf8').trim();
-      inputBuffer = inputBuffer.slice(nlIdx + 1);
-      if (!line) continue;
-      try {
-        const parsed = JSON.parse(line);
-        handleRpcRequest(parsed);
-      } catch (_) {}
     }
-  }
-});
+  });
+}
+
+if (require.main === module) {
+  startMcpStdioServer();
+}
+
+module.exports = {
+  MCP_TOOLS,
+  handleToolCall,
+  corpusManager,
+  loadRuntimeConfig,
+  resolveCorpusId,
+  startMcpStdioServer,
+};

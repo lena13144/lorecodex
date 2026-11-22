@@ -8,6 +8,7 @@ corpora/*
 builders/migrate_*.mjs
 .tmp*
 .tmp-uploads/
+dist/
 __pycache__/
 *.pyc
 .DS_Store

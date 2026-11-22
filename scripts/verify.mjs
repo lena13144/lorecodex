@@ -428,7 +428,7 @@ function testHygieneAndSyntax() {
 
   const walk = (dir) => {
     for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (ent.name === '.git' || ent.name === 'node_modules' || ent.name.startsWith('.tmp')) continue;
+      if (ent.name === '.git' || ent.name === 'node_modules' || ent.name === 'dist' || ent.name.startsWith('.tmp')) continue;
       const full = path.join(dir, ent.name);
       const rel = path.relative(ROOT, full).replace(/\\/g, '/');
       if (
@@ -564,7 +564,36 @@ async function testMcpAndBrowserEngine() {
       arguments: { corpus: 'demo-chronicles', scene_node_ids: ['0001'] },
     });
     assert(readCall.result?.content?.[0]?.text.includes('node_id=0001'));
-    console.log('  PASS: MCP stdio server (8 tools), .lorepack export, and In-Browser Serverless Engine verified');
+
+    // 3. Test DeepSeek Harness (dsh / @deepseek-ai/cordis) native plugin
+    const dshMod = await import(new URL('../src/dsh_plugin.js', import.meta.url).href);
+    const dshPlugin = dshMod.default || dshMod;
+    assert.strictEqual(dshPlugin.name, 'lorecodex');
+    assert(Array.isArray(dshPlugin.inject) && dshPlugin.inject.includes('tools'));
+
+    const registeredTools = new Map();
+    const mockCordisCtx = {
+      tools: {
+        register(spec) {
+          registeredTools.set(spec.name, spec);
+        },
+      },
+    };
+    const regList = dshPlugin.apply(mockCordisCtx, {
+      corporaDir: path.join(ROOT, 'corpora'),
+      defaultCorpus: 'demo-chronicles',
+    });
+    assert.strictEqual(regList.length, 8, 'DSH plugin must register all 8 LoreCodex tools');
+    const dshGrepTool = registeredTools.get('lorecodex_grep_scenes');
+    assert(dshGrepTool, 'lorecodex_grep_scenes must be registered in Cordis ctx.tools');
+    assert.strictEqual(dshGrepTool.parameters.query.required, true);
+    const dshGrepVal = await dshGrepTool.execute({ query: 'Zero-7' });
+    assert(dshGrepVal.includes('scenes matched'), 'DSH lorecodex_grep_scenes execute must return matches');
+    const renderedBlocks = dshGrepTool.output.render({ query: 'Zero-7' }, dshGrepVal);
+    assert.strictEqual(renderedBlocks[0]?.type, 'text');
+    assert(renderedBlocks[0]?.text.includes('scenes matched'));
+
+    console.log('  PASS: MCP stdio server (8 tools), DeepSeek Harness (Cordis) plugin, .lorepack export, and In-Browser Serverless Engine verified');
   } finally {
     mcpProc.kill();
   }

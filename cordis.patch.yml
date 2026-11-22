@@ -1,0 +1,6 @@
+- insert:
+    - id: lorecodex
+      name: 'lorecodex'
+      disabled: false
+      config:
+        defaultCorpus: 'demo-chronicles'
