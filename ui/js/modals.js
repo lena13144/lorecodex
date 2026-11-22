@@ -471,10 +471,10 @@ export function openImportModal() {
     <div class="modal-body">
       <div id="impDropzone" class="dropzone">
         <div style="font-weight:600;margin-bottom:4px;">点击选择或拖拽文件到此处</div>
-        <div class="pane-sub">支持长篇小说 (.txt / .md / .epub) 或 SillyTavern 世界书 / 离散设定 (.json / .jsonl)</div>
+        <div class="pane-sub">支持单文件典籍包 (.lorepack.json)、小说 (.txt / .md / .epub) 或世界书 / 角色卡 (.json)</div>
         <div id="impFileInfo" style="margin-top:8px;font-family:var(--mono);font-size:11.5px;color:var(--seal);"></div>
-        <input id="impFileInput" type="file" accept=".txt,.md,.epub,.json,.jsonl" style="display:none;" />
       </div>
+      <input id="impFileInput" type="file" accept=".txt,.md,.epub,.json,.jsonl" style="display:none;" />
 
       <div class="fld-row-2">
         <div class="fld-group">
@@ -529,7 +529,7 @@ export function openImportModal() {
     <div class="modal-foot">
       <button id="impDoneSwitchBtn" class="btn-seal" style="display:none;">立即打开新书库</button>
       <button data-close-modal>关闭</button>
-      <button id="impStartBtn" class="btn-seal">开始上传并建树</button>
+      <button id="impStartBtn" class="btn-seal">开始导入</button>
     </div>
   `);
 
@@ -546,23 +546,42 @@ export function openImportModal() {
   };
   $('#impKind').addEventListener('change', updateModeUi);
 
+  let lastAutoSlug = '';
+  let lastAutoName = '';
+
   const handleFile = (file) => {
     if (!file) return;
     selectedFile = file;
-    $('#impFileInfo').textContent = `已选择: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
     const lower = file.name.toLowerCase();
-    const stem = file.name.replace(/\.[^.]+$/, '');
+    const isLorepack = lower.endsWith('.lorepack.json');
+    if (isLorepack) {
+      $('#impFileInfo').textContent = `已选择典籍包: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB) — 点击下方「开始导入」即可直接入库`;
+    } else {
+      $('#impFileInfo').textContent = `已选择: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+    }
+    const stem = file.name.replace(/\.lorepack\.json$/i, '').replace(/\.[^.]+$/, '');
     const slug = stem.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'custom-book';
-    if (!$('#impCorpusId').value.trim()) $('#impCorpusId').value = slug;
-    if (!$('#impName').value.trim()) $('#impName').value = stem;
-    if (lower.endsWith('.json') || lower.endsWith('.jsonl')) $('#impKind').value = 'lore';
+    const curId = $('#impCorpusId').value.trim();
+    const curName = $('#impName').value.trim();
+    if (!curId || curId === lastAutoSlug) {
+      $('#impCorpusId').value = slug;
+      lastAutoSlug = slug;
+    }
+    if (!curName || curName === lastAutoName) {
+      $('#impName').value = stem;
+      lastAutoName = stem;
+    }
+    if (isLorepack || lower.endsWith('.json') || lower.endsWith('.jsonl')) $('#impKind').value = 'lore';
     else $('#impKind').value = 'novel';
     updateModeUi();
   };
 
   const dz = $('#impDropzone');
   const fi = $('#impFileInput');
-  dz.addEventListener('click', () => fi.click());
+  dz.addEventListener('click', () => {
+    fi.value = '';
+    fi.click();
+  });
   fi.addEventListener('change', (e) => handleFile(e.target.files?.[0]));
   dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dragover'); });
   dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
@@ -585,7 +604,11 @@ export function openImportModal() {
     });
 
   $('#impStartBtn').addEventListener('click', async () => {
-    if (!selectedFile) return showToast('请先选择或拖入一个文件', 'err');
+    if (!selectedFile) {
+      fi.value = '';
+      fi.click();
+      return;
+    }
     const corpusId = $('#impCorpusId').value.trim();
     if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(corpusId)) {
       return showToast('书库 ID 仅支持英文/数字/连字符', 'err');
@@ -593,7 +616,7 @@ export function openImportModal() {
     const startBtn = $('#impStartBtn');
     startBtn.disabled = true;
     $('#impJobWrap').style.display = 'flex';
-    $('#impJobStatus').textContent = '正在上传文件并启动建树任务...';
+    $('#impJobStatus').textContent = '正在读取文件并启动导入...';
 
     try {
       const contentBase64 = await readBase64(selectedFile);
@@ -640,6 +663,8 @@ export function openImportModal() {
       startBtn.disabled = false;
     }
   });
+
+  fi.click();
 }
 
 export function openCommandPalette() {

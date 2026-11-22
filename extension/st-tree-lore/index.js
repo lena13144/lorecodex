@@ -1050,6 +1050,8 @@ jQuery(async () => {
 
     await syncConfigFromServer();
 
+    const needsApiSetup = !String(cfg.chatBase || '').trim() || !String(cfg.chatModel || '').trim();
+
     const html = `
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
@@ -1063,121 +1065,23 @@ jQuery(async () => {
                         <span id="lorecodex_conn_dot" class="lorecodex-dot wait"></span>
                         <span id="lorecodex_conn_text" class="lorecodex-conn-text">正在初始化内置书阁...</span>
                     </div>
-                    <button id="lorecodex_open_ui" class="menu_button" style="width:auto;padding:3px 9px;">打开书阁</button>
+                    <button id="lorecodex_open_ui" class="menu_button" style="width:auto;padding:4px 11px;">打开书阁</button>
                 </div>
                 <label class="checkbox_label">
                     <input id="lorecodex_enabled" type="checkbox" ${cfg.enabled ? 'checked' : ''} />
-                    <span><b>启用生成前树形记忆检索注入</b></span>
+                    <span><b>启用生成前记忆检索注入</b></span>
                 </label>
                 <div class="lorecodex-row">
                     <div style="flex:1;min-width:160px;">
-                        <small>当前挂载典籍书库：</small>
+                        <small>当前挂载书库：</small>
                         <select id="lorecodex_corpus" class="text_pole"></select>
                     </div>
-                    <button id="lorecodex_refresh_corpora" class="menu_button" style="width:auto;margin-top:16px;padding:4px 10px;">刷新书库</button>
-                </div>
-                <div class="lorecodex-grid-4">
-                    <div title="0 = 全库开放不拦截；>0 时拦截所有 order 大于该值的后续章节">
-                        <small>防剧透序</small>
-                        <input id="lorecodex_max_order" class="text_pole" type="number" min="0" value="${cfg.maxOrder ?? 0}" />
-                    </div>
-                    <div title="0 = 由 Agent 按场景与字数预算自决">
-                        <small>幕数(0自决)</small>
-                        <input id="lorecodex_max_scenes" class="text_pole" type="number" min="0" max="12" value="${cfg.maxScenes ?? 0}" />
-                    </div>
-                    <div>
-                        <small>对话轮数</small>
-                        <input id="lorecodex_recent_turns" class="text_pole" type="number" min="1" max="15" value="${cfg.recentTurns ?? 5}" />
-                    </div>
-                    <div>
-                        <small>注入深度</small>
-                        <input id="lorecodex_depth" class="text_pole" type="number" min="0" max="10" value="${cfg.depth ?? 1}" />
-                    </div>
-                </div>
-                <div>
-                    <small>检索视角 POV（可选，缺席场景标注转述）：</small>
-                    <input id="lorecodex_pov" class="text_pole" type="text" value="${escHtml(cfg.pov || '')}" placeholder="留空表示全景视角" />
+                    <button id="lorecodex_refresh_corpora" class="menu_button" style="width:auto;margin-top:16px;padding:4px 10px;">刷新</button>
                 </div>
             </div>
 
-            <div class="lorecodex-card">
-                <div style="font-weight:bold;font-size:0.88em;">角色卡自动绑定</div>
-                <div id="lorecodex_binding_info" class="lorecodex-muted"></div>
-                <div class="lorecodex-row">
-                    <button id="lorecodex_bind_char" class="menu_button" style="flex:1;">绑定当前角色卡</button>
-                    <button id="lorecodex_unbind_char" class="menu_button" style="flex:1;">解除当前绑定</button>
-                </div>
-            </div>
-
-            <div class="lorecodex-card">
-                <div style="font-weight:bold;font-size:0.88em;">上次注入实时预览</div>
-                <div id="lorecodex_last_preview" style="display:flex;flex-direction:column;gap:6px;"></div>
-            </div>
-
-            <details class="lorecodex-card" open>
-                <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">典籍书库导入与 LLM 目录构建（纯前端免后台 · 支持 TXT / EPUB / 世界书 / 角色卡）</summary>
-                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                    <div class="lorecodex-muted">支持直接选择小说 (<b>.txt</b> 自动识别 UTF-8/GB18030、<b>.epub</b>、<b>.md</b>)、世界书/V2角色卡 (<b>.json</b>) 或单文件书库包 (<b>.lorepack.json</b>) 存入浏览器 IndexedDB。<b>三层树检索依赖高质量 LLM 目录摘要与人物别名表，导入原始小说后请执行 LLM 智能目录构建（支持按卷构建与断点续传）。</b></div>
-                    <input id="lorecodex_local_file" class="text_pole" type="file" accept=".txt,.md,.epub,.json" />
-                    <div class="lorecodex-row">
-                        <div style="flex:1;">
-                            <small>书库 ID（英文/数字/连字符）：</small>
-                            <input id="lorecodex_local_id" class="text_pole" type="text" placeholder="my-book" />
-                        </div>
-                        <div style="flex:1;">
-                            <small>书库显示名称：</small>
-                            <input id="lorecodex_local_name" class="text_pole" type="text" placeholder="例如：才不是魔女" />
-                        </div>
-                    </div>
-                    <label class="checkbox_label">
-                        <input id="lorecodex_local_auto_llm" type="checkbox" checked />
-                        <span>导入后立即启动 LLM 智能目录构建（自动生成分幕摘要、卷总览、人物别名与术语表）</span>
-                    </label>
-                    <div class="lorecodex-row">
-                        <button id="lorecodex_local_import_btn" type="button" class="menu_button" style="flex:2;">导入并建树到书阁</button>
-                        <button id="lorecodex_local_export_btn" type="button" class="menu_button" style="flex:1;">导出 .lorepack</button>
-                        <button id="lorecodex_local_delete_btn" type="button" class="menu_button" style="width:auto;padding:4px 8px;">删除</button>
-                    </div>
-                    <div style="border-top:1px solid rgba(128,128,128,0.25);padding-top:6px;margin-top:2px;display:flex;flex-direction:column;gap:6px;">
-                        <div style="font-weight:bold;font-size:0.84em;">当前书库 LLM 目录构建 / 原地补全（支持 IndexedDB 断点续传）</div>
-                        <div class="lorecodex-row">
-                            <div style="flex:2;min-width:140px;">
-                                <small>目标分卷（推荐按卷逐卷构建）：</small>
-                                <select id="lorecodex_local_upg_series" class="text_pole">
-                                    <option value="">全部未完成章节</option>
-                                </select>
-                            </div>
-                            <div style="flex:1;min-width:70px;">
-                                <small>并发数：</small>
-                                <input id="lorecodex_local_upg_workers" class="text_pole" type="number" min="1" max="12" value="4" />
-                            </div>
-                            <div style="flex:1;min-width:80px;" title="0 = 所选分卷全部章节">
-                                <small>本批章数(0全卷)：</small>
-                                <input id="lorecodex_local_upg_limit" class="text_pole" type="number" min="0" value="0" />
-                            </div>
-                        </div>
-                        <div class="lorecodex-row">
-                            <button id="lorecodex_local_upg_btn" type="button" class="menu_button" style="flex:2;">开始 / 继续 LLM 目录构建</button>
-                            <button id="lorecodex_local_upg_stop_btn" type="button" class="menu_button" style="flex:1;display:none;">暂停并保存进度</button>
-                        </div>
-                    </div>
-                    <div id="lorecodex_local_status" class="lorecodex-status"></div>
-                </div>
-            </details>
-
-            <details class="lorecodex-card">
-                <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">内嵌测试检索（无需弹窗）</summary>
-                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                    <div class="lorecodex-row">
-                        <input id="lorecodex_test_query" class="text_pole" type="text" style="flex:1;" placeholder="输入测试检索问题，如：苏璃的真实身份" />
-                        <button id="lorecodex_test_btn" class="menu_button" style="width:auto;padding:4px 10px;">执行测试</button>
-                    </div>
-                    <div id="lorecodex_status" class="lorecodex-status"></div>
-                </div>
-            </details>
-
-            <details class="lorecodex-card">
-                <summary style="cursor:pointer;font-weight:bold;font-size:0.88em;">旁路推理 Agent 模型配置</summary>
+            <details class="lorecodex-card" ${needsApiSetup ? 'open' : ''}>
+                <summary>旁路模型 API 配置${needsApiSetup ? '（请先填写）' : ''}</summary>
                 <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
                     <div>
                         <small>API Base URL (OpenAI 兼容)：</small>
@@ -1195,30 +1099,148 @@ jQuery(async () => {
                         <button id="lorecodex_fetch_models" class="menu_button" style="width:auto;margin-top:16px;padding:4px 8px;">拉取模型</button>
                     </div>
                     <select id="lorecodex_model_select" class="text_pole" style="display:none;"></select>
-                    <div style="display:flex;gap:8px;">
-                        <div style="flex:1;">
-                            <small>Max Tokens（留空 = 默认）：</small>
-                            <input id="lorecodex_max_tokens" class="text_pole" type="number" min="0" step="256" value="${Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : ''}" placeholder="沿用模型默认" />
+                    <details class="lorecodex-subdetails">
+                        <summary>高级模型参数（默认留空即可）</summary>
+                        <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+                            <div style="display:flex;gap:8px;">
+                                <div style="flex:1;">
+                                    <small>Max Tokens（留空 = 默认）：</small>
+                                    <input id="lorecodex_max_tokens" class="text_pole" type="number" min="0" step="256" value="${Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : ''}" placeholder="沿用模型默认" />
+                                </div>
+                                <div style="flex:1;">
+                                    <small>Temperature（留空 = 不传）：</small>
+                                    <input id="lorecodex_temperature" class="text_pole" type="number" min="0" max="2" step="0.1" value="${normalizeTemperature(cfg.temperature)}" placeholder="沿用模型默认（留空不传）" />
+                                </div>
+                            </div>
+                            <div>
+                                <small>思考强度 Reasoning Effort（默认不传）：</small>
+                                <select id="lorecodex_reasoning_effort" class="text_pole">
+                                    <option value="" ${!normalizeReasoningEffort(cfg.reasoningEffort) ? 'selected' : ''}>沿用模型默认（不传）</option>
+                                    ${['minimal', 'low', 'medium', 'high'].map(v => `<option value="${v}" ${normalizeReasoningEffort(cfg.reasoningEffort) === v ? 'selected' : ''}>${v}</option>`).join('')}
+                                </select>
+                            </div>
                         </div>
-                        <div style="flex:1;">
-                            <small>Temperature（留空 = 不传）：</small>
-                            <input id="lorecodex_temperature" class="text_pole" type="number" min="0" max="2" step="0.1" value="${normalizeTemperature(cfg.temperature)}" placeholder="沿用模型默认（留空不传）" />
-                        </div>
-                    </div>
-                    <div>
-                        <small>思考强度 Reasoning Effort（默认不传）：</small>
-                        <select id="lorecodex_reasoning_effort" class="text_pole">
-                            <option value="" ${!normalizeReasoningEffort(cfg.reasoningEffort) ? 'selected' : ''}>沿用模型默认（不传）</option>
-                            ${['minimal', 'low', 'medium', 'high'].map(v => `<option value="${v}" ${normalizeReasoningEffort(cfg.reasoningEffort) === v ? 'selected' : ''}>${v}</option>`).join('')}
-                        </select>
-                    </div>
-                    <button id="lorecodex_save_srv" class="menu_button" style="width:100%;">保存当前模型与默认书库配置</button>
+                    </details>
+                    <button id="lorecodex_save_srv" class="menu_button" style="width:100%;">保存模型与默认书库配置</button>
                     <div id="lorecodex_model_status" class="lorecodex-status"></div>
                 </div>
             </details>
 
             <details class="lorecodex-card">
-                <summary style="cursor:pointer;font-size:0.86em;opacity:0.85;">高级可选：连接外部独立 Node 服务端 & 注入包装正则</summary>
+                <summary>导入书库（.lorepack.json / 小说 / 世界书）</summary>
+                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+                    <div class="lorecodex-muted">选择 <code>.lorepack.json</code>、<code>.txt</code>/<code>.epub</code> 或世界书/角色卡 <code>.json</code> 直接存入浏览器。</div>
+                    <input id="lorecodex_local_file" type="file" accept=".txt,.md,.epub,.json,.jsonl" style="display:none;" />
+                    <button id="lorecodex_local_import_btn" type="button" class="menu_button" style="width:100%;">选择文件并导入（.lorepack.json / 小说 / 世界书）</button>
+                    <details class="lorecodex-subdetails">
+                        <summary>自定义书库信息 / 导出与删除</summary>
+                        <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+                            <div class="lorecodex-row">
+                                <div style="flex:1;">
+                                    <small>书库 ID（英文/数字/连字符）：</small>
+                                    <input id="lorecodex_local_id" class="text_pole" type="text" placeholder="my-book" />
+                                </div>
+                                <div style="flex:1;">
+                                    <small>书库显示名称：</small>
+                                    <input id="lorecodex_local_name" class="text_pole" type="text" placeholder="例如：原著书名" />
+                                </div>
+                            </div>
+                            <label class="checkbox_label">
+                                <input id="lorecodex_local_auto_llm" type="checkbox" checked />
+                                <span>导入原始小说后自动启动 LLM 智能目录构建</span>
+                            </label>
+                            <div class="lorecodex-row">
+                                <button id="lorecodex_local_export_btn" type="button" class="menu_button" style="flex:1;">导出 .lorepack</button>
+                                <button id="lorecodex_local_delete_btn" type="button" class="menu_button" style="flex:1;">删除当前书库</button>
+                            </div>
+                        </div>
+                    </details>
+                    <details class="lorecodex-subdetails">
+                        <summary>小说 LLM 目录构建 / 断点续传</summary>
+                        <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+                            <div class="lorecodex-row">
+                                <div style="flex:2;min-width:140px;">
+                                    <small>目标分卷（推荐按卷逐卷构建）：</small>
+                                    <select id="lorecodex_local_upg_series" class="text_pole">
+                                        <option value="">全部未完成章节</option>
+                                    </select>
+                                </div>
+                                <div style="flex:1;min-width:70px;">
+                                    <small>并发数：</small>
+                                    <input id="lorecodex_local_upg_workers" class="text_pole" type="number" min="1" max="12" value="4" />
+                                </div>
+                                <div style="flex:1;min-width:80px;" title="0 = 所选分卷全部章节">
+                                    <small>本批章数(0全卷)：</small>
+                                    <input id="lorecodex_local_upg_limit" class="text_pole" type="number" min="0" value="0" />
+                                </div>
+                            </div>
+                            <div class="lorecodex-row">
+                                <button id="lorecodex_local_upg_btn" type="button" class="menu_button" style="flex:2;">开始 / 继续 LLM 目录构建</button>
+                                <button id="lorecodex_local_upg_stop_btn" type="button" class="menu_button" style="flex:1;display:none;">暂停并保存进度</button>
+                            </div>
+                        </div>
+                    </details>
+                    <div id="lorecodex_local_status" class="lorecodex-status"></div>
+                </div>
+            </details>
+
+            <details class="lorecodex-card">
+                <summary>检索与防剧透设置</summary>
+                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+                    <div class="lorecodex-grid-4">
+                        <div title="0 = 全库开放不拦截；>0 时拦截所有 order 大于该值的后续章节">
+                            <small>防剧透序</small>
+                            <input id="lorecodex_max_order" class="text_pole" type="number" min="0" value="${cfg.maxOrder ?? 0}" />
+                        </div>
+                        <div title="0 = 由 Agent 按场景与字数预算自决">
+                            <small>幕数(0自决)</small>
+                            <input id="lorecodex_max_scenes" class="text_pole" type="number" min="0" max="12" value="${cfg.maxScenes ?? 0}" />
+                        </div>
+                        <div>
+                            <small>对话轮数</small>
+                            <input id="lorecodex_recent_turns" class="text_pole" type="number" min="1" max="15" value="${cfg.recentTurns ?? 5}" />
+                        </div>
+                        <div>
+                            <small>注入深度</small>
+                            <input id="lorecodex_depth" class="text_pole" type="number" min="0" max="10" value="${cfg.depth ?? 1}" />
+                        </div>
+                    </div>
+                    <div>
+                        <small>检索视角 POV（可选，缺席场景标注转述）：</small>
+                        <input id="lorecodex_pov" class="text_pole" type="text" value="${escHtml(cfg.pov || '')}" placeholder="留空表示全景视角" />
+                    </div>
+                </div>
+            </details>
+
+            <details class="lorecodex-card">
+                <summary>角色卡自动绑定</summary>
+                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+                    <div id="lorecodex_binding_info" class="lorecodex-muted"></div>
+                    <div class="lorecodex-row">
+                        <button id="lorecodex_bind_char" class="menu_button" style="flex:1;">绑定当前角色卡</button>
+                        <button id="lorecodex_unbind_char" class="menu_button" style="flex:1;">解除当前绑定</button>
+                    </div>
+                </div>
+            </details>
+
+            <details class="lorecodex-card">
+                <summary>上次注入实时预览</summary>
+                <div id="lorecodex_last_preview" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;"></div>
+            </details>
+
+            <details class="lorecodex-card">
+                <summary>内嵌测试检索（无需弹窗）</summary>
+                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+                    <div class="lorecodex-row">
+                        <input id="lorecodex_test_query" class="text_pole" type="text" style="flex:1;" placeholder="输入测试检索问题" />
+                        <button id="lorecodex_test_btn" class="menu_button" style="width:auto;padding:4px 10px;">执行测试</button>
+                    </div>
+                    <div id="lorecodex_status" class="lorecodex-status"></div>
+                </div>
+            </details>
+
+            <details class="lorecodex-card">
+                <summary>高级可选：连接外部独立 Node 服务端 &amp; 注入包装正则</summary>
                 <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
                     <label class="checkbox_label">
                         <input id="lorecodex_local_mode" type="checkbox" ${cfg.localMode ? 'checked' : ''} />
@@ -1280,15 +1302,6 @@ jQuery(async () => {
         renderCorpusDropdown();
     });
 
-    $('#lorecodex_local_file').on('change', function (e) {
-        const f = e.target.files?.[0];
-        if (!f) return;
-        const stem = f.name.replace(/\.lorepack\.json$/i, '').replace(/\.[^.]+$/, '');
-        const slug = stem.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'local-book';
-        if (!$('#lorecodex_local_id').val().trim()) $('#lorecodex_local_id').val(slug);
-        if (!$('#lorecodex_local_name').val().trim()) $('#lorecodex_local_name').val(stem);
-    });
-
     let localUpgAbortCtrl = null;
 
     const runLocalLlmUpgrade = async (targetCorpusId) => {
@@ -1300,8 +1313,8 @@ jQuery(async () => {
         }
         const apiCfg = buildApiConfig(cfg);
         if (!apiCfg.chatBase || !apiCfg.chatKey) {
-            st.text('请先在下方「旁路推理 Agent 模型配置」填写 API Base URL 与 API Key 后再启动 LLM 目录构建');
-            if (typeof toastr !== 'undefined') toastr.warning('请先填写旁路推理 API Base URL 与 API Key');
+            st.text('请先在上方「旁路模型 API 配置」填写 API Base URL 与 API Key 后再启动 LLM 目录构建');
+            if (typeof toastr !== 'undefined') toastr.warning('请先填写旁路模型 API Base URL 与 API Key');
             return;
         }
         if (localUpgAbortCtrl) {
@@ -1367,9 +1380,7 @@ jQuery(async () => {
         if (localUpgAbortCtrl) localUpgAbortCtrl.abort();
     });
 
-    $('#lorecodex_local_import_btn').on('click', async () => {
-        const fileEl = $('#lorecodex_local_file')[0];
-        const file = fileEl?.files?.[0];
+    const doLocalImport = async (file) => {
         const st = $('#lorecodex_local_status');
         if (!file) {
             st.text('请先选择一个 .txt / .md / .epub / .json / .lorepack.json 文件');
@@ -1378,7 +1389,7 @@ jQuery(async () => {
         const cid = ($('#lorecodex_local_id').val().trim() || 'local-book').replace(/[^a-zA-Z0-9_-]/g, '-');
         const cName = $('#lorecodex_local_name').val().trim() || cid;
         const autoLlm = $('#lorecodex_local_auto_llm').prop('checked');
-        st.text(`正在浏览器内读取并切分「${cName}」...`);
+        st.text(`正在浏览器内读取并导入「${cName}」...`);
         try {
             const ab = await file.arrayBuffer();
             const fnameLower = file.name.toLowerCase();
@@ -1391,7 +1402,7 @@ jQuery(async () => {
                       rawJson: text,
                       corpusId: cid,
                       name: cName,
-                      existingPack: localPacksMap.get(cid) || null,
+                      existingPack: isLorepack ? null : (localPacksMap.get(cid) || null),
                   })
                 : buildNovelCorpusInBrowser({
                       rawText: text,
@@ -1406,20 +1417,39 @@ jQuery(async () => {
             renderCorpusDropdown();
             const stats = pack.indexData?.stats || {};
             st.text(`已存入浏览器 IndexedDB：${pack.config.name} (${stats.arcs || 0}卷 / ${stats.scenes || 0}幕 / ${(stats.total_chars || 0).toLocaleString()}字)`);
-            if (typeof toastr !== 'undefined') toastr.success(`本地书库「${pack.config.name}」切分入库完成`);
+            if (typeof toastr !== 'undefined') toastr.success(`本地书库「${pack.config.name}」导入完成`);
 
             if (autoLlm && !isLorepack) {
                 const apiCfg = buildApiConfig(cfg);
                 if (apiCfg.chatBase && apiCfg.chatKey) {
                     await runLocalLlmUpgrade(pack.id);
                 } else {
-                    st.text(`已切分入库 (${stats.arcs || 0}章)。请先在下方填写旁路 API Base URL 与 API Key，再点击「开始 / 继续 LLM 目录构建」补全目录摘要与别名表。`);
+                    st.text(`已切分入库 (${stats.arcs || 0}章)。请先在上方「旁路模型 API 配置」填写 API Base URL 与 API Key，再点击「开始 / 继续 LLM 目录构建」补全目录摘要与别名表。`);
                 }
             }
         } catch (err) {
-            st.text('本地建树失败: ' + (err?.message || err));
-            if (typeof toastr !== 'undefined') toastr.error('本地建树失败: ' + (err?.message || err));
+            st.text('本地导入失败: ' + (err?.message || err));
+            if (typeof toastr !== 'undefined') toastr.error('本地导入失败: ' + (err?.message || err));
         }
+    };
+
+    $('#lorecodex_local_file').on('change', async function (e) {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        const stem = f.name.replace(/\.lorepack\.json$/i, '').replace(/\.[^.]+$/, '');
+        const slug = stem.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'local-book';
+        const customSub = $('#lorecodex_local_id').closest('details')[0];
+        const customOpen = Boolean(customSub?.open);
+        if (!customOpen || !$('#lorecodex_local_id').val().trim()) $('#lorecodex_local_id').val(slug);
+        if (!customOpen || !$('#lorecodex_local_name').val().trim()) $('#lorecodex_local_name').val(stem);
+        await doLocalImport(f);
+    });
+
+    $('#lorecodex_local_import_btn').on('click', () => {
+        const fileEl = $('#lorecodex_local_file')[0];
+        if (!fileEl) return;
+        fileEl.value = '';
+        fileEl.click();
     });
 
     $('#lorecodex_local_export_btn').on('click', () => {

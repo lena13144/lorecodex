@@ -16,6 +16,27 @@
     gap: 7px;
 }
 
+details.lorecodex-card > summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.88em;
+    list-style-position: outside;
+    user-select: none;
+}
+
+.lorecodex-subdetails {
+    border-top: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.24));
+    padding-top: 6px;
+    margin-top: 2px;
+}
+
+.lorecodex-subdetails > summary {
+    cursor: pointer;
+    font-size: 0.82em;
+    opacity: 0.85;
+    user-select: none;
+}
+
 .lorecodex-conn-bar {
     display: flex;
     align-items: center;

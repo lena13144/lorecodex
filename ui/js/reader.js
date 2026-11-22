@@ -239,18 +239,18 @@ function renderCoverSheet(sheet) {
 
   const aliases = state.index.aliases || [];
   const aliasPreview = aliases.length
-    ? `<div class="colophon-box" style="margin-top:22px;text-align:left;">
-        <strong>人物别名展开组（共 ${aliases.length} 组）：</strong>
+    ? `<details class="colophon-box" style="margin-top:22px;text-align:left;">
+        <summary style="cursor:pointer;font-weight:600;">人物别名展开组（共 ${aliases.length} 组）</summary>
         <div class="colophon-tags">${aliases
           .slice(0, 14)
           .map((g) => `<span class="colophon-tag">${esc(g.slice(0, 3).join(' / '))}</span>`)
           .join('')}${aliases.length > 14 ? `<span class="colophon-tag">…+${aliases.length - 14}</span>` : ''}</div>
-      </div>`
+      </details>`
     : '';
 
   const desc =
     state.index.corpus?.description ||
-    '左侧为分级典籍总目与毫秒级全文检索，中央为多主题沉浸阅读页，右侧实时透视旁路 Agent 逐轮寻路瀑布流。';
+    '左侧浏览目录与全文检索，中央阅读原著与检索选段，右侧可测试 Agent 翻书过程。';
 
   sheet.innerHTML = `
     <div class="running-head">
@@ -258,7 +258,6 @@ function renderCoverSheet(sheet) {
       <span>LoreCodex v${esc(state.index.version || 2)} · 模型 ${esc(state.modelName)}</span>
     </div>
     <div class="cover-hero">
-      <div style="font-size:11.5px;letter-spacing:0.18em;color:var(--ink-muted);margin-bottom:8px;">ARCHIVAL CODEX &amp; TREE REASONING</div>
       <h1 class="book-h1" style="font-size:28px;">${esc(corpusName())}</h1>
       <p class="prose" style="max-width:560px;margin:8px auto 0;text-align:center;color:var(--ink-soft);font-size:14px;">${esc(desc)}</p>
       <div class="cover-ornament"></div>
@@ -267,14 +266,14 @@ function renderCoverSheet(sheet) {
         <div class="kpi-card"><div class="kpi-val">${st.arcs || 0}</div><div class="kpi-lbl">收录篇章卷宗</div></div>
         <div class="kpi-card"><div class="kpi-val">${st.scenes || 0}</div><div class="kpi-lbl">无截断原场景幕</div></div>
         <div class="kpi-card"><div class="kpi-val">${fmtChars(st.total_chars || 0)}</div><div class="kpi-lbl">典籍总字数</div></div>
-        <div class="kpi-card"><div class="kpi-val">${state.maxOrder > 0 ? `<= ${state.maxOrder}` : st.max_order ? `全 ${st.max_order} 序` : '无序'}</div><div class="kpi-lbl">${state.maxOrder > 0 ? '防剧透门控开启' : '进度/关系图谱(' + (st.graph_edges || 0) + '边)'}</div></div>
+        <div class="kpi-card"><div class="kpi-val">${state.maxOrder > 0 ? `<= ${state.maxOrder}` : st.max_order ? `全 ${st.max_order} 序` : '无序限制'}</div><div class="kpi-lbl">${state.maxOrder > 0 ? '防剧透门控开启' : '进度序上限'}</div></div>
       </div>
 
       <div class="quick-actions">
-        <button id="covImportBtn" class="btn-seal">导入小说 / 世界书建树</button>
-        <button id="covCorpusBtn">编辑书库别名与规则</button>
-        <button id="covSettingsBtn">API 与模型配置</button>
-        <button id="covCmdBtn">快速跳转 (Ctrl+K)</button>
+        <button id="covImportBtn" class="btn-seal">导入典籍包 / 小说</button>
+        <button id="covSettingsBtn">配置模型 API</button>
+        <button id="covCmdBtn">快速搜索 (Ctrl+K)</button>
+        <button id="covCorpusBtn" class="btn-ghost" title="编辑当前书库别名、词汇表与规则">书库别名与规则</button>
       </div>
 
       <div class="vol-grid">${cards}</div>

@@ -253,6 +253,10 @@ function wireEvents() {
     b.addEventListener('click', () => setMobilePane(b.dataset.mobilePane));
   });
 
+  $('#mobileMenuPopover')?.addEventListener('click', (e) => {
+    if (e.target.closest('button')) $('#mobileMenuPopover').classList.remove('open');
+  });
+
   $$('[data-mobile-action]').forEach((b) => {
     b.addEventListener('click', () => {
       $('#mobileMenuPopover')?.classList.remove('open');
