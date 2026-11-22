@@ -21,6 +21,9 @@ const [
         idbListCorpora,
         idbSaveCorpus,
         idbDeleteCorpus,
+        idbGetMeta,
+        idbSetMeta,
+        idbRecordRun,
         buildNovelCorpusInBrowser,
         buildLoreCorpusInBrowser,
         createBrowserTreeAgent,
@@ -254,22 +257,46 @@ function getLanFallbackBase(rawBase) {
 let onWorkbenchClosedHook = null;
 
 function buildWorkbenchUrls(cfg, { runId = '', corpusId = '' } = {}) {
-    const base = getServerBase(cfg);
     const cid = String(corpusId || cfg.corpus || serverDefaultCorpus || '').trim();
+    const useLocalUi = Boolean(cfg.localMode) || !lastHealthInfo?.ok || (cid && localPacksMap.has(cid) && !corporaCache.some(c => c.id === cid));
     const qEmbed = new URLSearchParams();
     qEmbed.set('embed', '1');
+    if (useLocalUi) qEmbed.set('local', '1');
     if (cid) qEmbed.set('corpus', cid);
     const qStandalone = new URLSearchParams();
+    if (useLocalUi) qStandalone.set('local', '1');
     if (cid) qStandalone.set('corpus', cid);
     const hash = runId ? `#run=${encodeURIComponent(runId)}` : '';
     const qsStandalone = qStandalone.toString();
+
+    if (useLocalUi) {
+        const localUiUrl = new URL('./ui/index.html', import.meta.url);
+        const baseHref = localUiUrl.href.split('?')[0].split('#')[0];
+        return {
+            embedUrl: `${baseHref}?${qEmbed.toString()}${hash}`,
+            standaloneUrl: `${baseHref}${qsStandalone ? '?' + qsStandalone : ''}${hash}`,
+            isLocalUi: true,
+        };
+    }
+
+    const base = getServerBase(cfg);
     return {
         embedUrl: `${base}/?${qEmbed.toString()}${hash}`,
         standaloneUrl: `${base}/${qsStandalone ? '?' + qsStandalone : ''}${hash}`,
+        isLocalUi: false,
     };
 }
 
 function openWorkbenchModal(cfg, { runId = '', corpusId = '' } = {}) {
+    if (cfg.chatBase || cfg.chatKey || cfg.chatModel) {
+        idbSetMeta('local_api_config', {
+            defaultCorpus: cfg.corpus || '',
+            chatBase: cfg.chatBase || '',
+            chatKey: cfg.chatKey || '',
+            chatModel: cfg.chatModel || 'deepseek-chat',
+            maxTokens: Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null,
+        }).catch(() => {});
+    }
     const { embedUrl, standaloneUrl } = buildWorkbenchUrls(cfg, { runId, corpusId });
     const cid = String(corpusId || cfg.corpus || serverDefaultCorpus || '').trim();
     const cName = corporaMap.get(cid)?.name || cid || 'LoreCodex';
@@ -484,7 +511,9 @@ async function executeTreeSearchRequest(cfg, payload) {
         if (!localAgent) {
             throw new Error(`内置免服务端引擎中尚未导入书库 "${cid || '空'}"，请在下方「免服务端内置书库管理」导入小说或世界书`);
         }
-        return await localAgent.search(payload, buildApiConfig(cfg));
+        const out = await localAgent.search(payload, buildApiConfig(cfg));
+        const run = await idbRecordRun(payload, out).catch(() => null);
+        return run ? { ...out, run_id: run.id } : out;
     }
     const server = getServerBase(cfg);
     const resp = await fetch(`${server}/tree-search`, {
@@ -1335,7 +1364,18 @@ jQuery(async () => {
 
     onWorkbenchClosedHook = async () => {
         const ok = await fetchCorporaAndHealth(cfg);
-        await syncConfigFromServer({ overwriteExisting: true });
+        if (ok && !cfg.localMode) {
+            await syncConfigFromServer({ overwriteExisting: true });
+        } else {
+            const localCfg = await idbGetMeta('local_api_config', null);
+            if (localCfg && typeof localCfg === 'object') {
+                if (localCfg.chatBase) cfg.chatBase = localCfg.chatBase;
+                if (localCfg.chatKey && !/^\*+$/.test(localCfg.chatKey)) cfg.chatKey = localCfg.chatKey;
+                if (localCfg.chatModel) cfg.chatModel = localCfg.chatModel;
+                if (localCfg.defaultCorpus && corporaMap.has(localCfg.defaultCorpus)) cfg.corpus = localCfg.defaultCorpus;
+                cfg.maxTokens = Number(localCfg.maxTokens) > 0 ? Number(localCfg.maxTokens) : '';
+            }
+        }
         saveSettingsDebounced();
         renderConnStatus(ok);
         renderCorpusDropdown();

@@ -715,7 +715,7 @@ async function main() {
     const uiIndex = await fetch(`${BASE}/`);
     assert.strictEqual(uiIndex.status, 200);
     const uiHtml = await uiIndex.text();
-    assert(uiHtml.includes('/ui/js/main.js') && uiHtml.includes('/ui/styles.css'));
+    assert(uiHtml.includes('js/main.js') && uiHtml.includes('styles.css'));
 
     const cssRes = await fetch(`${BASE}/ui/styles.css`);
     assert.strictEqual(cssRes.status, 200);

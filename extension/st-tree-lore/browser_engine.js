@@ -1,5 +1,6 @@
 const IDB_NAME = 'lorecodex_browser_store_v2';
 const IDB_STORE = 'corpora';
+const IDB_META_STORE = 'runtime_meta';
 
 const DEFAULT_STAGE_PATTERNS = [
     '(?:世界|城市|模拟器|舞台|总览|合集|世界书|沙盒|sandbox|world|city|simulator)',
@@ -131,22 +132,76 @@ export function normalizeCorpusConfig(raw, corpusId) {
     };
 }
 
-// IndexedDB wrapper for local serverless corpora
+// IndexedDB wrapper for local serverless corpora & runtime trace runs
 function openIdb() {
     return new Promise((resolve, reject) => {
         if (typeof indexedDB === 'undefined') {
             return reject(new Error('当前环境不支持 IndexedDB'));
         }
-        const req = indexedDB.open(IDB_NAME, 1);
+        const req = indexedDB.open(IDB_NAME, 2);
         req.onupgradeneeded = () => {
             const db = req.result;
             if (!db.objectStoreNames.contains(IDB_STORE)) {
                 db.createObjectStore(IDB_STORE, { keyPath: 'id' });
             }
+            if (!db.objectStoreNames.contains(IDB_META_STORE)) {
+                db.createObjectStore(IDB_META_STORE, { keyPath: 'key' });
+            }
         };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error || new Error('IndexedDB 打开失败'));
     });
+}
+
+export async function idbGetMeta(key, fallback = null) {
+    try {
+        const db = await openIdb();
+        return await new Promise((resolve) => {
+            const tx = db.transaction(IDB_META_STORE, 'readonly');
+            const st = tx.objectStore(IDB_META_STORE);
+            const req = st.get(key);
+            req.onsuccess = () => resolve(req.result ? req.result.value : fallback);
+            req.onerror = () => resolve(fallback);
+        });
+    } catch (_) {
+        return fallback;
+    }
+}
+
+export async function idbSetMeta(key, value) {
+    try {
+        const db = await openIdb();
+        return await new Promise((resolve) => {
+            const tx = db.transaction(IDB_META_STORE, 'readwrite');
+            const st = tx.objectStore(IDB_META_STORE);
+            const req = st.put({ key, value, updatedAt: new Date().toISOString() });
+            req.onsuccess = () => resolve(true);
+            req.onerror = () => resolve(false);
+        });
+    } catch (_) {
+        return false;
+    }
+}
+
+export async function idbRecordRun(inputPayload, outputData) {
+    const run = {
+        id: 'run_local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+        ts: new Date().toISOString(),
+        corpus_id: outputData.corpus_id || inputPayload.corpus || '',
+        max_order: outputData.max_order ?? null,
+        input: inputPayload,
+        output: outputData,
+    };
+    const runs = (await idbGetMeta('recent_runs', [])) || [];
+    runs.unshift(run);
+    if (runs.length > 40) runs.length = 40;
+    await idbSetMeta('recent_runs', runs);
+    return run;
+}
+
+export async function idbListRuns(corpusId = '') {
+    const runs = (await idbGetMeta('recent_runs', [])) || [];
+    return corpusId ? runs.filter((r) => r.corpus_id === corpusId) : runs;
 }
 
 export async function idbListCorpora() {
@@ -649,13 +704,104 @@ export function createBrowserTreeAgent(pack) {
         scenes: indexData.stats?.scenes || sceneMetaMap.size,
         total_chars: indexData.stats?.total_chars || searchableScenes.reduce((a, s) => a + s.chars, 0),
         max_order: maxOrderAvailable,
+        llm_scenes: Number(indexData.stats?.llm_scenes || 0),
+        llm_arcs: Number(indexData.stats?.llm_arcs || 0),
     };
     const categories = [...categorySet];
     const seriesList = [...seriesStatsMap.values()].map((s) => ({
         ...s,
         categories: [...s.categories],
+        summary: String(seriesSummaries[s.series] || '').trim(),
     }));
     const toneTags = [...toneSet];
+
+    function resolveMaxOrder(rawMaxOrder) {
+        if (rawMaxOrder === undefined || rawMaxOrder === null || rawMaxOrder === '') {
+            return corpusConfig.spoiler_gate?.enabled
+                ? normalizeOrder(corpusConfig.spoiler_gate.default_max_order)
+                : null;
+        }
+        return normalizeOrder(rawMaxOrder);
+    }
+
+    function getTreeIndex({ maxOrder: rawMaxOrder } = {}) {
+        const maxOrder = resolveMaxOrder(rawMaxOrder);
+        const visible = [];
+        for (const arc of indexData.arcs || []) {
+            if (!isOrderAllowed(arc.order, maxOrder)) continue;
+            const rawScenes = arc.scenes || [];
+            const visScenes = rawScenes.filter((s) => isOrderAllowed(effectiveSceneOrder(s, arc), maxOrder));
+            if (rawScenes.length > 0 && visScenes.length === 0) continue;
+            visible.push({ ...arc, scenes: visScenes });
+        }
+        const visScenesCount = visible.reduce((acc, a) => acc + (a.scenes || []).length, 0);
+        const visChars = visible.reduce(
+            (acc, a) => acc + (a.scenes || []).reduce((sAcc, s) => sAcc + (Number(s.chars) || 0), 0),
+            0
+        );
+        return {
+            corpus_id: corpusId,
+            corpus_name: corpusConfig.name,
+            version: indexData.version || 2,
+            source: indexData.source || '',
+            built_at: indexData.built_at || '',
+            max_order: maxOrder,
+            stats:
+                maxOrder !== null
+                    ? {
+                          arcs: visible.length,
+                          scenes: visScenesCount,
+                          total_chars: visChars,
+                          max_order: stats.max_order,
+                          llm_scenes: stats.llm_scenes,
+                          llm_arcs: stats.llm_arcs,
+                      }
+                    : stats,
+            categories,
+            series: seriesList,
+            series_summaries: seriesSummaries,
+            tone_tags: toneTags,
+            arcs: visible,
+            aliases: corpusConfig.aliases || [],
+            corpus: {
+                id: corpusId,
+                name: corpusConfig.name,
+                description: corpusConfig.description,
+                spoiler_gate: corpusConfig.spoiler_gate,
+                ui: corpusConfig.ui,
+            },
+        };
+    }
+
+    function getSceneText(nodeId, { maxOrder: rawMaxOrder } = {}) {
+        const id = String(nodeId || '').trim();
+        const item = textsData[id];
+        if (!item) return null;
+        const sm = sceneMetaMap.get(id) || {};
+        const arc = arcMap.get(item.arc_id) || {};
+        const scOrder = sm.effective_order ?? null;
+        const maxOrder = resolveMaxOrder(rawMaxOrder);
+        if (!isOrderAllowed(scOrder, maxOrder)) {
+            return { blocked: true, order: scOrder, max_order: maxOrder };
+        }
+        const clean = stripMarkup(item.text);
+        return {
+            node_id: id,
+            arc_id: item.arc_id,
+            arc_title: item.arc_title || arc.title || '',
+            series: sm.arc_series || arc.series || '',
+            category: sm.arc_category || arc.category || '',
+            group: item.group,
+            group_title: item.group_title || sm.group_title || '',
+            title: sm.title || item.group_title || '',
+            order: scOrder,
+            tone_tags: sm.effective_tones || [],
+            summary: sm.summary || '',
+            chars: clean.length,
+            characters: sm.arc_characters || arc.characters || [],
+            text: clean,
+        };
+    }
 
     function grepScenes(rawQuery, opts = {}) {
         const limit = Math.min(Math.max(Number(opts.limit) || 20, 1), 60);
@@ -880,13 +1026,20 @@ export function createBrowserTreeAgent(pack) {
         if (payload.onDemand) userParts.push(`【显式检索】\n${payload.onDemand}`);
         if (payload.query) userParts.push(`【当前输入】\n${payload.query}`);
 
+        const userPromptText = userParts.join('\n\n');
         const messages = [
             { role: 'system', content: sysPrompt },
-            { role: 'user', content: userParts.join('\n\n') },
+            { role: 'user', content: userPromptText },
         ];
 
         const readScenesMap = new Map();
         const trace = [];
+        const steps = [];
+        const listedArcsSet = new Set();
+        const expandedArcsSet = new Set();
+        const readNodesSet = new Set();
+        let promptTokens = 0;
+        let completionTokens = 0;
 
         const execTool = (fnName, args) => {
             if (fnName === 'list_series') {
@@ -894,7 +1047,11 @@ export function createBrowserTreeAgent(pack) {
                 const rows = seriesList
                     .filter((s) => !kw || s.series.toLowerCase().includes(kw) || String(seriesSummaries[s.series] || '').toLowerCase().includes(kw))
                     .map((s) => `[${s.series}] ${s.arcs}卷 ${s.scenes}幕 (${formatCharCount(s.total_chars)})${seriesSummaries[s.series] ? ' | ' + seriesSummaries[s.series] : ''}`);
-                return rows.join('\n') || '无匹配分部';
+                return {
+                    text: rows.join('\n') || '无匹配分部',
+                    summary: `列出 ${rows.length} 个分部`,
+                    meta: {},
+                };
             }
             if (fnName === 'list_story_arcs') {
                 const ser = String(args?.series || '').toLowerCase();
@@ -911,24 +1068,43 @@ export function createBrowserTreeAgent(pack) {
                     if (kwTerms.length && !kwTerms.some((t) => hay.includes(t))) return false;
                     return true;
                 });
-                return matched
-                    .slice(0, 60)
-                    .map(({ arc, scenes }) => `- [${arc.arc_id}] (${arc.series || arc.category}${arc.order != null ? '·序' + arc.order : ''}) 《${arc.title}》 (${scenes.length}幕): ${arc.description || ''}`)
-                    .join('\n') || '无匹配篇章';
+                const shown = matched.slice(0, 60);
+                const arcIds = shown.map((x) => x.arc.arc_id);
+                arcIds.forEach((id) => listedArcsSet.add(id));
+                return {
+                    text:
+                        shown
+                            .map(({ arc, scenes }) => `- [${arc.arc_id}] (${arc.series || arc.category}${arc.order != null ? '·序' + arc.order : ''}) 《${arc.title}》 (${scenes.length}幕): ${arc.description || ''}`)
+                            .join('\n') || '无匹配篇章',
+                    summary: `匹配 ${matched.length} 卷篇章`,
+                    meta: { arc_ids: arcIds },
+                };
             }
             if (fnName === 'get_arc_scenes') {
                 const ids = (Array.isArray(args?.arc_ids) ? args.arc_ids : []).map(String).slice(0, 5);
-                return ids
+                const hitArcs = [];
+                const hitNodes = [];
+                const text = ids
                     .map((aid) => {
                         const found = visibleArcs.find((x) => x.arc.arc_id === aid);
                         if (!found) return `[${aid}] 未找到`;
+                        hitArcs.push(aid);
+                        expandedArcsSet.add(aid);
+                        for (const s of found.scenes) hitNodes.push(s.node_id);
                         return `[${aid}] 《${found.arc.title}》:\n` + found.scenes.map((s) => `  * [${s.node_id}] 《${s.title}》(${s.chars}字): ${s.summary}`).join('\n');
                     })
                     .join('\n\n');
+                return {
+                    text,
+                    summary: `展开 ${hitArcs.length} 卷共 ${hitNodes.length} 幕`,
+                    meta: { arc_ids: hitArcs, node_ids: hitNodes },
+                };
             }
             if (fnName === 'read_scene') {
                 const ids = (Array.isArray(args?.scene_node_ids) ? args.scene_node_ids : []).map(String).slice(0, 10);
                 const out = [];
+                const nodeIds = [];
+                const arcIds = [];
                 for (const sid of ids) {
                     const sm = sceneMetaMap.get(sid);
                     const raw = textsData[sid];
@@ -945,19 +1121,33 @@ export function createBrowserTreeAgent(pack) {
                         text: cleanText,
                     };
                     readScenesMap.set(sid, rec);
+                    readNodesSet.add(sid);
+                    nodeIds.push(sid);
+                    if (sm.arc_id && !arcIds.includes(sm.arc_id)) arcIds.push(sm.arc_id);
                     out.push(rec);
                 }
-                return JSON.stringify(out);
+                return {
+                    text: JSON.stringify(out),
+                    summary: `精读 ${out.length} 幕原文`,
+                    meta: { arc_ids: arcIds, node_ids: nodeIds },
+                };
             }
             if (fnName === 'grep_scenes') {
                 const res = grepScenes(args?.query || '', { limit: 20, maxOrder, category: args?.category, tone: args?.tone });
-                if (!res.hits.length) return `[全文扫描 ${res.took_ms}ms] 零命中`;
-                return (
-                    `[全文扫描 ${res.took_ms}ms | 命中 ${res.total} 幕]\n` +
-                    res.hits.map((h) => `- [${h.node_id}|${h.arc_id}] ${h.arc_title} · ${h.title}${h.cameo ? '[客串]' : ''} (${h.match_count}处): ${h.snippet}`).join('\n')
-                );
+                const nodeIds = res.hits.map((h) => h.node_id);
+                const arcIds = [...new Set(res.hits.map((h) => h.arc_id))];
+                arcIds.forEach((id) => listedArcsSet.add(id));
+                const text = !res.hits.length
+                    ? `[全文扫描 ${res.took_ms}ms] 零命中`
+                    : `[全文扫描 ${res.took_ms}ms | 命中 ${res.total} 幕]\n` +
+                      res.hits.map((h) => `- [${h.node_id}|${h.arc_id}] ${h.arc_title} · ${h.title}${h.cameo ? '[客串]' : ''} (${h.match_count}处): ${h.snippet}`).join('\n');
+                return {
+                    text,
+                    summary: `Grep "${args?.query || ''}" -> ${res.total} 幕 (${res.took_ms}ms)`,
+                    meta: { arc_ids: arcIds, node_ids: nodeIds },
+                };
             }
-            return '[]';
+            return { text: '[]', summary: '无输出', meta: {} };
         };
 
         let rawAnswer = '';
@@ -974,15 +1164,30 @@ export function createBrowserTreeAgent(pack) {
                 maxTokens: apiCfg.maxTokens,
             });
             const reqMs = Date.now() - tReq;
+            if (resp?.usage) {
+                promptTokens += Number(resp.usage.prompt_tokens) || 0;
+                completionTokens += Number(resp.usage.completion_tokens) || 0;
+            }
             const msg = resp?.choices?.[0]?.message;
             if (!msg) throw new Error('模型返回为空');
+            const reasoning = String(msg.reasoning_content || msg.reasoning || '').trim();
             messages.push(msg);
             const tcs = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
             if (!tcs.length) {
                 rawAnswer = msg.content || '';
+                steps.push({
+                    turn,
+                    kind: 'final',
+                    llm_ms: reqMs,
+                    tool_ms: 0,
+                    reasoning,
+                    calls: [],
+                });
                 break;
             }
+            const tTool = Date.now();
             const callLogs = [];
+            const stepCalls = [];
             for (const tc of tcs) {
                 const fnName = tc?.function?.name || '';
                 let fArgs = {};
@@ -990,14 +1195,41 @@ export function createBrowserTreeAgent(pack) {
                     fArgs = JSON.parse(tc?.function?.arguments || '{}');
                 } catch (_) {}
                 callLogs.push(`${fnName}(${JSON.stringify(fArgs)})`);
-                const toolRes = execTool(fnName, fArgs);
-                messages.push({ role: 'tool', tool_call_id: tc.id, content: toolRes });
+                const toolOut = execTool(fnName, fArgs);
+                messages.push({ role: 'tool', tool_call_id: tc.id, content: toolOut.text });
+                stepCalls.push({
+                    name: fnName,
+                    args: fArgs,
+                    summary: toolOut.summary,
+                    result_chars: toolOut.text.length,
+                    result_preview: toolOut.text.slice(0, 1200),
+                    meta: toolOut.meta || {},
+                });
             }
+            const toolMs = Date.now() - tTool;
+            steps.push({
+                turn,
+                kind: 'tools',
+                llm_ms: reqMs,
+                tool_ms: toolMs,
+                reasoning,
+                calls: stepCalls,
+            });
             trace.push(`T${turn}(${reqMs}ms): ${callLogs.join(' ; ')}`);
         }
 
         const parsed = extractJsonObject(rawAnswer);
         const took_ms = Date.now() - t0;
+        const baseTraversal = {
+            listed_arcs: [...listedArcsSet],
+            expanded_arcs: [...expandedArcsSet],
+            read_scenes: [...readNodesSet],
+            selected_nodes: [],
+        };
+        const basePrompts = {
+            system: sysPrompt,
+            user: userPromptText,
+        };
         if (parsed?.skip === true) {
             return {
                 ok: true,
@@ -1009,6 +1241,11 @@ export function createBrowserTreeAgent(pack) {
                 took_ms,
                 turns: finalTurn,
                 trace,
+                steps,
+                traversal: baseTraversal,
+                prompts: basePrompts,
+                raw_answer: rawAnswer,
+                usage: { prompt: promptTokens, completion: completionTokens },
                 guide: '',
                 scenes: [],
                 outlines: [],
@@ -1028,6 +1265,7 @@ export function createBrowserTreeAgent(pack) {
                 finalScenes.push(sc);
             }
         }
+        baseTraversal.selected_nodes = finalScenes.map((s) => s.node_id);
 
         const guide = (parsed && typeof parsed.guide === 'string' ? parsed.guide : rawAnswer).trim();
         return {
@@ -1040,6 +1278,11 @@ export function createBrowserTreeAgent(pack) {
             took_ms,
             turns: finalTurn,
             trace,
+            steps,
+            traversal: baseTraversal,
+            prompts: basePrompts,
+            raw_answer: rawAnswer,
+            usage: { prompt: promptTokens, completion: completionTokens },
             timeline_note: parsed?.timeline_note || '',
             guide,
             scenes: finalScenes,
@@ -1052,6 +1295,11 @@ export function createBrowserTreeAgent(pack) {
         name: corpusConfig.name,
         config: corpusConfig,
         stats,
+        categories,
+        seriesList,
+        toneTags,
+        getTreeIndex,
+        getSceneText,
         grepScenes,
         search,
     };

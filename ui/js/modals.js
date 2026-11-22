@@ -9,6 +9,7 @@ import {
   upgradeCorpus,
   fetchJob,
   fetchCorpora,
+  exportCorpusLorepack,
 } from './api.js';
 
 let activeModalPoll = null;
@@ -319,13 +320,16 @@ export async function openCorpusModal() {
         </div>
       </div>
       <div class="modal-foot">
-        <a href="/corpora/${encodeURIComponent(c.id)}/export" download="${esc(c.id)}.lorepack.json" class="btn-sm" style="margin-right:auto;text-decoration:none;color:var(--ink-soft);border:1px solid var(--rule-strong);padding:5px 9px;border-radius:var(--radius);" title="导出为单个 .lorepack.json 文件，可直接导入 TauriTavern / 手机内置免服务端引擎">导出 .lorepack.json</a>
+        <button id="ccExportPackBtn" type="button" class="btn-sm" style="margin-right:auto;" title="导出为单个 .lorepack.json 文件，可直接导入 TauriTavern / 手机内置免服务端引擎">导出 .lorepack.json</button>
         <button data-close-modal>取消</button>
         <button id="ccSaveBtn" class="btn-seal">保存并热重载语料</button>
       </div>
     `;
 
     $('#modalDialog').querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', closeModal));
+    $('#ccExportPackBtn')?.addEventListener('click', () => {
+      exportCorpusLorepack(c.id).catch((e) => showToast('导出失败: ' + e.message, 'err'));
+    });
     $('#modalDialog')
       .querySelectorAll('[data-ctab]')
       .forEach((tab) => {

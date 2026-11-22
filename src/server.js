@@ -455,7 +455,12 @@ const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url, 'http://localhost');
   const pathname = parsedUrl.pathname;
 
-  if (req.method === 'GET' && (pathname === '/' || pathname === '/ui' || pathname === '/ui/')) {
+  if (req.method === 'GET' && (pathname === '/ui' || pathname === '/ui/')) {
+    res.writeHead(302, { Location: '/' + parsedUrl.search });
+    return res.end();
+  }
+
+  if (req.method === 'GET' && pathname === '/') {
     try {
       const html = fs.readFileSync(UI_FILE, 'utf8');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -465,10 +470,11 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (req.method === 'GET' && pathname.startsWith('/ui/')) {
+  if (req.method === 'GET' && (pathname.startsWith('/ui/') || pathname === '/styles.css' || pathname.startsWith('/js/'))) {
+    const rawRel = pathname.startsWith('/ui/') ? pathname.slice('/ui/'.length) : pathname.slice(1);
     let rel = '';
     try {
-      rel = decodeURIComponent(pathname.slice('/ui/'.length));
+      rel = decodeURIComponent(rawRel);
     } catch (_) {
       return send({ error: 'invalid path encoding' }, 400);
     }

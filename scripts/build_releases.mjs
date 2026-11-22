@@ -84,10 +84,14 @@ function main() {
   fs.rmSync(STAGE_ROOT, { recursive: true, force: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
-  // 1. Build demo-chronicles.lorepack.json
+  // 1. Build demo-chronicles.lorepack.json & sync embedded ui/ into extension/st-tree-lore/ui/
   const lorepackPath = path.join(OUT_DIR, 'demo-chronicles.lorepack.json');
   buildDemoLorepack(lorepackPath);
-  console.log(`[1/4] Built ${path.relative(ROOT, lorepackPath)}`);
+  const extUiDir = path.join(ROOT, 'extension', 'st-tree-lore', 'ui');
+  fs.rmSync(extUiDir, { recursive: true, force: true });
+  copyRecursive(path.join(ROOT, 'ui'), extUiDir);
+  fs.copyFileSync(lorepackPath, path.join(extUiDir, 'demo-chronicles.lorepack.json'));
+  console.log(`[1/4] Built ${path.relative(ROOT, lorepackPath)} & synced extension/st-tree-lore/ui/`);
 
   // 2. Build SillyTavern & TauriTavern pure-frontend extension zip
   const stStage = path.join(STAGE_ROOT, 'st-extension');
