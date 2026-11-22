@@ -1221,6 +1221,7 @@ ${corpusConfig.world_premise || ''}
 【检索策略】
 - 第一轮可并发调用 list_series / list_story_arcs 与 grep_scenes（支持利用人物旧代号/化名组合搜索）。
 - 调用 read_scene 时尽量一次批量传入多个候选 scene_node_ids（最多 10 个纯编号，如 ["0080","0601"]）。
+- 【小队/组织与长跨度经历全覆盖原则】当问题涉及某角色与某个小队/组织（如 404 小队、AR 小队等）的过往经历或回忆时，请对照上方【核心世界观与设定术语】及目录中的出场人物表，全面覆盖该小队的各个阶段与全编制分支（例如：初代老成员/离队前辈、一队新入队成员、以及二队/分队成员与代表事件），并在 guide 中明确列出各分支成员姓名与对应事件，严禁只写一队而漏掉二队或新成员。
 - 若无需检索或属未收录原创角色，直接输出 {"skip":true,"reason":"..."}。
 - 核实完毕后停止调工具，仅输出严格 JSON：
 {"skip":false,"selected_nodes":["经read_scene核实的node_id"],"selected_arcs":["可选宏观arc_id"],"timeline_note":"时间线阶段","guide":"结构化记忆导读并标注[node_id]"}`;
@@ -1282,7 +1283,10 @@ ${corpusConfig.world_premise || ''}
                 return {
                     text:
                         shown
-                            .map(({ arc, scenes }) => `- [${arc.arc_id}] (${arc.series || arc.category}${arc.order != null ? '·序' + arc.order : ''}) 《${arc.title}》 (${scenes.length}幕): ${arc.description || ''}`)
+                            .map(({ arc, scenes }) => {
+                                const castStr = (arc.characters || []).length ? ` | 人物:${arc.characters.slice(0, 8).join('、')}` : '';
+                                return `- [${arc.arc_id}] (${arc.series || arc.category}${arc.order != null ? '·序' + arc.order : ''}) 《${arc.title}》 (${scenes.length}幕${castStr}): ${arc.description || ''}`;
+                            })
                             .join('\n') || '无匹配篇章',
                     summary: `匹配 ${matched.length} 卷篇章`,
                     meta: { arc_ids: arcIds },
@@ -1299,7 +1303,9 @@ ${corpusConfig.world_premise || ''}
                         hitArcs.push(aid);
                         expandedArcsSet.add(aid);
                         for (const s of found.scenes) hitNodes.push(s.node_id);
-                        return `[${aid}] 《${found.arc.title}》:\n` + found.scenes.map((s) => `  * [${s.node_id}] 《${s.title}》(${s.chars}字): ${s.summary}`).join('\n');
+                        const castStr = (found.arc.characters || []).length ? ` | 人物: ${found.arc.characters.join('、')}` : '';
+                        const descStr = found.arc.description ? `\n  简介: ${found.arc.description}` : '';
+                        return `[${aid}] 《${found.arc.title}》(${found.scenes.length}幕${castStr}):${descStr}\n` + found.scenes.map((s) => `  * [${s.node_id}] 《${s.title}》(${s.chars}字): ${s.summary}`).join('\n');
                     })
                     .join('\n\n');
                 return {
