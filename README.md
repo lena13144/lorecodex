@@ -1,5 +1,6 @@
 # LoreCodex (`st-tree-lore`)
 
+[![CI](https://github.com/lena13144/lorecodex/actions/workflows/ci.yml/badge.svg)](https://github.com/lena13144/lorecodex/actions/workflows/ci.yml)
 ![Node.js >= 18](https://img.shields.io/badge/Node.js-%3E%3D%2018-339933?style=flat-square&logo=node.js&logoColor=white)
 ![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-0ea5e9?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b?style=flat-square)
@@ -207,6 +208,13 @@ npm test
 ```bash
 npm run verify
 ```
+
+---
+
+## Inspiration & Acknowledgements
+
+- **[PageIndex by VectifyAI](https://github.com/VectifyAI/PageIndex)**: LoreCodex's core vectorless, tree-reasoning retrieval paradigm—letting an LLM navigate a hierarchical Table of Contents instead of relying on lossy vector chunks—was inspired by PageIndex. Building upon that insight from scratch, LoreCodex introduces a zero-dependency runtime tailored for long-form fiction, game lore, and roleplay (3-tier narrative spines, millisecond alias/cameo-aware in-RAM grep, hardware-level `maxOrder` spoiler gates, 4 narrative query topologies, and an interactive trace workbench).
+- **[SillyTavern](https://github.com/SillyTavern/SillyTavern)**: Thanks to the SillyTavern community for its extensible roleplay frontend and plugin architecture.
 
 ---
 

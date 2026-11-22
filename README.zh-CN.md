@@ -1,5 +1,6 @@
 # LoreCodex (`st-tree-lore`)
 
+[![CI](https://github.com/lena13144/lorecodex/actions/workflows/ci.yml/badge.svg)](https://github.com/lena13144/lorecodex/actions/workflows/ci.yml)
 ![Node.js >= 18](https://img.shields.io/badge/Node.js-%3E%3D%2018-339933?style=flat-square&logo=node.js&logoColor=white)
 ![零第三方依赖](https://img.shields.io/badge/Dependencies-Zero-0ea5e9?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b?style=flat-square)
@@ -199,6 +200,13 @@ npm test
 ```bash
 npm run verify
 ```
+
+---
+
+## 灵感来源与致谢
+
+- **[PageIndex (VectifyAI)](https://github.com/VectifyAI/PageIndex)**：LoreCodex 的核心无向量树形渐进检索范式（让推理模型翻阅层级目录树而非依赖向量分块检索）深受 PageIndex 理念启发。在此基础上，本项目从零独立实现并面向长篇小说、游戏世界观与角色扮演场景进行了深度扩展（三级叙事书脊、毫秒级内存别名/客串 Grep、硬件级 `maxOrder` 防剧透门控、4 种叙事查询拓扑及可视化追踪工作台）。
+- **[SillyTavern](https://github.com/SillyTavern/SillyTavern)**：感谢优秀的开源角色扮演前端生态与扩展接口设计。
 
 ---
 
