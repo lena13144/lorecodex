@@ -629,16 +629,26 @@ def heuristic_scene_meta(arc_title, scene_idx, total_in_arc, text, alias_pool=No
     }
 
 
-def llm_json(cfg, prompt, max_tokens=280, retries=4):
+def llm_json(cfg, prompt, retries=4):
     url = cfg["chatBase"].rstrip("/") + "/chat/completions"
+    raw_mt = cfg.get("maxTokens") if cfg.get("maxTokens") is not None else cfg.get("max_tokens")
+    max_tokens_val = None
+    if raw_mt not in (None, ""):
+        try:
+            mt_int = int(raw_mt)
+            if mt_int > 0:
+                max_tokens_val = mt_int
+        except (TypeError, ValueError):
+            pass
     last_err = None
     for attempt in range(retries):
         payload = {
             "model": cfg["chatModel"],
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
-            "max_tokens": max(max_tokens + 2000, 2400),
         }
+        if max_tokens_val is not None:
+            payload["max_tokens"] = max_tokens_val
         try:
             req = urllib.request.Request(
                 url,
@@ -839,6 +849,7 @@ def main():
     parser.add_argument("--limit-arcs", type=int, default=0, help="Max arcs to LLM-summarize (0 = all)")
     parser.add_argument("--skip-meta", action="store_true", help="Skip post-summarization series summary/aliases/glossary synthesis")
     parser.add_argument("--force", action="store_true", help="Ignore cached LLM checkpoints for targeted arcs")
+    parser.add_argument("--max-tokens", type=int, default=0, help="Optional max_tokens for LLM requests (0 = omit, use model default)")
     args = parser.parse_args()
 
     out_corpus_dir = os.path.join(args.out_dir, args.corpus_id)
@@ -956,6 +967,8 @@ def main():
             raise RuntimeError(f"Config file not found: {args.config} (pass --no-llm for offline heuristic build)")
         with open(args.config, "r", encoding="utf-8") as f:
             cfg = json.load(f)
+        if args.max_tokens and args.max_tokens > 0:
+            cfg["maxTokens"] = args.max_tokens
         if not cfg.get("chatBase") or not cfg.get("chatKey"):
             raise RuntimeError("chatBase/chatKey missing in config.json (pass --no-llm for offline build)")
 
@@ -1035,7 +1048,7 @@ def main():
                 "只输出严格 JSON：{\"title\":\"...\",\"summary\":\"...\",\"characters\":[],\"tone_tags\":[]}\n\n"
                 f"所属篇章：{a.get('series', '')} / {a['title']}\n正文：\n{txt}"
             )
-            parsed, usage = llm_json(cfg, prompt, max_tokens=300)
+            parsed, usage = llm_json(cfg, prompt)
             record_usage(usage)
             rec = {
                 "key": key,
@@ -1115,7 +1128,7 @@ def main():
                 "只输出 JSON：{\"description\":\"...\",\"characters\":[],\"tone_tags\":[]}\n\n"
                 f"篇章：{a.get('series', '')} / {a['title']}\n子场景：\n{sc_lines}"
             )
-            parsed, usage = llm_json(cfg, prompt, max_tokens=280)
+            parsed, usage = llm_json(cfg, prompt)
             record_usage(usage)
             rec = {
                 "key": key,
@@ -1182,7 +1195,7 @@ def main():
                         f"章节脉络（共 {len(ser_arcs)} 章）：\n{digest_text}"
                     )
                     try:
-                        parsed, usage = llm_json(cfg, meta_prompt, max_tokens=900)
+                        parsed, usage = llm_json(cfg, meta_prompt)
                         record_usage(usage)
                         rec = {
                             "key": meta_key,

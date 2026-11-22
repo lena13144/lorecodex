@@ -267,14 +267,17 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     return grepEngine.grepScenes(rawQuery, normalizedOpts);
   }
 
-  async function callChat({ base, key, model, messages, tools }) {
+  async function callChat({ base, key, model, messages, tools, maxTokens = null }) {
     const url = String(base || '').replace(/\/+$/, '') + '/chat/completions';
     const body = {
       model,
       messages,
       temperature: 0.1,
-      max_tokens: 4096,
     };
+    const parsedMaxTokens = Number(maxTokens);
+    if (Number.isFinite(parsedMaxTokens) && parsedMaxTokens > 0) {
+      body.max_tokens = Math.floor(parsedMaxTokens);
+    }
     if (tools && tools.length) {
       body.tools = tools;
       body.tool_choice = 'auto';
@@ -985,6 +988,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         model: effectiveCfg.chatModel,
         messages,
         tools: turn < maxTurns ? tools : undefined,
+        maxTokens: effectiveCfg.maxTokens,
       });
       const reqMs = Date.now() - tReq;
       const u = resp.usage || {};
@@ -1076,6 +1080,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       model: effectiveCfg.chatModel,
       messages,
       tools: undefined,
+      maxTokens: effectiveCfg.maxTokens,
     });
     const finalMs = Date.now() - tFinal;
     const fu = finalResp.usage || {};

@@ -25,6 +25,7 @@ const defaultSettings = {
     chatBase: '',
     chatKey: '',
     chatModel: '',
+    maxTokens: '',
     customXmlTag: '',
     customHeader: '',
     customPriorityRule: '',
@@ -120,6 +121,8 @@ function buildApiConfig(cfg) {
     if (cfg.chatBase) out.chatBase = cfg.chatBase.trim();
     if (cfg.chatKey) out.chatKey = cfg.chatKey.trim();
     if (cfg.chatModel) out.chatModel = cfg.chatModel.trim();
+    const mt = Number(cfg.maxTokens);
+    if (Number.isFinite(mt) && mt > 0) out.maxTokens = Math.floor(mt);
     return out;
 }
 
@@ -524,6 +527,7 @@ jQuery(async () => {
         $('#lorecodex_chat_base').val(cfg.chatBase || '');
         $('#lorecodex_chat_key').val(cfg.chatKey || '');
         $('#lorecodex_chat_model').val(cfg.chatModel || '');
+        $('#lorecodex_max_tokens').val(Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : '');
         $('#lorecodex_xml_tag').val(cfg.customXmlTag || '');
         $('#lorecodex_header').val(cfg.customHeader || '');
         $('#lorecodex_priority_rule').val(cfg.customPriorityRule || '');
@@ -661,6 +665,9 @@ jQuery(async () => {
             if (!cfg.chatKey && srvCfg.chatKey && !/^\*+$/.test(srvCfg.chatKey)) cfg.chatKey = srvCfg.chatKey;
             if (!cfg.chatBase && srvCfg.chatBase) cfg.chatBase = srvCfg.chatBase;
             if (!cfg.chatModel && srvCfg.chatModel) cfg.chatModel = srvCfg.chatModel;
+            if ((cfg.maxTokens === '' || cfg.maxTokens === undefined || cfg.maxTokens === null) && Number(srvCfg.maxTokens) > 0) {
+                cfg.maxTokens = Number(srvCfg.maxTokens);
+            }
         }
     } catch (_) {}
 
@@ -762,6 +769,10 @@ jQuery(async () => {
                         </div>
                         <button id="lorecodex_fetch_models" class="menu_button" style="width:auto;margin-top:16px;padding:4px 8px;">拉取模型</button>
                     </div>
+                    <div>
+                        <small>单次输出 Max Tokens（留空 = 不限制，沿用模型默认）：</small>
+                        <input id="lorecodex_max_tokens" class="text_pole" type="number" min="0" step="256" value="${Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : ''}" placeholder="沿用模型默认" />
+                    </div>
                     <button id="lorecodex_save_srv" class="menu_button" style="width:100%;">保存当前模型与默认书库到服务端</button>
                 </div>
             </details>
@@ -823,6 +834,10 @@ jQuery(async () => {
     bind('#lorecodex_chat_base', 'chatBase');
     bind('#lorecodex_chat_key', 'chatKey');
     bind('#lorecodex_chat_model', 'chatModel');
+    bind('#lorecodex_max_tokens', 'maxTokens', el => {
+        const n = Number(el.val());
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : '';
+    });
     bind('#lorecodex_xml_tag', 'customXmlTag');
     bind('#lorecodex_header', 'customHeader');
     bind('#lorecodex_priority_rule', 'customPriorityRule');
@@ -903,6 +918,7 @@ jQuery(async () => {
         const st = $('#lorecodex_status');
         try {
             const body = buildApiConfig(cfg);
+            body.maxTokens = Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null;
             if (cfg.corpus) body.defaultCorpus = cfg.corpus;
             const r = await fetch(`${getServerBase(cfg)}/config`, {
                 method: 'POST',

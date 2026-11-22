@@ -119,7 +119,8 @@ Copy `config.example.json` to `config.json` and fill in your OpenAI-compatible s
   "defaultCorpus": "demo-chronicles",
   "chatBase": "https://api.openai.com/v1",
   "chatKey": "your-api-key",
-  "chatModel": "deepseek-chat"
+  "chatModel": "deepseek-chat",
+  "maxTokens": null
 }
 ```
 

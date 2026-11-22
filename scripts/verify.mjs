@@ -218,6 +218,7 @@ with zipfile.ZipFile(epub_path, "w") as zf:
 
     // Mock OpenAI endpoint to verify in-place --upgrade, single-scene skip, ckpt caching, and series_meta extraction
     const mockCounts = { leaf: 0, arc: 0, seriesMeta: 0 };
+    let expectedMaxTokens = undefined;
     const mockSrv = http.createServer((req, res) => {
       if (req.method === 'POST' && req.url.endsWith('/chat/completions')) {
         const chunks = [];
@@ -231,7 +232,11 @@ with zipfile.ZipFile(epub_path, "w") as zf:
           } catch (_) {}
 
           assert.strictEqual(body.thinking, undefined, 'Mock LLM requests should keep thinking enabled by default');
-          assert((body.max_tokens || 0) >= 2048, `Expected scaled max_tokens >= 2048 when thinking enabled, got ${body.max_tokens}`);
+          assert.strictEqual(
+            body.max_tokens,
+            expectedMaxTokens,
+            `Expected body.max_tokens=${expectedMaxTokens}, got ${body.max_tokens}`
+          );
 
           let replyObj;
           if (content.includes('series_summary')) {
@@ -364,10 +369,11 @@ with zipfile.ZipFile(epub_path, "w") as zf:
       assert(midCfg.aliases.some((g) => g.includes('白川澄') && g.includes('澄博士')), 'Aliases merged into corpus.json');
       assert(midCfg.glossary.some((g) => g.includes('星环观测站')), 'Glossary merged into corpus.json');
 
-      // Upgrade full book: Vol 1 must hit ckpt (0 duplicate leaf/arc/meta calls); only Vol 2 (1 leaf + 1 seriesMeta) runs
+      // Upgrade full book with explicit --max-tokens: Vol 1 must hit ckpt; only Vol 2 (1 leaf + 1 seriesMeta) runs
       mockCounts.leaf = 0;
       mockCounts.arc = 0;
       mockCounts.seriesMeta = 0;
+      expectedMaxTokens = 8192;
       await execFileAsync(PYTHON_BIN, [
         path.join(ROOT, 'builders', 'build_novel.py'),
         '--upgrade',
@@ -379,6 +385,8 @@ with zipfile.ZipFile(epub_path, "w") as zf:
         mockCfgPath,
         '--workers',
         '2',
+        '--max-tokens',
+        '8192',
       ]);
       assert.deepStrictEqual(mockCounts, { leaf: 1, arc: 0, seriesMeta: 1 }, `Unexpected cached resume LLM counts: ${JSON.stringify(mockCounts)}`);
 

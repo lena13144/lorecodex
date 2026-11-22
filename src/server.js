@@ -40,12 +40,19 @@ function parseArgs(argv) {
 const cli = parseArgs(process.argv);
 const CORPORA_DIR = cli.corporaDir || path.resolve(process.env.CORPORA_DIR || path.join(ROOT_DIR, 'corpora'));
 
+function parseOptionalMaxTokens(val) {
+  if (val === null || val === undefined || val === '') return null;
+  const n = Number(val);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
 const defaultCfg = {
   port: 5240,
   defaultCorpus: 'demo-chronicles',
   chatBase: 'https://api.openai.com/v1',
   chatKey: '',
   chatModel: 'deepseek-chat',
+  maxTokens: null,
 };
 
 let runtimeCfg = { ...defaultCfg };
@@ -56,11 +63,13 @@ if (fs.existsSync(CFG_FILE)) {
     console.warn('[server] failed to parse config.json:', err.message);
   }
 }
+runtimeCfg.maxTokens = parseOptionalMaxTokens(runtimeCfg.maxTokens ?? runtimeCfg.max_tokens);
 
 if (process.env.PORT) runtimeCfg.port = Number(process.env.PORT) || runtimeCfg.port;
 if (process.env.CHAT_BASE) runtimeCfg.chatBase = process.env.CHAT_BASE;
 if (process.env.CHAT_KEY) runtimeCfg.chatKey = process.env.CHAT_KEY;
 if (process.env.CHAT_MODEL) runtimeCfg.chatModel = process.env.CHAT_MODEL;
+if (process.env.CHAT_MAX_TOKENS !== undefined) runtimeCfg.maxTokens = parseOptionalMaxTokens(process.env.CHAT_MAX_TOKENS);
 if (process.env.DEFAULT_CORPUS) runtimeCfg.defaultCorpus = process.env.DEFAULT_CORPUS;
 if (cli.port && Number.isFinite(cli.port)) runtimeCfg.port = cli.port;
 if (cli.defaultCorpus) runtimeCfg.defaultCorpus = cli.defaultCorpus;
@@ -100,7 +109,11 @@ function saveCfg(patch) {
   if (typeof patch.chatBase === 'string' && normalizeBaseUrl(runtimeCfg.chatBase) !== prevBase && !hasNewKey) {
     runtimeCfg.chatKey = '';
   }
+  if ('maxTokens' in patch || 'max_tokens' in patch) {
+    runtimeCfg.maxTokens = parseOptionalMaxTokens(patch.maxTokens ?? patch.max_tokens);
+  }
   delete runtimeCfg.disableThinking;
+  delete runtimeCfg.max_tokens;
   try {
     fs.writeFileSync(CFG_FILE, JSON.stringify(runtimeCfg, null, 2) + '\n', 'utf8');
   } catch (err) {
@@ -122,6 +135,9 @@ function mergeCfg(patch) {
     }
     if (typeof patch.chatBase === 'string' && normalizeBaseUrl(out.chatBase) !== prevBase && !hasNewKey) {
       out.chatKey = '';
+    }
+    if ('maxTokens' in patch || 'max_tokens' in patch) {
+      out.maxTokens = parseOptionalMaxTokens(patch.maxTokens ?? patch.max_tokens);
     }
   }
   return out;
