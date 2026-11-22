@@ -16,7 +16,7 @@ export function renderPresets() {
       const p = presets[Number(b.dataset.pidx)];
       if (!p) return;
       $('#qChar').value = p.charName ?? '';
-      $('#qUser').value = p.userName ?? '指挥官';
+      $('#qUser').value = p.userName ?? '旅人';
       $('#qMaxScenes').value = p.maxScenes ?? 0;
       if (p.maxOrder !== undefined) await actions.setMaxOrder?.(Number(p.maxOrder) || 0, { reloadIndex: true });
       $('#qText').value = p.query ?? '';
@@ -85,6 +85,7 @@ export function renderTrace(out) {
       <div style="color:var(--ink-muted);font-family:var(--mono);font-size:10.5px;margin-top:2px;">
         ${out.took_ms} ms · ${out.turns} 轮 · tokens ${(out.usage?.prompt || 0)}+${(out.usage?.completion || 0)}
       </div>
+      ${!out.skip ? `<button type="button" class="btn-seal btn-sm mobile-only-inline trace-open-dossier" style="margin-top:7px;">查看选段卷宗与导读 →</button>` : ''}
     </div>
   `;
 
@@ -171,6 +172,10 @@ export function renderTrace(out) {
     .join('');
 
   box.innerHTML = summary + waterfallHtml + promptsBlock + turnsHtml;
+  box.querySelector('.trace-open-dossier')?.addEventListener('click', () => {
+    actions.setStageTab?.('dossier');
+    actions.setMobilePane?.('stage');
+  });
   box.querySelectorAll('[data-jump-arc]').forEach((b) => b.addEventListener('click', () => actions.openArc?.(b.dataset.jumpArc)));
   box.querySelectorAll('[data-jump-node]').forEach((b) => b.addEventListener('click', () => actions.openScene?.(b.dataset.jumpNode)));
 }

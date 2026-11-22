@@ -65,9 +65,9 @@ SillyTavern Chat Turn / API Request
    - **Full Character Portrait**: `4–7` scenes sampled across different categories/eras.  
    - **Ensemble / Multi-Voice Recall**: Detaches from recent-turn character lock and routes by `tone_tags`.
 6. **Modular Codex GUI & Web Management Studio (`ui/`)**  
-   4 themes (**Paper `素笺`**, **Lamp `墨灯`**, **Studio Light `净台`**, **Studio Dark `曜夜`**), draggable 3-pane splitters, collapsible `Series → Arc → Scene` tree, Grep match `<mark>` highlighting & jump navigation, waterfall timing timeline, clickable guide node links + exact SillyTavern prompt preview, `Ctrl+K` command palette, online corpus config editor, and drag-and-drop file upload builder.
+   4 themes (**Paper `素笺`**, **Lamp `墨灯`**, **Studio Light `净台`**, **Studio Dark `曜夜`**), draggable 3-pane splitters on desktop and mobile-responsive bottom-tab navigation (`<= 860px`) with embed mode (`?embed=1`), collapsible `Series → Arc → Scene` tree, Grep match `<mark>` highlighting & jump navigation, waterfall timing timeline, clickable guide node links + exact SillyTavern prompt preview, `Ctrl+K` command palette, online corpus config editor, and drag-and-drop file upload builder.
 7. **Universal SillyTavern Extension (`extension/st-tree-lore/`)**  
-   SmartTheme-integrated card layout, live connection status bar, real-time last-injection preview card with deep link (`/#run=...`) to the Workbench trace, inline test query panel, per-character-card auto-binding (`charBindings`), spoiler-gate input, customizable framing/scrubbers, and slash commands (`/lorecodex`, `/lorecorpus`, `/loreorder`, `/lorepov`).
+   SmartTheme-integrated card layout, **in-SillyTavern fullscreen modal Workbench overlay (`?embed=1`)** (no need to leave your chat tab to browse chapters, import books, or inspect traces), live connection status bar, real-time last-injection preview card with trace deep-link (`/#run=...`), inline test query panel, per-character-card auto-binding (`charBindings`), spoiler-gate input, customizable framing/scrubbers, and slash commands (`/lorecodex`, `/lorecorpus`, `/loreorder`, `/lorepov`, `/loreui`).
 
 ---
 
@@ -164,11 +164,13 @@ Then click **刷新 (`Reload`)** in the UI or call `POST /corpora/reload`.
 
 1. Copy `extension/st-tree-lore/` into `<SillyTavern>/public/scripts/extensions/third-party/st-tree-lore/`.
 2. Reload SillyTavern and open the **Extensions** panel (`LoreCodex 树形典籍检索 (st-tree-lore)`).
-3. Slash commands:
+3. Click **「打开书阁」** or **「在酒馆内查看完整轨迹」** (or type `/loreui`) to open the Workbench in a fullscreen in-SillyTavern modal overlay without leaving your chat page.
+4. Slash commands:
    - `/lorecodex [on|off]` — toggle retrieval
    - `/lorecorpus <corpus_id>` — switch active corpus
    - `/loreorder <n|off>` — set spoiler gate chapter limit
    - `/lorepov <name>` — set POV character
+   - `/loreui` — open the embedded Workbench modal overlay inside SillyTavern
 
 ---
 

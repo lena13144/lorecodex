@@ -17,7 +17,7 @@
       <select id="corpusSelect" class="corpus-sel" title="切换语料书库"></select>
       <button id="reloadCorporaBtn" class="btn-sm" title="重新扫描 corpora 目录">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
-        刷新
+        <span class="desktop-only">刷新</span>
       </button>
       <span id="statMeta" class="brand-meta">正在载入书库总目...</span>
     </div>
@@ -25,22 +25,22 @@
     <div class="toolbar">
       <button id="cmdPaletteBtn" class="btn-sm" title="全局快速检索 (Ctrl+K)">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-        跳转 <span class="kbd">Ctrl+K</span>
+        <span class="desktop-only">跳转</span> <span class="kbd desktop-only">Ctrl+K</span>
       </button>
-      <button id="importBtn" class="btn-sm" title="拖拽导入小说或世界书建树">
+      <button id="importBtn" class="btn-sm desktop-only" title="拖拽导入小说或世界书建树">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
         导入建树
       </button>
-      <button id="corpusCfgBtn" class="btn-sm" title="编辑当前书库别名、词汇表与规则">
+      <button id="corpusCfgBtn" class="btn-sm desktop-only" title="编辑当前书库别名、词汇表与规则">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
         语料配置
       </button>
-      <button id="settingsBtn" class="btn-sm" title="模型与服务配置">
+      <button id="settingsBtn" class="btn-sm desktop-only" title="模型与服务配置">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.78 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
         模型
       </button>
 
-      <div class="seg" title="切换风格主题">
+      <div class="seg desktop-only" title="切换风格主题">
         <button data-theme-btn="paper" class="active">素笺</button>
         <button data-theme-btn="lamp">墨灯</button>
         <button data-theme-btn="studio-light">净台</button>
@@ -50,6 +50,15 @@
       <div class="prefs-wrap">
         <button id="prefsToggleBtn" class="btn-sm" title="阅读排版设置">Aa</button>
         <div id="prefsPopover" class="prefs-popover">
+          <div class="pref-row mobile-only-pref">
+            <span>界面主题</span>
+            <div class="seg">
+              <button data-theme-btn="paper" class="active">素笺</button>
+              <button data-theme-btn="lamp">墨灯</button>
+              <button data-theme-btn="studio-light">净台</button>
+              <button data-theme-btn="studio-dark">曜夜</button>
+            </div>
+          </div>
           <div class="pref-row">
             <span>正文字号</span>
             <div class="seg">
@@ -75,8 +84,18 @@
         </div>
       </div>
 
-      <button id="toggleTocBtn" class="active-toggle btn-sm">目录</button>
-      <button id="toggleTraceBtn" class="active-toggle btn-sm">检索台</button>
+      <button id="toggleTocBtn" class="active-toggle btn-sm desktop-only">目录</button>
+      <button id="toggleTraceBtn" class="active-toggle btn-sm desktop-only">检索台</button>
+
+      <div class="mobile-menu-wrap">
+        <button id="mobileMoreBtn" class="btn-sm" title="更多功能与管理">⋯</button>
+        <div id="mobileMenuPopover" class="mobile-menu-popover">
+          <button type="button" data-mobile-action="import">导入建树（上传小说/世界书）</button>
+          <button type="button" data-mobile-action="corpus">编辑当前语料配置</button>
+          <button type="button" data-mobile-action="settings">模型与 API 配置</button>
+          <button type="button" data-mobile-action="reload">重新扫描书库目录</button>
+        </div>
+      </div>
     </div>
   </header>
 
@@ -160,7 +179,7 @@
             </div>
             <div>
               <label class="fld">用户身份</label>
-              <input type="text" id="qUser" value="指挥官" />
+              <input type="text" id="qUser" value="" placeholder="旅人 / User" />
             </div>
             <div>
               <label class="fld" title="0 = Agent 按预算自决（最多10幕）">幕数(0自决)</label>
@@ -208,6 +227,21 @@
       </div>
     </aside>
   </div>
+
+  <nav id="mobileNav" class="mobile-nav" aria-label="移动端视图切换">
+    <button type="button" class="mobile-nav-btn" data-mobile-pane="toc">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/></svg>
+      <span>目录/搜</span>
+    </button>
+    <button type="button" class="mobile-nav-btn active" data-mobile-pane="stage">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>
+      <span>正文/卷宗</span>
+    </button>
+    <button type="button" class="mobile-nav-btn" data-mobile-pane="trace">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      <span>检索/轨迹</span>
+    </button>
+  </nav>
 </div>
 
 <!-- Modal Backdrop -->

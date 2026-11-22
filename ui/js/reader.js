@@ -128,6 +128,7 @@ export function openCover() {
   state.view = { type: 'cover', arcId: null, nodeId: null };
   setStageTab('book');
   actions.renderToc?.();
+  if (window.innerWidth <= 860) actions.setMobilePane?.('stage');
 }
 
 export function openArc(aid) {
@@ -137,6 +138,7 @@ export function openArc(aid) {
   setStageTab('book');
   actions.renderToc?.();
   $('#bookScroll').scrollTop = 0;
+  if (window.innerWidth <= 860) actions.setMobilePane?.('stage');
 }
 
 export async function openScene(nid, aid, opts = {}) {
@@ -148,6 +150,7 @@ export async function openScene(nid, aid, opts = {}) {
   setStageTab('book');
   actions.renderToc?.();
   $('#bookScroll').scrollTop = 0;
+  if (window.innerWidth <= 860) actions.setMobilePane?.('stage');
 }
 
 export async function openArcRead(aid) {
@@ -157,6 +160,7 @@ export async function openArcRead(aid) {
   setStageTab('book');
   actions.renderToc?.();
   $('#bookScroll').scrollTop = 0;
+  if (window.innerWidth <= 860) actions.setMobilePane?.('stage');
 }
 
 export function navigateSceneDelta(delta) {

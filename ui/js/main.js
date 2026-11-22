@@ -93,7 +93,7 @@ async function switchCorpus(cid, { keepRun = false } = {}) {
   $('#tocMaxOrder').value = defOrder;
   $('#qMaxOrder').value = defOrder;
   $('#qChar').value = state.corpusMeta?.ui?.default_char ?? '';
-  $('#qUser').value = state.corpusMeta?.ui?.default_user ?? '指挥官';
+  $('#qUser').value = state.corpusMeta?.ui?.default_user ?? '旅人';
   $('#qMaxScenes').value = 0;
 
   renderCorpusSelect();
@@ -143,11 +143,18 @@ function setupResizer(resizerEl, side) {
   });
 }
 
+function setMobilePane(pane) {
+  const next = pane === 'toc' || pane === 'trace' ? pane : 'stage';
+  document.body.dataset.mobilePane = next;
+  $$('[data-mobile-pane]').forEach((b) => b.classList.toggle('active', b.dataset.mobilePane === next));
+}
+
 // Register cross-module actions
 Object.assign(actions, {
   renderFilters,
   renderToc,
   setStageTab,
+  setMobilePane,
   openCover,
   openArc,
   openScene,
@@ -201,13 +208,38 @@ function wireEvents() {
 
   $('#prefsToggleBtn').addEventListener('click', (e) => {
     e.stopPropagation();
+    $('#mobileMenuPopover')?.classList.remove('open');
     $('#prefsPopover').classList.toggle('open');
+  });
+  $('#mobileMoreBtn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('#prefsPopover')?.classList.remove('open');
+    $('#mobileMenuPopover')?.classList.toggle('open');
   });
   document.addEventListener('click', (e) => {
     const pop = $('#prefsPopover');
     if (pop.classList.contains('open') && !pop.contains(e.target) && e.target !== $('#prefsToggleBtn')) {
       pop.classList.remove('open');
     }
+    const mPop = $('#mobileMenuPopover');
+    if (mPop && mPop.classList.contains('open') && !mPop.contains(e.target) && e.target !== $('#mobileMoreBtn')) {
+      mPop.classList.remove('open');
+    }
+  });
+
+  $$('[data-mobile-pane]').forEach((b) => {
+    b.addEventListener('click', () => setMobilePane(b.dataset.mobilePane));
+  });
+
+  $$('[data-mobile-action]').forEach((b) => {
+    b.addEventListener('click', () => {
+      $('#mobileMenuPopover')?.classList.remove('open');
+      const act = b.dataset.mobileAction;
+      if (act === 'import') openImportModal();
+      else if (act === 'corpus') openCorpusModal();
+      else if (act === 'settings') openSettingsModal();
+      else if (act === 'reload') $('#reloadCorporaBtn')?.click();
+    });
   });
 
   $('#toggleTocBtn').addEventListener('click', () => {
@@ -314,19 +346,29 @@ function wireEvents() {
 }
 
 async function init() {
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.get('embed') === '1') {
+    document.body.classList.add('embed-mode');
+  }
+  setMobilePane('stage');
+
   applyPrefs();
   wireEvents();
 
   const hashRunMatch = String(window.location.hash || '').match(/run=([a-zA-Z0-9_-]+)/);
   const hashRunId = hashRunMatch ? hashRunMatch[1] : '';
+  const reqCorpus = String(urlParams.get('corpus') || '').trim();
 
   try {
     const [h, c] = await Promise.all([fetchHealth(), fetchCorpora()]);
     state.modelName = h.config?.chatModel || '-';
     state.corpora = c.corpora || [];
-    const target = c.defaultCorpus || state.corpora[0]?.id || '';
+    const target =
+      reqCorpus && state.corpora.some((x) => x.id === reqCorpus)
+        ? reqCorpus
+        : c.defaultCorpus || state.corpora[0]?.id || '';
     if (target) await switchCorpus(target);
-    else $('#statMeta').textContent = '未发现语料包，请点击右上角「导入建树」';
+    else $('#statMeta').textContent = '未发现语料包，请点击「导入建树」';
     await pollRuns({ autoSelectNewest: Boolean(hashRunId), preferHashRunId: hashRunId });
   } catch (e) {
     $('#statMeta').textContent = '连接异常：' + e.message;

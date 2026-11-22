@@ -195,6 +195,74 @@ function getServerBase(cfg) {
     return (cfg.ragServer || 'http://127.0.0.1:5240').replace(/\/+$/, '');
 }
 
+let onWorkbenchClosedHook = null;
+
+function buildWorkbenchUrls(cfg, runId = '') {
+    const base = getServerBase(cfg);
+    const cid = String(cfg.corpus || serverDefaultCorpus || '').trim();
+    const qEmbed = new URLSearchParams();
+    qEmbed.set('embed', '1');
+    if (cid) qEmbed.set('corpus', cid);
+    const qStandalone = new URLSearchParams();
+    if (cid) qStandalone.set('corpus', cid);
+    const hash = runId ? `#run=${encodeURIComponent(runId)}` : '';
+    const qsStandalone = qStandalone.toString();
+    return {
+        embedUrl: `${base}/?${qEmbed.toString()}${hash}`,
+        standaloneUrl: `${base}/${qsStandalone ? '?' + qsStandalone : ''}${hash}`,
+    };
+}
+
+function openWorkbenchModal(cfg, { runId = '' } = {}) {
+    const { embedUrl, standaloneUrl } = buildWorkbenchUrls(cfg, runId);
+    const cid = String(cfg.corpus || serverDefaultCorpus || '').trim();
+    const cName = corporaMap.get(cid)?.name || cid || 'LoreCodex';
+
+    let backdrop = $('#lorecodex_wb_modal');
+    if (!backdrop.length) {
+        const modalHtml = `
+        <div id="lorecodex_wb_modal" class="lorecodex-wb-backdrop" role="dialog" aria-modal="true" aria-label="LoreCodex 工作台">
+            <div class="lorecodex-wb-modal">
+                <div class="lorecodex-wb-head">
+                    <div class="lorecodex-wb-title">
+                        <span>LoreCodex 典籍与追踪工作台</span>
+                        <span id="lorecodex_wb_corpus_pill" class="lorecodex-pill accent"></span>
+                    </div>
+                    <div class="lorecodex-wb-actions">
+                        <a id="lorecodex_wb_extlink" class="menu_button" target="_blank" rel="noopener" style="text-decoration:none;width:auto;padding:4px 10px;">新窗口打开</a>
+                        <button type="button" id="lorecodex_wb_close" class="menu_button" style="width:auto;padding:4px 10px;">关闭</button>
+                    </div>
+                </div>
+                <iframe id="lorecodex_wb_iframe" class="lorecodex-wb-frame" src="about:blank"></iframe>
+            </div>
+        </div>`;
+        $('body').append(modalHtml);
+        backdrop = $('#lorecodex_wb_modal');
+
+        const closeModal = () => {
+            if (!backdrop.hasClass('open')) return;
+            backdrop.removeClass('open');
+            $('#lorecodex_wb_iframe').attr('src', 'about:blank');
+            if (typeof onWorkbenchClosedHook === 'function') {
+                Promise.resolve(onWorkbenchClosedHook()).catch(() => {});
+            }
+        };
+
+        $('#lorecodex_wb_close').on('click', closeModal);
+        backdrop.on('click', (e) => {
+            if (e.target === backdrop[0]) closeModal();
+        });
+        $(document).on('keydown.lorecodexWb', (e) => {
+            if (e.key === 'Escape' && backdrop.hasClass('open')) closeModal();
+        });
+    }
+
+    $('#lorecodex_wb_corpus_pill').text(cName);
+    $('#lorecodex_wb_extlink').attr('href', standaloneUrl);
+    $('#lorecodex_wb_iframe').attr('src', embedUrl);
+    backdrop.addClass('open');
+}
+
 async function fetchCorporaAndHealth(cfg) {
     const srv = getServerBase(cfg);
     try {
@@ -248,9 +316,7 @@ function renderLastPreview(cfg) {
             <span class="lorecodex-muted">${s.chars}字</span>
         </div>
     `).join('');
-    const wbUrl = snap.run_id
-        ? `${getServerBase(cfg)}/#run=${encodeURIComponent(snap.run_id)}`
-        : getServerBase(cfg);
+    const { standaloneUrl } = buildWorkbenchUrls(cfg, snap.run_id || '');
 
     box.html(`
         <div class="lorecodex-row" style="justify-content:space-between;">
@@ -266,9 +332,11 @@ function renderLastPreview(cfg) {
             ${scenesHtml ? `<div class="lorecodex-preview-scenes">${scenesHtml}</div>` : ''}
         `}
         <div class="lorecodex-row">
-            <a href="${escHtml(wbUrl)}" target="_blank" rel="noopener" class="menu_button" style="text-decoration:none;flex:1;text-align:center;">在书阁查看完整轨迹</a>
+            <button type="button" id="lorecodex_preview_open_wb" class="menu_button" style="flex:1;">在酒馆内查看完整轨迹</button>
+            <a href="${escHtml(standaloneUrl)}" target="_blank" rel="noopener" class="menu_button" style="text-decoration:none;width:auto;padding:4px 9px;">新窗口</a>
         </div>
     `);
+    $('#lorecodex_preview_open_wb').on('click', () => openWorkbenchModal(cfg, { runId: snap.run_id || '' }));
 }
 
 async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, dbRecallHints, clear }) {
@@ -290,7 +358,7 @@ async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, d
             recentChat,
             sceneAnchor: {
                 charName: ctx?.name2 || '',
-                userName: ctx?.name1 || '指挥官',
+                userName: ctx?.name1 || '旅人',
                 pov: cfg.pov || '',
             },
             activeStateHints,
@@ -576,6 +644,16 @@ jQuery(async () => {
         helpString: '设置检索视角角色：/lorepov 角色名（空值清除）',
     }));
 
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'loreui',
+        returns: '打开 LoreCodex 内嵌工作台',
+        callback: () => {
+            openWorkbenchModal(cfg, { runId: lastInjectionSnapshot?.run_id || '' });
+            return 'opened';
+        },
+        helpString: '在 SillyTavern 内全屏打开 LoreCodex 典籍与轨迹工作台：/loreui',
+    }));
+
     try {
         const r = await fetch(`${getServerBase(cfg)}/config`);
         if (r.ok) {
@@ -752,8 +830,14 @@ jQuery(async () => {
     bind('#lorecodex_boiler_re', 'customBoilerplateRegex');
     bind('#lorecodex_summary_re', 'customSummaryPriorityRegex');
 
+    onWorkbenchClosedHook = async () => {
+        const ok = await fetchCorporaAndHealth(cfg);
+        renderConnStatus(ok);
+        renderCorpusDropdown();
+    };
+
     $('#lorecodex_open_ui').on('click', () => {
-        window.open(getServerBase(cfg), '_blank');
+        openWorkbenchModal(cfg, { runId: lastInjectionSnapshot?.run_id || '' });
     });
 
     $('#lorecodex_refresh_corpora').on('click', async () => {
@@ -850,7 +934,7 @@ jQuery(async () => {
                     query: q,
                     onDemand: q,
                     recentChat: collectRecentChat(ctx?.chat || [], cfg.recentTurns || 5),
-                    sceneAnchor: { charName: ctx?.name2 || '', userName: ctx?.name1 || '指挥官', pov: cfg.pov || '' },
+                    sceneAnchor: { charName: ctx?.name2 || '', userName: ctx?.name1 || '旅人', pov: cfg.pov || '' },
                     maxScenes: normalizeMaxScenes(cfg.maxScenes),
                     maxOrder: normalizeMaxOrder(cfg.maxOrder) || undefined,
                     pov: cfg.pov || '',
