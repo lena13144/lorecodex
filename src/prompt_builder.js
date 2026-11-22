@@ -160,14 +160,14 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
     type: 'function',
     function: {
       name: 'read_scene',
-      description: '读取 1~10 个场景节点的完整无截断正文。所有入选节点和导读中的事实必须经此工具亲眼核实。',
+      description: '批量读取 1~10 个场景节点的完整无截断正文（推荐一次传入多个 scene_node_ids 批量核实，节省轮次）。',
       parameters: {
         type: 'object',
         properties: {
           scene_node_ids: {
             type: 'array',
             items: { type: 'string' },
-            description: 'scene node_id 列表（每次最多 10 个，按需读取）',
+            description: 'scene node_id 数组（单次最多 10 个，强烈建议将候选节点合并在一次调用中批量读取）',
           },
         },
         required: ['scene_node_ids'],
@@ -179,7 +179,7 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
     type: 'function',
     function: {
       name: 'grep_scenes',
-      description: `全库 ${formatCharCount(stats.total_chars)} 正文与档案毫秒级精确扫描（自动展开人物别名）。专门解决“非主要角色在别人篇章里只客串说了几句话、目录未标出”的盲区，以及原句定位、两角色同框、专有设定词条直查。多个词用空格分隔（默认要求同幕共现），支持按 category/tone 过滤。禁止在第一轮调用。`,
+      description: `全库 ${formatCharCount(stats.total_chars)} 正文与档案毫秒级精确扫描（自动展开人物别名）。专门解决“非主要角色在别人篇章里只客串说了几句话、目录未标出”的盲区，以及原句定位、跨卷时间线关键词（如“十年前”“解散”）、两角色同框、专有设定词条直查。多个词用空格分隔（默认优先同幕共现），支持按 category/tone 过滤，可从第一轮起随时与目录工具并发调用。`,
       parameters: {
         type: 'object',
         properties: {
@@ -243,10 +243,10 @@ function buildSystemPrompt({
     : '';
 
   const turn1Rule = needSeriesFirst
-    ? '第一轮（Turn 1）只能调用 `list_series`（先看分部概览）或带具体 `character`/`keyword`/`series`/`tone` 过滤参数的 `list_story_arcs`，严禁在 Turn 1 调用 `grep_scenes`。'
-    : '第一轮（Turn 1）**只允许调用 `list_story_arcs`**（优先按 `character`、`keyword`、`category`、`series` 或 `tone` 过滤；跨全库概念才不传过滤查总目），**严禁在第一轮调用 `grep_scenes`**' +
-      (hasFallback ? '或 `fallback_search`' : '') +
-      '。';
+    ? '第一轮（Turn 1）可调用 `list_series`（查看分部概览）、带过滤参数的 `list_story_arcs`，或直接并发调用 `grep_scenes` 扫描跨卷专有名词/时间线线索。'
+    : '第一轮（Turn 1）可按问题类型自由组合或并发调用 `list_story_arcs`' +
+      (hasSeriesTool ? '、`list_series`' : '') +
+      ' 与 `grep_scenes`（例如同时翻阅篇章目录并用 `grep_scenes` 毫秒级直扫核心词条、台词、人物别名或时间线关键词）。';
 
   const ocHint = corpusConfig.oc_examples.length
     ? `（例如类似“${corpusConfig.oc_examples.join('”“')}”等未在本语料收录的角色）`
@@ -272,20 +272,20 @@ function buildSystemPrompt({
 ${spoilerBlock}${glossaryBlock}
 【检索策略（严格遵守）】
 ${gateRule}
-2. 【Turn 1 路径与锚点消歧】${turn1Rule}
+2. 【首轮并发寻路与锚点消歧】${turn1Rule}
    - 若当前角色卡为【城市 / 群像 / 沙盒大舞台卡】，**严禁拿舞台卡名去搜目录树**，请从最近对话流与状态线索识别实际出场人物和事件进行检索；
    - ${corpusConfig.user_identity_guard.enabled ? `**${corpusConfig.user_identity_guard.note}**，绝对禁止把玩家 ID 当作角色去检索！` : '注意区分玩家 ID 与语料人物名，避免误检索。'}
-3. 【检索毅力（PERSISTENCE）】一旦决定需要检索，若首次过滤未命中或不够贴切，**严禁直接放弃或臆断“库里没有”**，必须依次升级路径：
-   - 更换同义词、别名、外号、组织名或拆短关键词重查 \`list_story_arcs\`；
-   - 或放宽过滤条件查看完整目录（或按 \`list_series\` 分卷浏览）；
-   - 从 Turn 2 起，凡遇**次要角色在他人章节客串、原话台词核对、多角色同框、特定器物/技术名词/专有设定直查**，优先调用 \`grep_scenes\`（毫秒级扫全库正文并自动展开别名，优先标出目录未记名的客串幕）${fallbackStep}
-4. 【按 4 种查询拓扑自决选幕（安全上限 ${maxScenes} 幕，总字数预算约 ${maxChars.toLocaleString()} 字）】
-   先用 \`get_arc_scenes\` 展开候选篇章摘要，再调用 \`read_scene\` 精读完整原文核实（单次最多 10 幕），按询问形状决定最终放入 \`selected_nodes\` 的数量：
+3. 【检索毅力与批量效率（PERSISTENCE & BATCHING）】一旦决定需要检索，若首次过滤未命中或不够贴切，**严禁直接放弃或臆断“库里没有”**：
+   - 善用多工具并发：可在一轮内同时发起多个不同维度的 \`grep_scenes\` 或 \`list_story_arcs\`；
+   - 凡遇**跨卷时间线梳理（如“这十年发生了什么”）、世界观大设定汇总、次要角色客串、原话台词核对、多角色同框、特定器物/势力/技术名词**，积极使用 \`grep_scenes\` 毫秒级扫全库正文并自动展开别名${fallbackStep}
+   - 调用 \`read_scene\` 时，**尽量在一次调用的 \`scene_node_ids\` 数组里批量传入多个候选节点（单次最多 10 个）**，避免拆成多轮逐个读取耗尽轮次。
+4. 【按查询拓扑自决选幕（安全上限 ${maxScenes} 幕，总字数预算约 ${maxChars.toLocaleString()} 字）】
+   用 \`get_arc_scenes\` 或 \`grep_scenes\` 定位候选幕后，调用 \`read_scene\` 批量精读完整原文核实（单次最多 10 幕），按询问形状决定最终放入 \`selected_nodes\` 与 \`selected_arcs\` 的内容：
    - **拓扑 A · 定点事件 / 词条查证**：克制选 **1~3 幕**最核心原幕即可；若关键剧情横跨连续相邻的下一幕 \`node_id\`，注意连读相邻幕避免漏掉收尾台词。
-   - **拓扑 B · 宏观长跨度回顾**：询问跨越多个篇章的长线战役或事件始末时，在 \`selected_arcs\` 填入最关键的 **1~5 个 \`arc_id\`**（系统会自动附带逐幕脉络大纲），再精选 **1~3 幕**高潮代表原文。
+   - **拓扑 B · 宏观长跨度回顾 / 全局大设定与编年史**：当询问跨越多个篇章甚至全书的时间线（如“这十年发生了什么”“完整的大设定”“全主线脉络”）时，在 \`selected_arcs\` 填入 **1~10 个关键 \`arc_id\`**（系统会自动附带逐幕脉络大纲），并在 \`selected_nodes\` 中跨越不同阶段与设定档案精选 **4~10 幕**最具全局代表性的核心原文；同时在 \`guide\` 中融合已读原幕、篇章脉络及 \`grep_scenes\` 命中的真实原文摘录，按【时代起点/核心设定 → 阶段演进与各方势力动向 → 当前主线格局】输出详实完整的结构化宏观综述（篇幅不设死板上封顶，以讲清完整设定版图与各节点切入点为准）。
    - **拓扑 C · 单角色立体塑人 / 泛回忆（防单篇偏食）**：当追忆某角色而非指明单一事件时，推荐自决选出 **4~7 幕**，跨越不同分类/阶段/氛围维度交叉采样，避免全耗在同一篇短章里。
    - **拓扑 D · 群像与多声部齐聚（防锚点粘连 + 按氛围 \`tone\` 分流）**：当对话表达对多位旧部/众人不同声音的怀念或多人同场对照时，**严禁被最近一轮的单一在场角色吸住视野**！应主动抽离单角色锚点，结合当前语境情绪（\`tone\`：战火危机 vs 温情日常 vs 心理独白 vs 设定档案），在预算内横向抽取 **4~10 个不同人物/视角的片段**。${toneRoutingExtra}
-   - **严禁跳过 \`read_scene\` 仅凭目录摘要或 grep 短摘录就在 \`guide\` 里下结论或塞进 \`selected_nodes\`！**
+   - **放入 \`selected_nodes\` 的节点必须经 \`read_scene\` 核实；在撰写宏观大设定 \`guide\` 时，可将 \`read_scene\` 精读内容与 \`grep_scenes\` 命中的真实原文上下文摘录一并纳入综述，严禁凭空捏造原著未出现的事实！**
 5. 【防幻觉与虚假前提澄清铁律】
    a) 若语料外存在原创角色或外部设定${ocHint}，且 \`list_story_arcs\` 与 \`grep_scenes\` 均未在正文中找到该实体，**绝对禁止**因单字相似强行张冠李戴，直接输出 \`{"skip":true,"reason":"本语料库中未收录该角色或实体，属原创或外部设定"}\`。
    b) 若用户输入将真实官方角色绑定到了**未曾发生的虚假前提**，在 \`read_scene\` 核实原文后，**必须在 \`guide\` 开头明确澄清并驳斥虚假前提**，仅据已读原文陈述事实。
@@ -293,10 +293,10 @@ ${gateRule}
    核实完毕后立即停止调工具，只输出一个严格 JSON 对象（不要额外解释）：
 {
   "skip": false,
-  "selected_nodes": ["必须是从 read_scene 核实过的 node_id"],
-  "selected_arcs": ["可选，仅宏观多章梳理时填 1~5 个 arc_id，否则 []"],${fallbackFieldLine}
-  "timeline_note": "一句话标注命中片段所属阶段或进度位置",
-  "guide": "若只选中 1 幕，写 100-200 字精炼导读；若选中多幕（>=2 幕），先用 1-2 句总览主旨，再用紧凑条目逐一标出每个 [node_id] 提供的独特维度/关键台词切入点，防止正文模型遗漏后半段材料；宏观战役梳理可放宽至 300-480 字。"
+  "selected_nodes": ["经 read_scene 核实过的 node_id 列表"],
+  "selected_arcs": ["可选，宏观多章或全局设定梳理时可填 1~10 个关键 arc_id，否则 []"],${fallbackFieldLine}
+  "timeline_note": "一句话标注命中片段所属阶段或时间线跨度",
+  "guide": "结构化记忆导读：单幕查证保持精炼；多幕或全局大设定/编年史回顾则分阶段、分势力维度完整梳理核心事实，并标出各 [node_id] 与关键设定线索的对应关系，供正文模型直接引用。"
 }`;
 }
 

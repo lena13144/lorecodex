@@ -633,10 +633,10 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
   }
 
   function buildArcOutlines(wantedArcIds, maxOrder) {
-    const ids = [...new Set((wantedArcIds || []).map((x) => String(x).trim()).filter((id) => arcMap.has(id)))].slice(0, 5);
+    const ids = [...new Set((wantedArcIds || []).map((x) => String(x).trim()).filter((id) => arcMap.has(id)))].slice(0, 10);
     const allowedIds = ids.filter((aid) => isOrderAllowed(arcMap.get(aid)?.order, maxOrder));
     if (!allowedIds.length) return [];
-    const perArcBudget = Math.max(900, Math.floor(6500 / allowedIds.length));
+    const perArcBudget = Math.max(800, Math.floor(10000 / allowedIds.length));
 
     return allowedIds
       .map((aid) => {
@@ -907,7 +907,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     const sceneAnchor = payload.sceneAnchor || {};
     const activeStateHints = String(payload.activeStateHints || '').trim();
     const pov = String(sceneAnchor.pov || payload.pov || '').trim();
-    const maxTurns = Math.min(Math.max(Number(payload.maxTurns) || 6, 2), 8);
+    const maxTurns = Math.min(Math.max(Number(payload.maxTurns) || 8, 2), 12);
     const rawMaxScenes = payload.maxScenes;
     const maxScenes =
       rawMaxScenes === undefined || rawMaxScenes === null || Number(rawMaxScenes) === 0
@@ -998,7 +998,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       const msg = resp?.choices?.[0]?.message;
       if (!msg) throw new Error('empty LLM choice');
       messages.push(msg);
-      const reasoning = String(msg.reasoning_content || msg.reasoning || '').trim().slice(0, 3000);
+      const reasoning = String(msg.reasoning_content || msg.reasoning || '').trim();
 
       const tcs = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
       if (!tcs.length) {
@@ -1087,7 +1087,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     usage.prompt += fu.prompt_tokens || 0;
     usage.completion += fu.completion_tokens || 0;
     const fMsg = finalResp?.choices?.[0]?.message;
-    const fReasoning = String(fMsg?.reasoning_content || fMsg?.reasoning || '').trim().slice(0, 3000);
+    const fReasoning = String(fMsg?.reasoning_content || fMsg?.reasoning || '').trim();
     steps.push({
       turn: maxTurns + 1,
       kind: 'final_forced',
