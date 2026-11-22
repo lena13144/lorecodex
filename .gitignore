@@ -3,8 +3,9 @@ config.json
 node_modules/
 *.ckpt.jsonl
 *checkpoint*.jsonl
-corpora/gf2/
-builders/migrate_gf2.mjs
+corpora/*
+!corpora/demo-chronicles/
+builders/migrate_*.mjs
 .tmp*
 .tmp-uploads/
 __pycache__/

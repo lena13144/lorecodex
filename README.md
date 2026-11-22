@@ -67,7 +67,7 @@ SillyTavern Chat Turn / API Request
 6. **Modular Codex GUI & Web Management Studio (`ui/`)**  
    4 themes (**Paper `素笺`**, **Lamp `墨灯`**, **Studio Light `净台`**, **Studio Dark `曜夜`**), draggable 3-pane splitters, collapsible `Series → Arc → Scene` tree, Grep match `<mark>` highlighting & jump navigation, waterfall timing timeline, clickable guide node links + exact SillyTavern prompt preview, `Ctrl+K` command palette, online corpus config editor, and drag-and-drop file upload builder.
 7. **Universal SillyTavern Extension (`extension/st-tree-lore/`)**  
-   SmartTheme-integrated card layout, live connection status bar, real-time last-injection preview card with deep link (`/#run=...`) to the Workbench trace, inline test query panel, per-character-card auto-binding (`charBindings`), spoiler-gate input, customizable framing/scrubbers, slash commands (`/lorecodex`, `/lorecorpus`, `/loreorder`, `/lorepov`), and one-click migration if upgrading from legacy prototype bridges.
+   SmartTheme-integrated card layout, live connection status bar, real-time last-injection preview card with deep link (`/#run=...`) to the Workbench trace, inline test query panel, per-character-card auto-binding (`charBindings`), spoiler-gate input, customizable framing/scrubbers, and slash commands (`/lorecodex`, `/lorecorpus`, `/loreorder`, `/lorepov`).
 
 ---
 
@@ -164,8 +164,7 @@ Then click **刷新 (`Reload`)** in the UI or call `POST /corpora/reload`.
 
 1. Copy `extension/st-tree-lore/` into `<SillyTavern>/public/scripts/extensions/third-party/st-tree-lore/`.
 2. Reload SillyTavern and open the **Extensions** panel (`LoreCodex 树形典籍检索 (st-tree-lore)`).
-3. If upgrading from a legacy prototype bridge extension, an automatic banner in the panel offers one-click settings migration to avoid duplicate injection.
-4. Slash commands:
+3. Slash commands:
    - `/lorecodex [on|off]` — toggle retrieval
    - `/lorecorpus <corpus_id>` — switch active corpus
    - `/loreorder <n|off>` — set spoiler gate chapter limit

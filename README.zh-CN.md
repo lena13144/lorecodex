@@ -65,7 +65,7 @@ SillyTavern 对话轮次 / API 请求
 6. **多主题典籍工作台与全闭环 Web 管理（`ui/`）**  
    提供 **书卷·素笺 / 书卷·墨灯 / 工作台·净台 / 工作台·曜夜** 4 套主题、可拖拽三栏布局、三级折叠树（`分部 → 篇章 → 幕`）、Grep 命中高亮与正文直跳、寻路瀑布流时间轴、导读节点联动、酒馆实际注入原文预览与复制、`Ctrl+K` 快速命令面板、在线语料配置弹窗及**网页拖拽上传建树**。
 7. **原生主题融合酒馆插件（`extension/st-tree-lore/`）**  
-   融合 SillyTavern `SmartTheme` 变量、顶部实时连接状态栏、**上次注入实时预览卡片**（支持一键直达书阁 `#run=...` 轨迹）、内嵌测试检索区、角色卡自动绑定（`charBindings`）、防剧透序、斜杠命令及早期原型插件配置一键兼容迁移。
+   融合 SillyTavern `SmartTheme` 变量、顶部实时连接状态栏、**上次注入实时预览卡片**（支持一键直达书阁 `#run=...` 轨迹）、内嵌测试检索区、角色卡自动绑定（`charBindings`）、防剧透序与斜杠命令。
 
 ---
 
@@ -162,8 +162,7 @@ python3 builders/build_lore.py --input path/to/worldbook.json --corpus-id my-nov
 
 1. 将 `extension/st-tree-lore/` 复制到酒馆目录 `<SillyTavern>/public/scripts/extensions/third-party/st-tree-lore/`。
 2. 刷新酒馆页面，在扩展面板中展开 **「LoreCodex 树形典籍检索 (st-tree-lore)」**。
-3. 若本机曾启用早期单作品原型桥接扩展，插件会自动检测并在顶部提供一键平滑迁移并停用旧插件，避免双倍注入。
-4. 支持的斜杠命令：
+3. 支持的斜杠命令：
    - `/lorecodex [on|off]` — 开关树检索
    - `/lorecorpus <corpus_id>` — 切换当前挂载书库
    - `/loreorder <n|off>` — 设置防剧透章节序上限

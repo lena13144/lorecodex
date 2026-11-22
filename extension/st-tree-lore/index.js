@@ -62,10 +62,8 @@ function normalizeMaxOrder(val) {
 
 function getSettings() {
     if (!extension_settings[MODULE_NAME]) {
-        const legacyActive = Boolean(extension_settings?.gf2_rag_bridge?.enabled);
         extension_settings[MODULE_NAME] = {
             ...defaultSettings,
-            enabled: !legacyActive,
             charBindings: {},
         };
     } else {
@@ -86,7 +84,7 @@ function cleanMessage(mes) {
     let s = String(mes)
         .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
         .replace(/<details>[\s\S]*?<\/details>/gi, '')
-        .replace(/<(?:gf2_source_reference|lore_source_reference|chronicles_source_reference|[a-z0-9_]+_source_reference)>[\s\S]*?<\/(?:gf2_source_reference|lore_source_reference|chronicles_source_reference|[a-z0-9_]+_source_reference)>/gi, '')
+        .replace(/<([a-z0-9_]+_source_reference)>[\s\S]*?<\/\1>/gi, '')
         .replace(/```html[\s\S]*?```/gi, '')
         .replace(/<[^>]+>/g, '');
     const wrapped = s.match(/以下是用户的本轮输入[：:]\s*([\s\S]*?)(?:\n\s*以下输入的代码为|$)/);
@@ -506,11 +504,6 @@ jQuery(async () => {
         }
     };
 
-    const refreshLegacyBanner = () => {
-        const legacyOn = Boolean(extension_settings?.gf2_rag_bridge?.enabled);
-        $('#lorecodex_migrate_banner').toggle(legacyOn);
-    };
-
     eventSource.on(event_types.CHAT_CHANGED, () => {
         pendingGeneration = false;
         const charKey = getActiveCharKey();
@@ -600,11 +593,6 @@ jQuery(async () => {
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content lorecodex-drawer">
-            <div id="lorecodex_migrate_banner" class="lorecodex-migrate-banner" style="display:none;">
-                <div><b>检测到旧版插件 gf2-rag-bridge 正在启用中</b>：为避免双倍注入上下文，本插件首次已保持暂停状态。</div>
-                <button id="lorecodex_migrate_btn" class="menu_button" style="width:100%;">一键迁移旧配置并停用旧版 gf2-rag-bridge</button>
-            </div>
-
             <div class="lorecodex-card">
                 <div class="lorecodex-conn-bar">
                     <div class="lorecodex-conn-left">
@@ -737,7 +725,6 @@ jQuery(async () => {
     renderCorpusDropdown();
     syncUiFromCfg();
     updateBindingLabel();
-    refreshLegacyBanner();
     renderLastPreview(cfg);
 
     const bind = (sel, key, fn) => {
@@ -764,34 +751,6 @@ jQuery(async () => {
     bind('#lorecodex_followup_hint', 'customFollowUpHint');
     bind('#lorecodex_boiler_re', 'customBoilerplateRegex');
     bind('#lorecodex_summary_re', 'customSummaryPriorityRegex');
-
-    $('#lorecodex_migrate_btn').on('click', async () => {
-        const old = extension_settings?.gf2_rag_bridge || {};
-        if (old.ragServer) cfg.ragServer = old.ragServer;
-        if (old.chatBase) cfg.chatBase = old.chatBase;
-        if (old.chatKey) cfg.chatKey = old.chatKey;
-        if (old.chatModel) cfg.chatModel = old.chatModel;
-        if (old.depth !== undefined) cfg.depth = old.depth;
-        if (old.recentTurns !== undefined) cfg.recentTurns = old.recentTurns;
-        if (old.maxScenes !== undefined) cfg.maxScenes = normalizeMaxScenes(old.maxScenes);
-        if (old.pov !== undefined) cfg.pov = old.pov;
-        const ok = await fetchCorporaAndHealth(cfg);
-        if (corporaMap.has('gf2')) cfg.corpus = 'gf2';
-        cfg.enabled = true;
-
-        if (extension_settings?.gf2_rag_bridge) {
-            extension_settings.gf2_rag_bridge.enabled = false;
-        }
-        setExtensionPrompt('gf2_rag_context', '', extension_prompt_types.IN_CHAT, 1, false, extension_prompt_roles.SYSTEM);
-        if ($('#gf2_rag_enabled').length) $('#gf2_rag_enabled').prop('checked', false);
-
-        saveSettingsDebounced();
-        renderConnStatus(ok);
-        renderCorpusDropdown();
-        syncUiFromCfg();
-        refreshLegacyBanner();
-        toastr.success('已迁移旧版 gf2-rag-bridge 配置并停用旧插件，避免双倍注入！');
-    });
 
     $('#lorecodex_open_ui').on('click', () => {
         window.open(getServerBase(cfg), '_blank');

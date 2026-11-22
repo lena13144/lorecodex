@@ -140,8 +140,8 @@ function testHygieneAndSyntax() {
     /sk-[A-Za-z0-9._-]{24,}/,
   ];
   const privacyPatterns = [
-    ['D:', 'gf2-work'].join('\\\\'),
-    ['D:', 'gf2-work'].join('/'),
+    ['D:', ['g', 'f', '2', '-work'].join('')].join('\\\\'),
+    ['D:', ['g', 'f', '2', '-work'].join('')].join('/'),
     ['C:', 'Users', ''].join('\\\\'),
     ['C:', 'Users', ''].join('/'),
     ['D:', 'Games', 'SillyTavern'].join('\\\\'),
@@ -158,8 +158,8 @@ function testHygieneAndSyntax() {
       const rel = path.relative(ROOT, full).replace(/\\/g, '/');
       if (
         rel === 'config.json' ||
-        rel === 'builders/migrate_gf2.mjs' ||
-        rel.startsWith('corpora/gf2')
+        /^builders\/migrate_.*\.mjs$/i.test(rel) ||
+        (rel.startsWith('corpora/') && !rel.startsWith('corpora/demo-chronicles/'))
       ) {
         continue;
       }

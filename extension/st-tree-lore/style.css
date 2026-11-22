@@ -60,19 +60,6 @@
     background: #f5b951;
 }
 
-.lorecodex-migrate-banner {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 8px 10px;
-    border: 1px solid rgba(220, 160, 60, 0.55);
-    border-left: 4px solid var(--SmartThemeQuoteColor, #dca03c);
-    border-radius: 8px;
-    background: rgba(220, 160, 60, 0.12);
-    font-size: 0.86em;
-    line-height: 1.45;
-}
-
 .lorecodex-row {
     display: flex;
     gap: 8px;
