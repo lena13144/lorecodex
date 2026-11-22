@@ -93,8 +93,7 @@ export async function openSettingsModal() {
         <div class="fld-group">
           <label class="fld">模型名称</label>
           <div style="display:flex;gap:6px;">
-            <input id="cfgModel" type="text" value="${esc(cfg.chatModel || '')}" list="cfgModelList" />
-            <datalist id="cfgModelList"></datalist>
+            <input id="cfgModel" type="text" value="${esc(cfg.chatModel || '')}" placeholder="手动输入或点击右侧拉取后在下拉框选择" />
             <button id="cfgFetchModels" type="button" class="btn-sm" style="white-space:nowrap;">拉取模型</button>
           </div>
           <select id="cfgModelSelect" class="fld-sel" style="display:none;margin-top:6px;"></select>
@@ -125,16 +124,28 @@ export async function openSettingsModal() {
 
     $('#cfgModelSelect').addEventListener('change', (e) => {
       const picked = e.target.value.trim();
-      if (picked) $('#cfgModel').value = picked;
+      if (picked) {
+        $('#cfgModel').value = picked;
+        $('#cfgStatus').textContent = `已选择模型：${picked}（点击下方「保存到服务端」生效）`;
+      }
+    });
+
+    $('#cfgModel').addEventListener('input', (e) => {
+      const val = e.target.value.trim();
+      const sel = $('#cfgModelSelect');
+      if (sel && sel.style.display !== 'none') {
+        const hasOpt = [...sel.options].some((o) => o.value === val);
+        sel.value = hasOpt ? val : '';
+      }
     });
 
     $('#cfgFetchModels').addEventListener('click', async () => {
+      const btn = $('#cfgFetchModels');
+      btn.disabled = true;
       $('#cfgStatus').textContent = '正在拉取模型列表...';
       try {
         const j = await fetchModels($('#cfgBase').value.trim(), $('#cfgKey').value.trim());
         const models = j.models || [];
-        const dl = $('#cfgModelList');
-        if (dl) dl.innerHTML = models.map((m) => `<option value="${esc(m)}"></option>`).join('');
         const sel = $('#cfgModelSelect');
         if (sel && models.length) {
           const cur = $('#cfgModel').value.trim();
@@ -147,9 +158,13 @@ export async function openSettingsModal() {
             sel.value = models[0];
           }
         }
-        $('#cfgStatus').textContent = `已拉取 ${models.length} 个可用模型，可在下拉框直接选择`;
+        $('#cfgStatus').textContent = models.length
+          ? `已拉取 ${models.length} 个可用模型，可在下拉框直接选择`
+          : '接口返回了 0 个模型，请手动输入模型名称';
       } catch (e) {
         $('#cfgStatus').textContent = '拉取失败: ' + e.message;
+      } finally {
+        btn.disabled = false;
       }
     });
 
@@ -166,6 +181,7 @@ export async function openSettingsModal() {
         if (newKey) patch.chatKey = newKey;
         const res = await saveConfig(patch);
         state.modelName = res.config?.chatModel || patch.chatModel;
+        actions.refreshModelMeta?.();
         showToast('服务模型配置已保存', 'ok');
         closeModal();
       } catch (e) {
@@ -339,12 +355,20 @@ export async function openCorpusModal() {
           runningText: () => '正在执行 LLM 目录补全（可切回主页面或稍候）...',
           onDone: async () => {
             $('#ccUpgJobStatus').textContent = '补全完成！正在热重载书库索引...';
-            const listRes = await fetchCorpora();
+            const [listRes, freshDetail] = await Promise.all([
+              fetchCorpora(),
+              fetchCorpusDetail(c.id).catch(() => null),
+            ]);
             state.corpora = listRes.corpora || [];
             await actions.switchCorpus?.(c.id, { keepRun: true });
+            if (freshDetail?.config) {
+              const fc = freshDetail.config;
+              if ($('#ccAliases')) $('#ccAliases').value = (fc.aliases || []).map((g) => g.join(', ')).join('\n');
+              if ($('#ccGlossary')) $('#ccGlossary').value = (fc.glossary || []).join('\n');
+            }
             const newLlm = state.index?.stats?.llm_scenes || 0;
             const newTot = state.index?.stats?.scenes || totalScenes;
-            $('#ccUpgCoverage').innerHTML = `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已完成本轮补全并重载）`;
+            $('#ccUpgCoverage').innerHTML = `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已完成本轮补全并重载，新增别名与设定已同步至左侧标签页）`;
             showToast(`书库「${c.id}」LLM 目录补全完成！`, 'ok');
             upgBtn.disabled = false;
           },

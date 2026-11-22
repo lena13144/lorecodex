@@ -268,7 +268,12 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
   }
 
   async function callChat({ base, key, model, messages, tools, maxTokens = null }) {
-    const url = String(base || '').replace(/\/+$/, '') + '/chat/completions';
+    const cleanBase = String(base || '')
+      .trim()
+      .replace(/\/+$/, '')
+      .replace(/\/(?:chat\/completions|models)$/i, '')
+      .replace(/\/+$/, '');
+    const url = cleanBase + '/chat/completions';
     const body = {
       model,
       messages,
@@ -366,7 +371,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       // 3-tier protection: fold into Level-0 series when huge unfiltered catalog
       if (!ser && !cat && !ch && !kw && !tone && visibleArcs.length > autoThreshold && seriesOverview.length >= 2) {
         const lines = [
-          `[目录规模提示] 当前可见篇章共 ${visibleArcs.length} 卷，超过首轮直铺阈值 (${autoThreshold})，已自动折叠为 Level-0 分部概览。请传 series、character、keyword 或 tone 参数调用 list_story_arcs 细查，或在 Turn 2 调用 grep_scenes：`,
+          `[目录规模提示] 当前可见篇章共 ${visibleArcs.length} 卷，超过首轮直铺阈值 (${autoThreshold})，已自动折叠为 Level-0 分部概览。请传 series、character、keyword 或 tone 参数调用 list_story_arcs 细查，或直接调用 grep_scenes：`,
           ...seriesOverview.map((s) => {
             const range = s.min_order !== null ? ` | 序:${s.min_order}~${s.max_order}` : '';
             const chars = s.top_characters.length ? ` | 人物:${s.top_characters.join(',')}` : '';

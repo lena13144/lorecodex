@@ -227,15 +227,19 @@ export async function pollRuns({ autoSelectNewest = true, preferHashRunId = '' }
   try {
     const j = await fetchRuns();
     const list = j.runs || [];
-    const prevFirst = state.runs[0]?.id;
+    const topId = list[0]?.id || '';
+    const wasInit = state.runsInitialized;
+    const hasNewTop = wasInit && Boolean(topId) && topId !== state.lastSeenTopRunId;
+    state.runsInitialized = true;
+    state.lastSeenTopRunId = topId;
     state.runs = list;
     renderRunsList();
     if (preferHashRunId && list.some((r) => r.id === preferHashRunId)) {
       await selectRun(preferHashRunId);
       return;
     }
-    if (autoSelectNewest && list.length && (!state.activeRunId || list[0].id !== prevFirst)) {
-      await selectRun(list[0].id);
+    if (autoSelectNewest && hasNewTop) {
+      await selectRun(topId);
     }
   } catch (_) {}
 }
@@ -268,6 +272,7 @@ export async function executeSearch() {
     };
     const out = await runTreeSearch(payload);
     $('#runStatus').textContent = `完成（${out.took_ms}ms，${out.turns} 轮）`;
+    if (out.run_id) state.lastSeenTopRunId = out.run_id;
     await pollRuns({ autoSelectNewest: false });
     if (out.run_id) {
       await selectRun(out.run_id);

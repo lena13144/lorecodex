@@ -208,15 +208,40 @@ function buildActiveStateHints(entryTexts, dbRecallHints, corpusMeta, cfg) {
     return ordered.join('\n').slice(0, 1200);
 }
 
+let resolvedServerBase = '';
+
+function getConfiguredServerBase(cfg) {
+    return (cfg.ragServer || 'http://127.0.0.1:5240').trim().replace(/\/+$/, '');
+}
+
 function getServerBase(cfg) {
-    return (cfg.ragServer || 'http://127.0.0.1:5240').replace(/\/+$/, '');
+    return resolvedServerBase || getConfiguredServerBase(cfg);
+}
+
+function getLanFallbackBase(rawBase) {
+    try {
+        const u = new URL(rawBase);
+        const h = u.hostname.toLowerCase();
+        const pageHost = String(window?.location?.hostname || '').trim();
+        const pageLower = pageHost.toLowerCase();
+        if (
+            pageHost &&
+            (h === '127.0.0.1' || h === 'localhost') &&
+            pageLower !== '127.0.0.1' &&
+            pageLower !== 'localhost'
+        ) {
+            u.hostname = pageHost;
+            return u.origin;
+        }
+    } catch (_) {}
+    return '';
 }
 
 let onWorkbenchClosedHook = null;
 
-function buildWorkbenchUrls(cfg, runId = '') {
+function buildWorkbenchUrls(cfg, { runId = '', corpusId = '' } = {}) {
     const base = getServerBase(cfg);
-    const cid = String(cfg.corpus || serverDefaultCorpus || '').trim();
+    const cid = String(corpusId || cfg.corpus || serverDefaultCorpus || '').trim();
     const qEmbed = new URLSearchParams();
     qEmbed.set('embed', '1');
     if (cid) qEmbed.set('corpus', cid);
@@ -230,9 +255,9 @@ function buildWorkbenchUrls(cfg, runId = '') {
     };
 }
 
-function openWorkbenchModal(cfg, { runId = '' } = {}) {
-    const { embedUrl, standaloneUrl } = buildWorkbenchUrls(cfg, runId);
-    const cid = String(cfg.corpus || serverDefaultCorpus || '').trim();
+function openWorkbenchModal(cfg, { runId = '', corpusId = '' } = {}) {
+    const { embedUrl, standaloneUrl } = buildWorkbenchUrls(cfg, { runId, corpusId });
+    const cid = String(corpusId || cfg.corpus || serverDefaultCorpus || '').trim();
     const cName = corporaMap.get(cid)?.name || cid || 'LoreCodex';
 
     let backdrop = $('#lorecodex_wb_modal');
@@ -280,21 +305,39 @@ function openWorkbenchModal(cfg, { runId = '' } = {}) {
     backdrop.addClass('open');
 }
 
+async function probeServerHealthAndCorpora(base) {
+    const [hr, cr] = await Promise.all([
+        fetch(`${base}/health`).then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch(`${base}/corpora`).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]);
+    return { hr, cr };
+}
+
 async function fetchCorporaAndHealth(cfg) {
-    const srv = getServerBase(cfg);
+    const primary = getConfiguredServerBase(cfg);
     try {
-        const [hr, cr] = await Promise.all([
-            fetch(`${srv}/health`).then(r => r.ok ? r.json() : null).catch(() => null),
-            fetch(`${srv}/corpora`).then(r => r.ok ? r.json() : null).catch(() => null),
-        ]);
+        let { hr, cr } = await probeServerHealthAndCorpora(primary);
+        if (cr && hr?.ok) {
+            resolvedServerBase = primary;
+        } else {
+            const lanAlt = getLanFallbackBase(primary);
+            if (lanAlt) {
+                const altRes = await probeServerHealthAndCorpora(lanAlt);
+                if (altRes.cr && altRes.hr?.ok) {
+                    hr = altRes.hr;
+                    cr = altRes.cr;
+                    resolvedServerBase = lanAlt;
+                }
+            }
+        }
         lastHealthInfo = hr;
         if (!cr) return false;
         corporaCache = Array.isArray(cr.corpora) ? cr.corpora : [];
         serverDefaultCorpus = String(cr.defaultCorpus || '');
         corporaMap.clear();
         for (const c of corporaCache) corporaMap.set(c.id, c);
-        if (!cfg.corpus && serverDefaultCorpus) {
-            cfg.corpus = serverDefaultCorpus;
+        if (corporaCache.length > 0 && (!cfg.corpus || !corporaMap.has(cfg.corpus))) {
+            cfg.corpus = corporaMap.has(serverDefaultCorpus) ? serverDefaultCorpus : corporaCache[0].id;
             saveSettingsDebounced();
         }
         return true;
@@ -333,7 +376,10 @@ function renderLastPreview(cfg) {
             <span class="lorecodex-muted">${s.chars}字</span>
         </div>
     `).join('');
-    const { standaloneUrl } = buildWorkbenchUrls(cfg, snap.run_id || '');
+    const { standaloneUrl } = buildWorkbenchUrls(cfg, {
+        runId: snap.run_id || '',
+        corpusId: snap.corpus_id || cfg.corpus,
+    });
 
     box.html(`
         <div class="lorecodex-row" style="justify-content:space-between;">
@@ -342,7 +388,7 @@ function renderLastPreview(cfg) {
                 <span class="lorecodex-pill">${escHtml(snap.corpus_name || snap.corpus_id || '-')}</span>
                 ${orderPill}
             </div>
-            <span class="lorecodex-muted">${snap.took_ms}ms · ${snap.turns}轮</span>
+            <span class="lorecodex-muted">${snap.took_ms ?? 0}ms · ${snap.turns ?? 0}轮</span>
         </div>
         ${snap.skip ? `<div class="lorecodex-muted">原因：${escHtml(snap.reason || '无命中')}</div>` : `
             ${snap.guide ? `<details style="font-size:0.84em;"><summary style="cursor:pointer;">记忆导读（${snap.prompt_chars || 0} 字符）</summary><div style="margin-top:5px;line-height:1.5;white-space:pre-line;">${escHtml(snap.guide)}</div></details>` : ''}
@@ -353,7 +399,9 @@ function renderLastPreview(cfg) {
             <a href="${escHtml(standaloneUrl)}" target="_blank" rel="noopener" class="menu_button" style="text-decoration:none;width:auto;padding:4px 9px;">新窗口</a>
         </div>
     `);
-    $('#lorecodex_preview_open_wb').on('click', () => openWorkbenchModal(cfg, { runId: snap.run_id || '' }));
+    $('#lorecodex_preview_open_wb').on('click', () =>
+        openWorkbenchModal(cfg, { runId: snap.run_id || '', corpusId: snap.corpus_id || cfg.corpus })
+    );
 }
 
 async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, dbRecallHints, clear }) {
@@ -386,7 +434,24 @@ async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, d
         }),
     });
     if (!resp.ok) {
-        console.warn('[LoreCodex] HTTP', resp.status);
+        const errBody = await resp.json().catch(() => ({}));
+        const errMsg = errBody.error || `HTTP ${resp.status}`;
+        console.warn('[LoreCodex] tree-search failed:', errMsg);
+        clear();
+        lastInjectionSnapshot = {
+            corpus_id: corpusId,
+            corpus_name: corpusMeta?.name || corpusId,
+            skip: true,
+            reason: `检索请求异常: ${errMsg}`,
+            took_ms: 0,
+            turns: 0,
+            max_order: maxOrder || null,
+            run_id: '',
+            scenes: [],
+            outlines: [],
+        };
+        renderLastPreview(cfg);
+        if (typeof toastr !== 'undefined') toastr.warning(`LoreCodex 检索失败: ${errMsg}`);
         return;
     }
 
@@ -504,6 +569,21 @@ async function runLoreRetrieval(loreData) {
         await runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, dbRecallHints, clear });
     } catch (err) {
         console.warn('[LoreCodex] retrieval failed:', err);
+        clear();
+        const cid = (cfg.corpus || serverDefaultCorpus || '').trim();
+        lastInjectionSnapshot = {
+            corpus_id: cid,
+            corpus_name: corporaMap.get(cid)?.name || cid,
+            skip: true,
+            reason: `连接服务端失败: ${err?.message || err}`,
+            took_ms: 0,
+            turns: 0,
+            max_order: normalizeMaxOrder(cfg.maxOrder) || null,
+            run_id: '',
+            scenes: [],
+            outlines: [],
+        };
+        renderLastPreview(cfg);
     } finally {
         loreRagRunning = false;
     }
@@ -666,24 +746,52 @@ jQuery(async () => {
         name: 'loreui',
         returns: '打开 LoreCodex 内嵌工作台',
         callback: () => {
-            openWorkbenchModal(cfg, { runId: lastInjectionSnapshot?.run_id || '' });
+            openWorkbenchModal(cfg);
             return 'opened';
         },
         helpString: '在 SillyTavern 内全屏打开 LoreCodex 典籍与轨迹工作台：/loreui',
     }));
 
-    try {
-        const r = await fetch(`${getServerBase(cfg)}/config`);
-        if (r.ok) {
+    const syncConfigFromServer = async ({ overwriteExisting = false } = {}) => {
+        try {
+            const r = await fetch(`${getServerBase(cfg)}/config`);
+            if (!r.ok) return;
             const srvCfg = await r.json();
             if (!cfg.chatKey && srvCfg.chatKey && !/^\*+$/.test(srvCfg.chatKey)) cfg.chatKey = srvCfg.chatKey;
-            if (!cfg.chatBase && srvCfg.chatBase) cfg.chatBase = srvCfg.chatBase;
-            if (!cfg.chatModel && srvCfg.chatModel) cfg.chatModel = srvCfg.chatModel;
-            if ((cfg.maxTokens === '' || cfg.maxTokens === undefined || cfg.maxTokens === null) && Number(srvCfg.maxTokens) > 0) {
+            if ((overwriteExisting || !cfg.chatBase) && srvCfg.chatBase) cfg.chatBase = srvCfg.chatBase;
+            if ((overwriteExisting || !cfg.chatModel) && srvCfg.chatModel) cfg.chatModel = srvCfg.chatModel;
+            if (overwriteExisting) {
+                cfg.maxTokens = Number(srvCfg.maxTokens) > 0 ? Number(srvCfg.maxTokens) : '';
+            } else if ((cfg.maxTokens === '' || cfg.maxTokens === undefined || cfg.maxTokens === null) && Number(srvCfg.maxTokens) > 0) {
                 cfg.maxTokens = Number(srvCfg.maxTokens);
             }
+        } catch (_) {}
+    };
+
+    const syncConfigToServer = async ({ silent = false } = {}) => {
+        const st = $('#lorecodex_model_status');
+        try {
+            const body = buildApiConfig(cfg);
+            body.maxTokens = Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null;
+            if (cfg.corpus) body.defaultCorpus = cfg.corpus;
+            const r = await fetch(`${getServerBase(cfg)}/config`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const j = await r.json();
+            if (!silent) {
+                st.text(j.ok ? '已保存配置到 LoreCodex 服务端 config.json' : ('保存失败: ' + j.error));
+                if (j.ok && typeof toastr !== 'undefined') toastr.success('已保存模型配置到 LoreCodex 服务端');
+            }
+            return Boolean(j.ok);
+        } catch (e) {
+            if (!silent) st.text('连接服务端失败: ' + e.message);
+            return false;
         }
-    } catch (_) {}
+    };
+
+    await syncConfigFromServer();
 
     const html = `
     <div class="inline-drawer">
@@ -778,8 +886,7 @@ jQuery(async () => {
                     <div class="lorecodex-row">
                         <div style="flex:1;">
                             <small>模型名称：</small>
-                            <input id="lorecodex_chat_model" class="text_pole" type="text" value="${escHtml(cfg.chatModel || '')}" list="lorecodex_model_list" placeholder="可手动输入或点击右侧拉取后在下拉框选择" />
-                            <datalist id="lorecodex_model_list"></datalist>
+                            <input id="lorecodex_chat_model" class="text_pole" type="text" value="${escHtml(cfg.chatModel || '')}" placeholder="可手动输入或点击右侧拉取后在下拉框选择" />
                         </div>
                         <button id="lorecodex_fetch_models" class="menu_button" style="width:auto;margin-top:16px;padding:4px 8px;">拉取模型</button>
                     </div>
@@ -863,12 +970,23 @@ jQuery(async () => {
 
     onWorkbenchClosedHook = async () => {
         const ok = await fetchCorporaAndHealth(cfg);
+        await syncConfigFromServer({ overwriteExisting: true });
+        saveSettingsDebounced();
         renderConnStatus(ok);
         renderCorpusDropdown();
+        syncUiFromCfg();
+        updateBindingLabel();
     };
 
     $('#lorecodex_open_ui').on('click', () => {
-        openWorkbenchModal(cfg, { runId: lastInjectionSnapshot?.run_id || '' });
+        openWorkbenchModal(cfg);
+    });
+
+    $('#lorecodex_server').on('change', async () => {
+        resolvedServerBase = '';
+        const ok = await fetchCorporaAndHealth(cfg);
+        renderConnStatus(ok);
+        renderCorpusDropdown();
     });
 
     $('#lorecodex_refresh_corpora').on('click', async () => {
@@ -876,10 +994,14 @@ jQuery(async () => {
         dot.removeClass('ok err').addClass('wait');
         $('#lorecodex_conn_text').text('正在刷新服务与书库...');
         try {
+            resolvedServerBase = '';
             await fetch(`${getServerBase(cfg)}/corpora/reload`, { method: 'POST' }).catch(() => null);
             const ok = await fetchCorporaAndHealth(cfg);
+            await syncConfigFromServer();
             renderConnStatus(ok);
             renderCorpusDropdown();
+            syncUiFromCfg();
+            updateBindingLabel();
         } catch (_) {
             renderConnStatus(false);
         }
@@ -911,17 +1033,33 @@ jQuery(async () => {
         }
     });
 
-    $('#lorecodex_model_select').on('change', function () {
+    $('#lorecodex_chat_model').on('input', function () {
+        const val = String($(this).val() || '').trim();
+        const sel = $('#lorecodex_model_select');
+        if (sel.is(':visible')) {
+            const hasOpt = sel.find('option').toArray().some(o => o.value === val);
+            sel.val(hasOpt ? val : '');
+        }
+    });
+
+    $('#lorecodex_model_select').on('change', async function () {
         const picked = String($(this).val() || '').trim();
         if (!picked) return;
         cfg.chatModel = picked;
         $('#lorecodex_chat_model').val(picked);
         saveSettingsDebounced();
-        $('#lorecodex_model_status').text(`已选择模型：${picked}（可点上方按钮同步保存到服务端）`);
+        const synced = await syncConfigToServer({ silent: true });
+        $('#lorecodex_model_status').text(
+            synced
+                ? `已切换模型为：${picked}（已自动同步到服务端 config.json）`
+                : `已选择模型：${picked}（本地已生效）`
+        );
     });
 
     $('#lorecodex_fetch_models').on('click', async () => {
+        const btn = $('#lorecodex_fetch_models');
         const st = $('#lorecodex_model_status');
+        btn.prop('disabled', true);
         st.text('正在拉取模型列表...');
         try {
             const r = await fetch(`${getServerBase(cfg)}/models`, {
@@ -932,11 +1070,9 @@ jQuery(async () => {
             const j = await r.json();
             if (!j.ok) throw new Error(j.error || 'failed');
             const models = Array.isArray(j.models) ? j.models : [];
-            const dl = $('#lorecodex_model_list').empty();
             const sel = $('#lorecodex_model_select').empty();
             sel.append(`<option value="">-- 点击此处从已拉取的 ${models.length} 个模型中选择 --</option>`);
             for (const m of models) {
-                dl.append(`<option value="${escHtml(m)}"></option>`);
                 sel.append(`<option value="${escHtml(m)}" ${m === cfg.chatModel ? 'selected' : ''}>${escHtml(m)}</option>`);
             }
             if (models.length > 0) {
@@ -946,42 +1082,44 @@ jQuery(async () => {
                     $('#lorecodex_chat_model').val(models[0]);
                     sel.val(models[0]);
                     saveSettingsDebounced();
+                    await syncConfigToServer({ silent: true });
                 }
             }
-            st.text(`已拉取 ${models.length} 个模型，可在上方下拉框直接切换（当前：${cfg.chatModel || '未选'}）`);
+            st.text(
+                models.length > 0
+                    ? `已拉取 ${models.length} 个模型，可在上方下拉框直接切换（当前：${cfg.chatModel || '未选'}）`
+                    : '接口返回了 0 个模型，请直接在输入框填写模型名称'
+            );
             if (typeof toastr !== 'undefined') toastr.success(`已拉取 ${models.length} 个模型`);
         } catch (e) {
             st.text('拉取失败: ' + e.message);
             if (typeof toastr !== 'undefined') toastr.error('拉取模型失败: ' + e.message);
+        } finally {
+            btn.prop('disabled', false);
         }
     });
 
     $('#lorecodex_save_srv').on('click', async () => {
-        const st = $('#lorecodex_model_status');
-        try {
-            const body = buildApiConfig(cfg);
-            body.maxTokens = Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null;
-            if (cfg.corpus) body.defaultCorpus = cfg.corpus;
-            const r = await fetch(`${getServerBase(cfg)}/config`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            const j = await r.json();
-            st.text(j.ok ? '已保存配置到 LoreCodex 服务端 config.json' : ('保存失败: ' + j.error));
-            if (j.ok && typeof toastr !== 'undefined') toastr.success('已保存模型配置到 LoreCodex 服务端');
-        } catch (e) {
-            st.text('连接服务端失败: ' + e.message);
+        await syncConfigToServer({ silent: false });
+    });
+
+    $('#lorecodex_test_query').on('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            $('#lorecodex_test_btn').trigger('click');
         }
     });
 
     $('#lorecodex_test_btn').on('click', async () => {
+        const btn = $('#lorecodex_test_btn');
+        if (btn.prop('disabled')) return;
         const q = String($('#lorecodex_test_query').val() || '').trim();
         if (!q) {
             $('#lorecodex_status').text('请输入测试检索问题');
             return;
         }
         const st = $('#lorecodex_status');
+        btn.prop('disabled', true);
         st.text('正在执行树形 Agent 检索...');
         try {
             const ctx = getContext();
@@ -1004,7 +1142,7 @@ jQuery(async () => {
             if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
             lastInjectionSnapshot = {
                 corpus_id: j.corpus_id || cfg.corpus,
-                corpus_name: j.corpus_name || cfg.corpus,
+                corpus_name: j.corpus_name || corporaMap.get(j.corpus_id || cfg.corpus)?.name || cfg.corpus,
                 skip: Boolean(j.skip),
                 reason: j.reason || '',
                 took_ms: j.took_ms,
@@ -1026,6 +1164,8 @@ jQuery(async () => {
             st.text(lines.join('\n'));
         } catch (e) {
             st.text('检索失败: ' + e.message);
+        } finally {
+            btn.prop('disabled', false);
         }
     });
 });

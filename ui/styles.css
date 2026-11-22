@@ -547,7 +547,8 @@ pre.raw-pre {
 
 /* Modals & Command Palette */
 .modal-backdrop {
-  position: fixed; inset: 0; background: rgba(10, 12, 18, 0.55); backdrop-filter: blur(3px);
+  position: fixed; top: 0; left: 0; width: 100vw; width: 100dvw; height: 100vh; height: 100dvh;
+  background: rgba(10, 12, 18, 0.55); backdrop-filter: blur(3px);
   z-index: 100; display: none; align-items: center; justify-content: center; padding: 20px;
 }
 .modal-backdrop.open { display: flex; }
@@ -561,9 +562,14 @@ pre.raw-pre {
   display: flex; align-items: center; justify-content: space-between;
 }
 .modal-title { font-family: var(--heading-font); font-weight: 700; font-size: 15px; }
-.modal-tabs { display: flex; gap: 14px; padding: 0 18px; background: var(--paper-alt); border-bottom: 1px solid var(--rule); }
+.modal-tabs {
+  display: flex; gap: 14px; padding: 0 18px; background: var(--paper-alt);
+  border-bottom: 1px solid var(--rule); overflow-x: auto; flex-shrink: 0;
+  -webkit-overflow-scrolling: touch;
+}
 .modal-tab {
-  padding: 9px 2px; font-size: 12.5px; color: var(--ink-muted); cursor: pointer; border-bottom: 2px solid transparent;
+  padding: 9px 2px; font-size: 12.5px; color: var(--ink-muted); cursor: pointer;
+  border-bottom: 2px solid transparent; white-space: nowrap; flex-shrink: 0;
 }
 .modal-tab.active { color: var(--ink); font-weight: 600; border-bottom-color: var(--seal); }
 .modal-body { padding: 16px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }

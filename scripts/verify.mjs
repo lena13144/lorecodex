@@ -556,7 +556,13 @@ async function main() {
 
     const cfgLocalOk = await postJson('/config', {}, { Origin: BASE });
     assert.strictEqual(cfgLocalOk.status, 200, 'POST /config from localhost origin must succeed');
-    console.log('  PASS: cross-origin write guard & API key exfiltration guard verified');
+
+    const cfgLanOk = await postJson('/config', {}, { Origin: 'http://192.168.1.88:8000' });
+    assert.strictEqual(cfgLanOk.status, 200, 'POST /config from LAN mobile origin must succeed');
+
+    const cfgTailscaleOk = await postJson('/config', {}, { Origin: 'http://100.90.12.34:8000' });
+    assert.strictEqual(cfgTailscaleOk.status, 200, 'POST /config from Tailscale LAN origin must succeed');
+    console.log('  PASS: cross-origin write guard (LAN allowed, foreign blocked) & API key exfiltration guard verified');
 
     console.log('\n[4/9] Testing online corpus config update & reload...');
     const origDetail = await getJson('/corpora/demo-chronicles');

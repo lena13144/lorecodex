@@ -75,16 +75,38 @@ if (cli.port && Number.isFinite(cli.port)) runtimeCfg.port = cli.port;
 if (cli.defaultCorpus) runtimeCfg.defaultCorpus = cli.defaultCorpus;
 
 const PORT = Number(runtimeCfg.port) || 5240;
-const HOST = String(cli.host || process.env.HOST || '127.0.0.1').trim() || '127.0.0.1';
+const HOST = String(cli.host || process.env.HOST || runtimeCfg.host || '127.0.0.1').trim() || '127.0.0.1';
 
-function normalizeBaseUrl(u) {
+function cleanApiBaseUrl(u) {
   return String(u || '')
     .trim()
     .replace(/\/+$/, '')
-    .toLowerCase();
+    .replace(/\/(?:chat\/completions|models)$/i, '')
+    .replace(/\/+$/, '');
 }
 
-function isLocalOrAllowedOrigin(origin) {
+function normalizeBaseUrl(u) {
+  return cleanApiBaseUrl(u).toLowerCase();
+}
+
+function isPrivateOrLocalHostname(hostname) {
+  const h = String(hostname || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
+  if (!h) return false;
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0') return true;
+  if (h.endsWith('.local') || h.endsWith('.lan') || h.endsWith('.home') || h.endsWith('.ts.net')) return true;
+  if (/^127\.\d+\.\d+\.\d+$/.test(h)) return true;
+  if (/^10\.\d+\.\d+\.\d+$/.test(h)) return true;
+  if (/^192\.168\.\d+\.\d+$/.test(h)) return true;
+  if (/^172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(h)) return true;
+  if (/^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+$/.test(h)) return true;
+  if (/^(?:fc|fd|fe80)[0-9a-f]*:/i.test(h)) return true;
+  return false;
+}
+
+function isLocalOrAllowedOrigin(origin, req = null) {
   if (!origin) return true;
   const o = String(origin).trim();
   const extra = String(process.env.ALLOWED_ORIGINS || '')
@@ -92,7 +114,15 @@ function isLocalOrAllowedOrigin(origin) {
     .map((s) => s.trim())
     .filter(Boolean);
   if (extra.includes('*') || extra.includes(o)) return true;
-  return /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(o);
+  try {
+    const u = new URL(o);
+    if (!/^https?:$/i.test(u.protocol)) return false;
+    const reqHost = String(req?.headers?.host || '').trim().toLowerCase();
+    if (reqHost && u.host.toLowerCase() === reqHost) return true;
+    return isPrivateOrLocalHostname(u.hostname);
+  } catch (_) {
+    return false;
+  }
 }
 
 function saveCfg(patch) {
@@ -102,7 +132,7 @@ function saveCfg(patch) {
     typeof patch.chatKey === 'string' && Boolean(patch.chatKey.trim()) && !/^\*+$/.test(patch.chatKey.trim());
   for (const k of ['chatBase', 'chatKey', 'chatModel', 'defaultCorpus']) {
     if (typeof patch[k] === 'string') {
-      const v = patch[k].trim();
+      const v = k === 'chatBase' ? cleanApiBaseUrl(patch[k]) : patch[k].trim();
       if (v && !/^\*+$/.test(v)) runtimeCfg[k] = v;
     }
   }
@@ -129,7 +159,7 @@ function mergeCfg(patch) {
       typeof patch.chatKey === 'string' && Boolean(patch.chatKey.trim()) && !/^\*+$/.test(patch.chatKey.trim());
     for (const k of ['chatBase', 'chatKey', 'chatModel', 'defaultCorpus']) {
       if (typeof patch[k] === 'string') {
-        const v = patch[k].trim();
+        const v = k === 'chatBase' ? cleanApiBaseUrl(patch[k]) : patch[k].trim();
         if (v && !/^\*+$/.test(v)) out[k] = v;
       }
     }
@@ -497,7 +527,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && pathname === '/corpora/import') {
-    if (!isLocalOrAllowedOrigin(req.headers.origin)) {
+    if (!isLocalOrAllowedOrigin(req.headers.origin, req)) {
       return send({ error: 'origin not allowed' }, 403);
     }
     try {
@@ -545,7 +575,7 @@ const server = http.createServer(async (req, res) => {
 
   const corpusCfgMatch = pathname.match(/^\/corpora\/([^/]+)\/config$/);
   if (req.method === 'POST' && corpusCfgMatch) {
-    if (!isLocalOrAllowedOrigin(req.headers.origin)) {
+    if (!isLocalOrAllowedOrigin(req.headers.origin, req)) {
       return send({ error: 'origin not allowed' }, 403);
     }
     try {
@@ -560,7 +590,7 @@ const server = http.createServer(async (req, res) => {
 
   const corpusUpgradeMatch = pathname.match(/^\/corpora\/([^/]+)\/upgrade$/);
   if (req.method === 'POST' && corpusUpgradeMatch) {
-    if (!isLocalOrAllowedOrigin(req.headers.origin)) {
+    if (!isLocalOrAllowedOrigin(req.headers.origin, req)) {
       return send({ error: 'origin not allowed' }, 403);
     }
     try {
@@ -689,7 +719,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && pathname === '/config') {
-    if (!isLocalOrAllowedOrigin(req.headers.origin)) {
+    if (!isLocalOrAllowedOrigin(req.headers.origin, req)) {
       return send({ error: 'origin not allowed' }, 403);
     }
     try {
@@ -702,25 +732,37 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && pathname === '/models') {
-    if (!isLocalOrAllowedOrigin(req.headers.origin)) {
+    if (!isLocalOrAllowedOrigin(req.headers.origin, req)) {
       return send({ ok: false, error: 'origin not allowed' }, 403);
     }
     try {
       const { baseUrl, apiKey } = await readJsonBody(req);
-      const b = String(baseUrl || runtimeCfg.chatBase || '').replace(/\/+$/, '');
+      const b = cleanApiBaseUrl(baseUrl || runtimeCfg.chatBase || '');
       const hasExplicitKey =
         typeof apiKey === 'string' && Boolean(apiKey.trim()) && !/^\*+$/.test(apiKey.trim());
       const reqBase = normalizeBaseUrl(baseUrl);
       const curBase = normalizeBaseUrl(runtimeCfg.chatBase);
       if (reqBase && reqBase !== curBase && !hasExplicitKey) {
-        return send({ ok: false, error: 'custom baseUrl requires an explicit apiKey' }, 400);
+        return send({ ok: false, error: '修改 API Base URL 时请同时输入对应的 API Key（防止旧密钥发送至新地址）' }, 400);
       }
       const k = hasExplicitKey ? apiKey.trim() : runtimeCfg.chatKey;
-      if (!b || !k) return send({ ok: false, error: 'chatBase or chatKey is missing' }, 400);
+      if (!b || !k) return send({ ok: false, error: '请先填写 API Base URL 与 API Key' }, 400);
       const r = await fetch(b + '/models', { headers: { Authorization: 'Bearer ' + k } });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (!r.ok) {
+        const errTxt = await r.text().catch(() => '');
+        throw new Error(`HTTP ${r.status}${errTxt ? ': ' + errTxt.slice(0, 120) : ''}`);
+      }
       const j = await r.json();
-      return send({ ok: true, models: (j.data || []).map((x) => x.id) });
+      const rawList = Array.isArray(j.data) ? j.data : Array.isArray(j.models) ? j.models : [];
+      const models = [
+        ...new Set(
+          rawList
+            .map((x) => (typeof x === 'string' ? x : x?.id || String(x?.name || '').replace(/^models\//, '')))
+            .map((s) => String(s || '').trim())
+            .filter(Boolean)
+        ),
+      ];
+      return send({ ok: true, models });
     } catch (e) {
       return send({ ok: false, error: e.message }, e.statusCode || 400);
     }

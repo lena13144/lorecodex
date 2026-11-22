@@ -112,6 +112,8 @@ export const state = {
   stageMode: 'book',
   view: { type: 'cover', arcId: null, nodeId: null },
   runs: [],
+  runsInitialized: false,
+  lastSeenTopRunId: '',
   activeRunId: null,
   activeRunData: null,
 };

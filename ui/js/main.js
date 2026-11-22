@@ -160,6 +160,16 @@ function setMobilePane(pane) {
   $$('[data-mobile-pane]').forEach((b) => b.classList.toggle('active', b.dataset.mobilePane === next));
 }
 
+function refreshModelMeta() {
+  const st = state.index?.stats || {};
+  if (state.index) {
+    $('#statMeta').textContent = `全录 ${st.arcs || 0} 卷 · ${st.scenes || 0} 幕 · ${fmtChars(st.total_chars || 0)} · 模型 ${state.modelName}`;
+  }
+  if (state.stageMode === 'book' && state.view.type === 'cover') {
+    renderStage();
+  }
+}
+
 // Register cross-module actions
 Object.assign(actions, {
   renderFilters,
@@ -172,6 +182,7 @@ Object.assign(actions, {
   openArcRead,
   setMaxOrder,
   switchCorpus,
+  refreshModelMeta,
   openSettingsModal,
   openCorpusModal,
   openImportModal,
@@ -329,6 +340,18 @@ function wireEvents() {
 
   $('#homeBtn').addEventListener('click', openCover);
   $('#runBtn').addEventListener('click', executeSearch);
+  $('#qOnDemand')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      executeSearch();
+    }
+  });
+  $('#qText')?.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      executeSearch();
+    }
+  });
 
   $('#settingsBtn').addEventListener('click', openSettingsModal);
   $('#corpusCfgBtn').addEventListener('click', openCorpusModal);
