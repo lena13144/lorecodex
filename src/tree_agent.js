@@ -329,6 +329,13 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     throw lastErr;
   }
 
+  function normalizeNodeId(rawId) {
+    return String(rawId || '')
+      .replace(/^(?:node_id=|node:)/i, '')
+      .split('|')[0]
+      .trim();
+  }
+
   async function execTool(name, args, state, effectiveCfg) {
     const maxOrder = state.maxOrder;
     const autoThreshold = corpusConfig.hierarchy?.auto_series_threshold || 250;
@@ -524,7 +531,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     if (name === 'read_scene') {
       const rawSids =
         args?.scene_node_ids ?? args?.node_ids ?? args?.scene_ids ?? args?.node_id ?? args?.scene_id ?? args?.id ?? [];
-      const sids = (Array.isArray(rawSids) ? rawSids : [rawSids]).map((x) => String(x)).filter(Boolean).slice(0, 10);
+      const sids = (Array.isArray(rawSids) ? rawSids : [rawSids]).map(normalizeNodeId).filter(Boolean).slice(0, 10);
       const out = [];
       let totalChars = 0;
       let blockedCount = 0;
@@ -597,7 +604,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       const head = `[全文扫描 ${res.took_ms}ms | 共命中 ${res.total} 幕，其中目录未标客串 ${res.cameo_count} 幕${!res.all_matched ? ' | 注：无单幕同时包含全部词，以下为单词部分命中' : ''}]`;
       const lines = res.hits.map((h) => {
         const ordTag = h.order !== null && h.order !== undefined ? `·序${h.order}` : '';
-        return `- [${h.node_id}|${h.arc_id}${ordTag}] ${h.arc_title} · ${h.title}${h.cameo ? ' [目录未标·客串]' : ''} (命中${h.match_count}处)\n  上下文：${h.snippet}`;
+        return `- [node_id=${h.node_id} | arc_id=${h.arc_id}${ordTag}] ${h.arc_title} · ${h.title}${h.cameo ? ' [目录未标·客串]' : ''} (命中${h.match_count}处)\n  上下文：${h.snippet}`;
       });
       return {
         text: [head, ...lines].join('\n'),
@@ -760,7 +767,9 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       };
     };
 
-    const wantedNodes = Array.isArray(parsed?.selected_nodes) ? parsed.selected_nodes.map(String) : [];
+    const wantedNodes = Array.isArray(parsed?.selected_nodes)
+      ? parsed.selected_nodes.map(normalizeNodeId).filter(Boolean)
+      : [];
     const orderedScenes = [];
     const pickedIds = new Set();
 
