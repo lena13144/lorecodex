@@ -95,7 +95,7 @@ function isPrivateOrLocalHostname(hostname) {
     .toLowerCase()
     .replace(/^\[|\]$/g, '');
   if (!h) return false;
-  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0') return true;
+  if (h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0') return true;
   if (h.endsWith('.local') || h.endsWith('.lan') || h.endsWith('.home') || h.endsWith('.ts.net')) return true;
   if (/^127\.\d+\.\d+\.\d+$/.test(h)) return true;
   if (/^10\.\d+\.\d+\.\d+$/.test(h)) return true;
@@ -107,16 +107,17 @@ function isPrivateOrLocalHostname(hostname) {
 }
 
 function isLocalOrAllowedOrigin(origin, req = null) {
-  if (!origin) return true;
+  if (!origin || origin === 'null') return true;
   const o = String(origin).trim();
   const extra = String(process.env.ALLOWED_ORIGINS || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
   if (extra.includes('*') || extra.includes(o)) return true;
+  if (/^(?:tauri|capacitor|app):\/\/localhost(?::\d+)?$/i.test(o)) return true;
   try {
     const u = new URL(o);
-    if (!/^https?:$/i.test(u.protocol)) return false;
+    if (!/^(?:https?|tauri|capacitor|app):$/i.test(u.protocol)) return false;
     const reqHost = String(req?.headers?.host || '').trim().toLowerCase();
     if (reqHost && u.host.toLowerCase() === reqHost) return true;
     return isPrivateOrLocalHostname(u.hostname);

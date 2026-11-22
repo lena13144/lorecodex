@@ -562,7 +562,13 @@ async function main() {
 
     const cfgTailscaleOk = await postJson('/config', {}, { Origin: 'http://100.90.12.34:8000' });
     assert.strictEqual(cfgTailscaleOk.status, 200, 'POST /config from Tailscale LAN origin must succeed');
-    console.log('  PASS: cross-origin write guard (LAN allowed, foreign blocked) & API key exfiltration guard verified');
+
+    const cfgTauriOk = await postJson('/config', {}, { Origin: 'http://tauri.localhost' });
+    assert.strictEqual(cfgTauriOk.status, 200, 'POST /config from TauriTavern http://tauri.localhost origin must succeed');
+
+    const cfgTauriProtoOk = await postJson('/config', {}, { Origin: 'tauri://localhost' });
+    assert.strictEqual(cfgTauriProtoOk.status, 200, 'POST /config from TauriTavern tauri://localhost origin must succeed');
+    console.log('  PASS: cross-origin write guard (LAN + TauriTavern allowed, foreign blocked) & API key exfiltration guard verified');
 
     console.log('\n[4/9] Testing online corpus config update & reload...');
     const origDetail = await getJson('/corpora/demo-chronicles');
