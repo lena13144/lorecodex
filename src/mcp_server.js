@@ -28,8 +28,11 @@ const CONFIG_PATH = cli.configFile || CFG_FILE;
 function loadRuntimeConfig() {
   const base = {
     defaultCorpus: 'demo-chronicles',
-    chatBase: process.env.CHAT_BASE || 'https://api.openai.com/v1',
-    chatKey: process.env.CHAT_KEY || '',
+    chatBase:
+      process.env.CHAT_BASE ||
+      process.env.OPENAI_BASE_URL ||
+      (process.env.DEEPSEEK_API_KEY ? 'https://api.deepseek.com/v1' : 'https://api.openai.com/v1'),
+    chatKey: process.env.CHAT_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || '',
     chatModel: process.env.CHAT_MODEL || 'deepseek-chat',
     maxTokens: process.env.CHAT_MAX_TOKENS ? Number(process.env.CHAT_MAX_TOKENS) || null : null,
   };
@@ -187,7 +190,7 @@ const MCP_TOOLS = [
   {
     name: 'lorecodex_build_corpus',
     description:
-      'Build a new 3-tier LoreCodex corpus from a local novel (.txt, .md, .epub) or SillyTavern worldbook / character card V2 (.json, .jsonl), or run an in-place LLM summary upgrade on an existing corpus, then hot-reload the server.',
+      'Build a new 3-tier LoreCodex corpus from a local novel (.txt, .md, .epub) or SillyTavern worldbook / character card V2 (.json, .jsonl), or run an in-place LLM summary upgrade on an existing corpus, then hot-reload the server. IMPORTANT: LLM directory summarization (`use_llm: true`, default) is essential for LoreCodex 3-tier tree retrieval because it synthesizes pronoun-resolved scene summaries, volume overviews, character alias groups, and glossary terms. For multi-million-character books, you can either run `use_llm: true` with `series` / `limit_arcs` per volume, or pass `use_llm: false` ONLY as an initial structural split followed immediately by `action: "upgrade"` or `lorecodex_update_index_meta`.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -200,11 +203,74 @@ const MCP_TOOLS = [
         input_path: { type: 'string', description: 'Absolute path to source file (required for build_novel / build_lore)' },
         name: { type: 'string', description: 'Display name of the work' },
         merge_into: { type: 'string', description: 'For build_lore: optional existing corpus_id to merge lore entries into' },
-        use_llm: { type: 'boolean', description: 'For build_novel/build_lore: whether to run LLM summarization during build (default false = instant heuristic build)' },
-        series: { type: 'string', description: 'For upgrade: optional volume/series name to upgrade selectively' },
-        limit_arcs: { type: 'number', description: 'For upgrade: optional max number of chapters to upgrade in this batch' },
+        use_llm: {
+          type: 'boolean',
+          description:
+            'Whether to run LLM directory summarization, volume summary, and character alias synthesis (default: true). Only set to false if you intend to immediately run action="upgrade" per volume or populate summaries yourself via lorecodex_update_index_meta.',
+        },
+        series: { type: 'string', description: 'Optional volume/series name to build or upgrade selectively (e.g. "第一卷")' },
+        limit_arcs: { type: 'number', description: 'Optional max number of chapters to summarize with LLM in this batch' },
+        workers: { type: 'number', description: 'Concurrent LLM worker threads (default 8)' },
+        chat_base: { type: 'string', description: 'Optional OpenAI-compatible API Base URL override for LLM build' },
+        chat_key: { type: 'string', description: 'Optional API Key override for LLM build' },
+        chat_model: { type: 'string', description: 'Optional model name override for LLM build (e.g. "deepseek-chat")' },
       },
       required: ['action', 'corpus_id'],
+    },
+  },
+  {
+    name: 'lorecodex_update_index_meta',
+    description:
+      'Directly write or enrich LLM directory metadata (scene titles/summaries/tone_tags, chapter descriptions/characters, volume series_summaries, character alias groups, and glossary terms) into a corpus without needing an external sidecar API key. Ideal when the host Agent (Claude Code, DeepSeek Harness, Cursor, Antigravity) reads chapters via lorecodex_read_scenes and synthesizes the directory metadata itself.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        corpus: { type: 'string', description: 'Target corpus ID (omit to use default corpus)' },
+        scenes: {
+          type: 'array',
+          description: 'Optional array of scene metadata updates: [{ node_id, title, summary, tone_tags }]',
+          items: {
+            type: 'object',
+            properties: {
+              node_id: { type: 'string' },
+              title: { type: 'string' },
+              summary: { type: 'string' },
+              tone_tags: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['node_id'],
+          },
+        },
+        arcs: {
+          type: 'array',
+          description: 'Optional array of chapter/arc metadata updates: [{ arc_id, description, characters, tone_tags, key_items }]',
+          items: {
+            type: 'object',
+            properties: {
+              arc_id: { type: 'string' },
+              description: { type: 'string' },
+              characters: { type: 'array', items: { type: 'string' } },
+              tone_tags: { type: 'array', items: { type: 'string' } },
+              key_items: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['arc_id'],
+          },
+        },
+        series_summaries: {
+          type: 'object',
+          description: 'Optional map of { "卷名": "60-120字全卷主线剧情与转折总览" } to merge into tree_index.json',
+        },
+        aliases: {
+          type: 'array',
+          description: 'Optional 2D array of character alias groups to merge into corpus.json, e.g. [["苏璃", "Zero-7", "璃姐"]]',
+          items: { type: 'array', items: { type: 'string' } },
+        },
+        glossary: {
+          type: 'array',
+          description: 'Optional array of glossary entries ("术语名：一句话说明") to merge into corpus.json',
+          items: { type: 'string' },
+        },
+      },
+      required: [],
     },
   },
 ];
@@ -217,14 +283,19 @@ async function handleToolCall(name, args = {}) {
     const defId = corpusManager.hasCorpus(cfg.defaultCorpus) ? cfg.defaultCorpus : list[0]?.id || '';
     const lines = [
       `LoreCodex Mounted Corpora (${list.length} total, default="${defId}"):`,
-      ...list.map(
-        (c) =>
-          `- [${c.id}] 《${c.name}》: ${c.stats.arcs} arcs, ${c.stats.scenes} scenes, ${formatCharCount(
-            c.stats.total_chars
-          )}${c.stats.max_order ? `, max_order=${c.stats.max_order}` : ''}${
-            c.series?.length ? ` | series(${c.series.length}): ${c.series.slice(0, 8).join(', ')}` : ''
-          }`
-      ),
+      ...list.map((c) => {
+        const llmArcs = c.stats.llm_arcs ?? 0;
+        const llmScenes = c.stats.llm_scenes ?? 0;
+        const llmNote =
+          c.stats.llm_scenes !== undefined
+            ? ` | LLM_TOC: ${llmArcs}/${c.stats.arcs} arcs (${llmScenes}/${c.stats.scenes} scenes)`
+            : '';
+        return `- [${c.id}] 《${c.name}》: ${c.stats.arcs} arcs, ${c.stats.scenes} scenes, ${formatCharCount(
+          c.stats.total_chars
+        )}${c.stats.max_order ? `, max_order=${c.stats.max_order}` : ''}${llmNote}${
+          c.series?.length ? ` | series(${c.series.length}): ${c.series.slice(0, 8).join(', ')}` : ''
+        }`;
+      }),
     ];
     return lines.join('\n');
   }
@@ -467,64 +538,234 @@ async function handleToolCall(name, args = {}) {
       throw new Error('corpus_id must be 1-48 alphanumeric, underscore, or hyphen characters');
     }
     const pyBin = detectPythonBin();
-    if (action === 'upgrade') {
-      const pyArgs = [
-        path.join(ROOT_DIR, 'builders', 'build_novel.py'),
-        '--upgrade',
-        '--corpus-id',
-        corpusId,
-        '--out-dir',
-        CORPORA_DIR,
-        '--config',
-        CONFIG_PATH,
-      ];
-      if (args.series) pyArgs.push('--series', String(args.series));
-      if (Number(args.limit_arcs) > 0) pyArgs.push('--limit-arcs', String(Number(args.limit_arcs)));
-      const stdout = execFileSync(pyBin, pyArgs, { cwd: ROOT_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      corpusManager.reload();
-      return `Upgraded and reloaded corpus "${corpusId}":\n${stdout.trim()}`;
+    const useLlm = args.use_llm !== false; // Default true: LLM directory building is required for full 3-tier tree quality
+    const workers = Math.min(Math.max(Number(args.workers) || 8, 1), 24);
+
+    // Prepare effective config file for Python builders (supports inline chat_base/chat_key/chat_model or env vars)
+    const runtimeCfg = loadRuntimeConfig();
+    if (args.chat_base) runtimeCfg.chatBase = String(args.chat_base).trim();
+    if (args.chat_key) runtimeCfg.chatKey = String(args.chat_key).trim();
+    if (args.chat_model) runtimeCfg.chatModel = String(args.chat_model).trim();
+
+    if ((useLlm || action === 'upgrade') && (!runtimeCfg.chatBase || !runtimeCfg.chatKey)) {
+      throw new Error(
+        'LLM directory construction requires an API key (chat_key / CHAT_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY or config.json). ' +
+          'Either pass chat_base/chat_key/chat_model to lorecodex_build_corpus, configure config.json, or if you want the host Agent itself to write summaries without an external API key, run with use_llm=false and then call lorecodex_update_index_meta.'
+      );
     }
 
-    const inputPath = path.resolve(String(args.input_path || ''));
-    if (!args.input_path || !fs.existsSync(inputPath)) {
-      throw new Error(`input_path does not exist: ${inputPath}`);
+    let tmpCfgPath = null;
+    let effectiveCfgPath = CONFIG_PATH;
+    if (useLlm || action === 'upgrade') {
+      if (!fs.existsSync(CONFIG_PATH) || args.chat_base || args.chat_key || args.chat_model) {
+        tmpCfgPath = path.join(ROOT_DIR, `.tmp-mcp-cfg-${Date.now()}.json`);
+        fs.writeFileSync(tmpCfgPath, JSON.stringify(runtimeCfg, null, 2), 'utf8');
+        effectiveCfgPath = tmpCfgPath;
+      }
     }
-    if (action === 'build_lore') {
+
+    try {
+      if (action === 'upgrade') {
+        const pyArgs = [
+          path.join(ROOT_DIR, 'builders', 'build_novel.py'),
+          '--upgrade',
+          '--corpus-id',
+          corpusId,
+          '--out-dir',
+          CORPORA_DIR,
+          '--config',
+          effectiveCfgPath,
+          '--workers',
+          String(workers),
+        ];
+        if (args.series) pyArgs.push('--series', String(args.series));
+        if (Number(args.limit_arcs) > 0) pyArgs.push('--limit-arcs', String(Number(args.limit_arcs)));
+        const stdout = execFileSync(pyBin, pyArgs, { cwd: ROOT_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        corpusManager.reload();
+        return `Upgraded and reloaded corpus "${corpusId}" with LLM directory & alias synthesis:\n${stdout.trim()}`;
+      }
+
+      const inputPath = path.resolve(String(args.input_path || ''));
+      if (!args.input_path || !fs.existsSync(inputPath)) {
+        throw new Error(`input_path does not exist: ${inputPath}`);
+      }
+      if (action === 'build_lore') {
+        const pyArgs = [
+          path.join(ROOT_DIR, 'builders', 'build_lore.py'),
+          '--input',
+          inputPath,
+          '--corpus-id',
+          corpusId,
+          '--out-dir',
+          CORPORA_DIR,
+          '--config',
+          effectiveCfgPath,
+          '--filter-game-stats',
+        ];
+        if (args.name) pyArgs.push('--name', String(args.name));
+        if (args.merge_into) pyArgs.push('--merge-into', path.join(CORPORA_DIR, String(args.merge_into)));
+        if (!useLlm) pyArgs.push('--no-llm');
+        const stdout = execFileSync(pyBin, pyArgs, { cwd: ROOT_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        corpusManager.reload();
+        return `Built lore corpus "${args.merge_into || corpusId}" (use_llm=${useLlm}):\n${stdout.trim()}`;
+      }
+
       const pyArgs = [
-        path.join(ROOT_DIR, 'builders', 'build_lore.py'),
+        path.join(ROOT_DIR, 'builders', 'build_novel.py'),
         '--input',
         inputPath,
         '--corpus-id',
         corpusId,
+        '--name',
+        String(args.name || corpusId),
         '--out-dir',
         CORPORA_DIR,
-        '--filter-game-stats',
+        '--config',
+        effectiveCfgPath,
+        '--workers',
+        String(workers),
       ];
-      if (args.name) pyArgs.push('--name', String(args.name));
-      if (args.merge_into) pyArgs.push('--merge-into', path.join(CORPORA_DIR, String(args.merge_into)));
-      if (!args.use_llm) pyArgs.push('--no-llm');
+      if (args.series) pyArgs.push('--series', String(args.series));
+      if (Number(args.limit_arcs) > 0) pyArgs.push('--limit-arcs', String(Number(args.limit_arcs)));
+      if (!useLlm) pyArgs.push('--no-llm');
       const stdout = execFileSync(pyBin, pyArgs, { cwd: ROOT_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       corpusManager.reload();
-      return `Built lore corpus "${args.merge_into || corpusId}":\n${stdout.trim()}`;
+      const followUp = !useLlm
+        ? '\n[IMPORTANT] Corpus was split without LLM summaries (use_llm=false). You MUST now either call lorecodex_build_corpus(action="upgrade") per volume or populate LLM directory summaries, series_summaries, and character aliases via lorecodex_update_index_meta.'
+        : '';
+      return `Built novel corpus "${corpusId}" (use_llm=${useLlm}):\n${stdout.trim()}${followUp}`;
+    } finally {
+      if (tmpCfgPath && fs.existsSync(tmpCfgPath)) {
+        try {
+          fs.unlinkSync(tmpCfgPath);
+        } catch (_) {}
+      }
+    }
+  }
+
+  if (name === 'lorecodex_update_index_meta') {
+    const cid = resolveCorpusId(args.corpus);
+    const corpusDir = path.join(CORPORA_DIR, cid);
+    const idxPath = path.join(corpusDir, 'tree_index.json');
+    const cfgFilePath = path.join(corpusDir, 'corpus.json');
+    if (!fs.existsSync(idxPath)) {
+      throw new Error(`tree_index.json not found for corpus "${cid}"`);
+    }
+    const idxData = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
+    const arcs = idxData.arcs || [];
+    const arcMap = new Map(arcs.map((a) => [String(a.arc_id), a]));
+    const sceneMap = new Map();
+    for (const a of arcs) {
+      for (const sc of a.scenes || []) {
+        sceneMap.set(String(sc.node_id), { sc, arc: a });
+      }
     }
 
-    const pyArgs = [
-      path.join(ROOT_DIR, 'builders', 'build_novel.py'),
-      '--input',
-      inputPath,
-      '--corpus-id',
-      corpusId,
-      '--name',
-      String(args.name || corpusId),
-      '--out-dir',
-      CORPORA_DIR,
-      '--config',
-      CONFIG_PATH,
-    ];
-    if (!args.use_llm) pyArgs.push('--no-llm');
-    const stdout = execFileSync(pyBin, pyArgs, { cwd: ROOT_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    let updatedScenes = 0;
+    let updatedArcs = 0;
+    if (Array.isArray(args.scenes)) {
+      for (const item of args.scenes) {
+        const hit = sceneMap.get(String(item?.node_id || '').trim());
+        if (!hit) continue;
+        if (item.title) hit.sc.title = String(item.title).trim();
+        if (item.summary) hit.sc.summary = String(item.summary).trim();
+        if (Array.isArray(item.tone_tags) && item.tone_tags.length) {
+          hit.sc.tone_tags = item.tone_tags.map((x) => String(x).trim()).filter(Boolean);
+        }
+        updatedScenes += 1;
+        // Auto-propagate single-scene summary to its parent arc if arc description wasn't explicitly set
+        if ((hit.arc.scenes || []).length === 1 && item.summary && !hit.arc._host_updated) {
+          hit.arc.description = String(item.summary).trim();
+        }
+      }
+    }
+
+    if (Array.isArray(args.arcs)) {
+      for (const item of args.arcs) {
+        const arc = arcMap.get(String(item?.arc_id || '').trim());
+        if (!arc) continue;
+        if (item.description) arc.description = String(item.description).trim();
+        if (Array.isArray(item.characters) && item.characters.length) {
+          arc.characters = item.characters.map((x) => String(x).trim()).filter(Boolean);
+        }
+        if (Array.isArray(item.tone_tags) && item.tone_tags.length) {
+          arc.tone_tags = item.tone_tags.map((x) => String(x).trim()).filter(Boolean);
+        }
+        if (Array.isArray(item.key_items) && item.key_items.length) {
+          arc.key_items = item.key_items.map((x) => String(x).trim()).filter(Boolean);
+        }
+        arc._host_updated = true;
+        updatedArcs += 1;
+      }
+    }
+    for (const a of arcs) delete a._host_updated;
+
+    let updatedSeries = 0;
+    if (args.series_summaries && typeof args.series_summaries === 'object') {
+      idxData.series_summaries = idxData.series_summaries || {};
+      for (const [k, v] of Object.entries(args.series_summaries)) {
+        const val = String(v || '').trim();
+        if (k && val) {
+          idxData.series_summaries[k] = val;
+          updatedSeries += 1;
+        }
+      }
+    }
+
+    idxData.stats = idxData.stats || {};
+    idxData.stats.llm_scenes = Math.min(
+      idxData.stats.scenes || sceneMap.size,
+      (idxData.stats.llm_scenes || 0) + updatedScenes
+    );
+    idxData.stats.llm_arcs = Math.min(
+      idxData.stats.arcs || arcs.length,
+      (idxData.stats.llm_arcs || 0) + (updatedArcs || (updatedScenes > 0 ? 1 : 0))
+    );
+    fs.writeFileSync(idxPath, JSON.stringify(idxData, null, 2), 'utf8');
+
+    let addedAliasGroups = 0;
+    let addedGlossary = 0;
+    if ((Array.isArray(args.aliases) && args.aliases.length) || (Array.isArray(args.glossary) && args.glossary.length)) {
+      const rawCfg = fs.existsSync(cfgFilePath) ? JSON.parse(fs.readFileSync(cfgFilePath, 'utf8')) : { id: cid };
+      if (Array.isArray(args.aliases) && args.aliases.length) {
+        const existing = Array.isArray(rawCfg.aliases) ? rawCfg.aliases : [];
+        for (const grp of args.aliases) {
+          if (!Array.isArray(grp)) continue;
+          const clean = [...new Set(grp.map((x) => String(x || '').trim()).filter(Boolean))];
+          if (clean.length < 2) continue;
+          const cleanLow = new Set(clean.map((x) => x.toLowerCase()));
+          const matchIdx = existing.findIndex((eg) => Array.isArray(eg) && eg.some((t) => cleanLow.has(String(t).toLowerCase())));
+          if (matchIdx >= 0) {
+            const combined = [...existing[matchIdx]];
+            for (const c of clean) {
+              if (!combined.some((t) => String(t).toLowerCase() === c.toLowerCase())) combined.push(c);
+            }
+            existing[matchIdx] = combined;
+          } else {
+            existing.push(clean);
+          }
+          addedAliasGroups += 1;
+        }
+        rawCfg.aliases = existing;
+      }
+      if (Array.isArray(args.glossary) && args.glossary.length) {
+        const existingG = Array.isArray(rawCfg.glossary) ? rawCfg.glossary : [];
+        for (const g of args.glossary) {
+          const item = String(g || '').trim();
+          if (!item) continue;
+          const head = item.split(/[：:]/)[0].trim().toLowerCase();
+          if (!existingG.some((eg) => String(eg).split(/[：:]/)[0].trim().toLowerCase() === head)) {
+            existingG.push(item);
+            addedGlossary += 1;
+          }
+        }
+        rawCfg.glossary = existingG;
+      }
+      fs.writeFileSync(cfgFilePath, JSON.stringify(rawCfg, null, 2), 'utf8');
+    }
+
     corpusManager.reload();
-    return `Built novel corpus "${corpusId}":\n${stdout.trim()}`;
+    return `[${cid}] Updated LLM directory metadata and hot-reloaded: scenes=${updatedScenes}, arcs=${updatedArcs}, series_summaries=${updatedSeries}, alias_groups_merged=${addedAliasGroups}, glossary_added=${addedGlossary}`;
   }
 
   throw new Error(`Unknown MCP tool: ${name}`);

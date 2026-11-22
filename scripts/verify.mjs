@@ -653,7 +653,7 @@ async function testMcpAndBrowserEngine() {
       corporaDir: path.join(ROOT, 'corpora'),
       defaultCorpus: 'demo-chronicles',
     });
-    assert.strictEqual(regList.length, 8, 'DSH plugin must register all 8 LoreCodex tools');
+    assert.strictEqual(regList.length, 9, 'DSH plugin must register all 9 LoreCodex tools');
     const dshGrepTool = registeredTools.get('lorecodex_grep_scenes');
     assert(dshGrepTool, 'lorecodex_grep_scenes must be registered in Cordis ctx.tools');
     assert.strictEqual(dshGrepTool.parameters.query.required, true);
@@ -662,8 +662,9 @@ async function testMcpAndBrowserEngine() {
     const renderedBlocks = dshGrepTool.output.render({ query: 'Zero-7' }, dshGrepVal);
     assert.strictEqual(renderedBlocks[0]?.type, 'text');
     assert(renderedBlocks[0]?.text.includes('scenes matched'));
+    assert(registeredTools.has('lorecodex_update_index_meta'), 'lorecodex_update_index_meta must be registered');
 
-    console.log('  PASS: MCP stdio server (8 tools), DeepSeek Harness (Cordis) plugin, .lorepack export, and In-Browser Serverless Engine verified');
+    console.log('  PASS: MCP stdio server (9 tools), DeepSeek Harness (Cordis) plugin, .lorepack export, and In-Browser Serverless Engine verified');
   } finally {
     mcpProc.kill();
   }
