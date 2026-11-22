@@ -1,30 +1,31 @@
 # LoreCodex (`st-tree-lore`)
 
 [![CI](https://github.com/lena13144/lorecodex/actions/workflows/ci.yml/badge.svg)](https://github.com/lena13144/lorecodex/actions/workflows/ci.yml)
-![Node.js >= 18](https://img.shields.io/badge/Node.js-%3E%3D%2018-339933?style=flat-square&logo=node.js&logoColor=white)
+![Pure Frontend & Node >= 18](https://img.shields.io/badge/Runtime-Browser%20IndexedDB%20%7C%20Node%20%3E%3D18-339933?style=flat-square)
 ![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-0ea5e9?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b?style=flat-square)
 
-**Vectorless Tree-Reasoning + Millisecond In-RAM Alias Grep + Native-Reasoning Sidecar Memory Agent for Long-Form Fiction, Game Lore & SillyTavern Fanfic / Canon Character Cards**
+**Vectorless Tree-Reasoning + Millisecond In-RAM Alias Grep + Native-Reasoning Sidecar Memory Agent for Long-Form Fiction, Game Lore, SillyTavern / TauriTavern & Native AI Agents**
 
-> Zero dependencies. Zero vector DB. Zero chunk fragmentation.  
-> Combine multi-million-character novels, game event scripts, and SillyTavern worldbooks into a single `Series → Arc → Scene` narrative tree. Let a fast, native-reasoning sidecar model navigate the Table of Contents, scan millions of characters in milliseconds with alias-aware `grep_scenes`, read complete scenes verbatim, and hand grounded narrative cues to your main RP model.
+> **Zero backend required. Zero dependencies. Zero vector DB. Zero chunk fragmentation.**  
+> Combine multi-million-character novels (`.txt` / `.epub` / `.md`), game event scripts, and SillyTavern worldbooks into a single `Series → Arc → Scene` narrative tree. Let a fast, native-reasoning sidecar model navigate the Table of Contents concurrently, scan millions of characters in milliseconds with alias-aware `grep_scenes`, read complete scenes verbatim in batches, and hand grounded narrative cues to your main model.
 
 [简体中文说明 (Default)](./README.md)
 
 ---
 
-## Why LoreCodex for Fanfic & Canon Character Cards?
+## Why LoreCodex?
 
-Building or playing SillyTavern character cards based on long web novels or massive game worlds usually forces a painful tradeoff: hand-crafting hundreds of keyword-triggered worldbook entries takes days and bloats context, while traditional vector RAG slices iconic dialogues into 500-character fragments, fails on character nicknames/codenames, and leaks late-story spoilers into early-timeline roleplay.
-
-LoreCodex solves this directly:
-
-1. **Unify Original Novels + Worldbooks + V2 Character Cards**: Drag and drop multi-million-character `.txt` / `.epub` / `.md` novels, SillyTavern worldbook `.json` files, or Character Card V2 `.json` files (auto-extracting embedded `character_book`) into one unified 3-tier tree.
-2. **Verbatim Scene Injection**: `read_scene` injects complete, un-truncated original scenes so your main RP model preserves canon dialogue voice, emotional nuance, and scene continuity without OOC drift.
-3. **Millisecond Alias Expansion & Uncredited Cameo Detection**: Searching any character name automatically expands all configured or LLM-synthesized aliases across millions of characters in `< 15ms`, prioritizing scenes where a character speaks in the text even if uncredited in the chapter header.
-4. **Hardware-Level Spoiler Gate (`maxOrder`)**: Start roleplaying from Volume 1 or any mid-story turning point—`order <= maxOrder` is strictly enforced across TOC, Grep, scene reads, and agent tools while preserving timeless lore (`order: null`).
-5. **Native Reasoning & Anti-Hallucination**: Preserves modern models' native thinking (`reasoning_content`) without hardcoded `max_tokens` ceilings—proactively tracing upstream causal setups, correcting false premises in user queries, and cleanly skipping ungrounded OC queries.
+1. **100% Serverless-First In-Browser Engine for SillyTavern & TauriTavern (Desktop & Mobile)**:  
+   The extension bundles a complete **IndexedDB in-browser engine (`browser_engine.js`)** and **embedded Archival Codex & Trace Workbench UI (`extension/st-tree-lore/ui/`)**. Once installed via GitHub URL in SillyTavern or TauriTavern, **no Node.js, Python, or Termux backend process is required**—build trees, run concurrent LLM directory summarization with checkpoint resume, browse the Codex, and replay waterfall traces purely inside your browser or mobile WebView.
+2. **Unify Original Novels + Worldbooks + V2 Character Cards**:  
+   Natively parses `.txt` (auto UTF-8 / UTF-16 / GB18030 detection), `.epub` (pure-browser ZIP extraction via native `DecompressionStream`), `.md`, SillyTavern worldbook `.json`, Character Card V2 `.json` (`character_book`), and single-file `.lorepack.json` bundles into one unified 3-tier tree.
+3. **LLM Directory Construction & Auto-Alias Synthesis**:  
+   Concurrent per-volume LLM directory summarization resolves pronouns into canonical names, generates scene summaries and volume `series_summaries`, and automatically synthesizes 2D character `aliases` and `glossary` terms with real-time IndexedDB / JSONL checkpointing.
+4. **Verbatim Scene Injection & Millisecond Cameo Grep**:  
+   `read_scene` (up to 10 scenes per batch call) injects complete, un-truncated original scenes while `grep_scenes` expands character aliases across millions of characters in `< 15ms` and flags uncredited `[CAMEO]` appearances.
+5. **Hardware-Level Spoiler Gate (`maxOrder`)**:  
+   `order <= maxOrder` is strictly enforced across TOC, Grep, scene reads, and agent tools while preserving timeless lore (`order: null`).
 
 ---
 
@@ -36,112 +37,17 @@ LoreCodex solves this directly:
 
 ---
 
-## Core Architecture: Progressive Tree Disclosure
+## Quick Start (Zero-Backend Default for SillyTavern & TauriTavern)
 
-```text
-SillyTavern Chat Turn / API Request
-   │
-   ▼  Dynamic System Prompt (corpus config + 4 query topologies + guardrails)
-   ├──► Tier 0 (Auto-Fold for 250+ Arcs): `list_series`
-   │       Overview of volumes/series and `series_summaries` on massive novels.
-   │
-   ├──► Tier 1: `list_story_arcs` (Compact Spine Catalog)
-   │       Filterable by series, category, character (alias-expanded), keyword, or tone.
-   │
-   ├──► Tier 2: `get_arc_scenes` OR `grep_scenes` (Milliseconds In-RAM Scan)
-   │       • Expands scene summaries ONLY for chosen arcs;
-   │       • `grep_scenes` resolves character aliases, prioritizes uncredited cameos,
-   │         and scans multi-language quotes in RAM (~1–15ms on multi-million char corpora).
-   │
-   └──► Tier 3: `read_scene` (Verbatim Un-truncated Scenes + Optional Graph & Outlines)
-           Reads complete scenes before writing a structured `guide`, enforcing
-           `maxOrder` spoiler gates and rejecting false user premises.
-```
-
----
-
-## Installation Guide (PC, One-Click SillyTavern GitHub Install & Mobile)
-
-### 1. PC (Windows / macOS / Linux)
-
-#### Step A: One-Click Extension Install in SillyTavern (Recommended)
-1. In SillyTavern, open **Extensions → Install Extension**;
-2. Paste the repository URL:
+1. **One-Click Install**: In SillyTavern or TauriTavern, open **Extensions → Install Extension** and paste:
    ```text
    https://github.com/lena13144/lorecodex
    ```
-3. SillyTavern clones the repository directly into your extensions folder (`<SillyTavern>/data/default-user/extensions/lorecodex` or `<SillyTavern>/public/scripts/extensions/third-party/lorecodex`) and supports one-click updates from the Extensions manager.  
-   *(Alternatively, copy `extension/st-tree-lore/` into `<SillyTavern>/public/scripts/extensions/third-party/st-tree-lore/`).*
-
-#### Step B: Start the LoreCodex Backend Server
-Ensure [Node.js (>=18)](https://nodejs.org/) and [Python 3](https://www.python.org/) are installed. Inside the cloned repository directory, run:
-
-```bash
-node src/server.js
-# or: npm start
-```
-
-Once you see `LoreCodex server listening on http://127.0.0.1:5240`, reload SillyTavern, expand **LoreCodex 树形典籍检索 (st-tree-lore)**, and click **「打开书阁」** (or type `/loreui`) to open the fullscreen Workbench overlay directly inside SillyTavern.
-
----
-
-### 2. Mobile Setup (Android Termux & LAN Browser)
-
-- **Option A · Local Android Termux**:  
-  Because LoreCodex has zero compiled C++ or third-party Python/npm dependencies, it runs out of the box in Termux (`pkg install nodejs python git`):
-  ```bash
-  git clone https://github.com/lena13144/lorecodex.git ~/lorecodex
-  cd ~/lorecodex
-  node src/server.js
-  ```
-  Install the extension in SillyTavern via `https://github.com/lena13144/lorecodex`, then tap **「打开书阁」** (`/loreui`) on your phone—the Workbench automatically switches to a mobile bottom-tab layout (`<= 860px`) where you can upload `.txt` / `.epub` / `.json` files directly from phone storage.
-- **Option B · PC / NAS Backend + Mobile Browser over LAN**:  
-  Start the server on your PC with LAN binding and origin allowance:
-  ```bash
-  ALLOWED_ORIGINS=* node src/server.js --host 0.0.0.0 --port 5240
-  ```
-  Then set the Server URL in SillyTavern's LoreCodex extension panel on your mobile browser to `http://<your-pc-lan-ip>:5240`.
-
----
-
-## Building & Upgrading Trees (Zero-CLI Web Workflow or CLI)
-
-### Web 3-Step Workflow
-1. **Configure Sidecar Model**: Open the Workbench (`http://127.0.0.1:5240` or `/loreui`), click **设置 (`Settings`)**, and fill in your OpenAI-compatible API Base URL, API Key, and Model (`Max Tokens` left blank uses the model's native limit).
-2. **Instant Offline Tree Import**: Click **导入 (`Import`)**, drop your `.txt` (auto UTF-8/GB18030), `.epub`, or `.md` novel, and check **离线快速建树 (`--no-llm`)** to build a 3-tier tree in seconds. Optionally import a SillyTavern worldbook `.json` or Character Card V2 `.json` with **并入已有书库 (`--merge-into`)**.
-3. **In-Place Per-Volume LLM Upgrade**: Open **书库配置 (`Corpus Config`) → LLM 目录补全 (`LLM Upgrade`)**, select a specific volume (`series`) or chapter range, and start an in-place concurrent LLM upgrade. Single-scene chapters automatically reuse leaf summaries to save tokens, and upon completion the builder synthesizes volume `series_summaries`, character `aliases`, and `glossary` terms into `corpus.json` with JSONL checkpoint resume.
-
-### CLI Builders
-
-```bash
-# 1. Fast offline heuristic build (zero API cost):
-python3 builders/build_novel.py --input path/to/novel.epub --corpus-id my-novel --name "My Novel" --no-llm
-
-# 2. In-place per-volume LLM upgrade + auto alias/glossary/series summary synthesis:
-python3 builders/build_novel.py --upgrade --corpus-id my-novel --series "Volume 1" --workers 8
-
-# 3. Merge a SillyTavern Worldbook or V2 Character Card into the same tree:
-python3 builders/build_lore.py --input path/to/worldbook.json --corpus-id my-novel --merge-into corpora/my-novel --filter-game-stats --no-llm
-```
-
----
-
-## HTTP API Reference
-
-| Method & Path | Description |
-| :--- | :--- |
-| `GET /` \| `GET /ui` | Serve Archival Codex & Trace Workbench UI |
-| `GET /health` | Server status, boot timing, and registered corpora summary |
-| `GET /corpora` \| `GET /corpora/:id` | List all discovered corpus packs or detailed metadata for one corpus |
-| `POST /corpora/:id/config` | Update `corpus.json` online and hot-reload that corpus agent |
-| `POST /corpora/import` | Upload `.txt` / `.md` / `.epub` / `.json` / `.jsonl` and launch async build job |
-| `POST /corpora/:id/upgrade` | Launch in-place LLM directory upgrade & metadata synthesis by volume or arc range |
-| `POST /corpora/reload` | Rescan `corpora/` directory and clear agent cache |
-| `GET /jobs` \| `GET /jobs/:id` | List import/upgrade jobs or inspect real-time logs |
-| `GET /tree-index` \| `GET /tree-scene` \| `GET /tree-grep` | Tree TOC, verbatim scene (`403` if blocked by `maxOrder`), and millisecond grep |
-| `POST /tree-search` \| `GET /tree-runs` | Run sidecar tree reasoning agent and fetch recent 40 execution traces |
-| `GET /config` \| `POST /config` \| `POST /models` | Read/persist server configuration and proxy `/models` discovery |
-| `GET /corpora/:id/export` | Export a corpus as a single-file `.lorepack.json` bundle for TauriTavern / mobile IndexedDB |
+2. **Open Embedded Codex**: Expand **LoreCodex 树形典籍检索 (st-tree-lore)**. The status bar immediately lights up green (`内置书阁引擎就绪 (IndexedDB 免后台)`) with the sample `demo-chronicles` corpus pre-mounted. Click **「打开书阁」** (or type `/loreui`) to open the embedded Workbench overlay without any external server.
+3. **Configure Sidecar Model & Build Your Corpus**:
+   - Fill in your OpenAI-compatible **API Base URL** and **API Key**, click **「拉取模型」** to pick a model (`Max Tokens` left blank uses the model's native limit).
+   - Select your `.txt` / `.epub` / `.md` novel or `.json` worldbook/card, keep **LLM 智能目录构建** checked, and import directly into browser IndexedDB (or build volume-by-volume with real-time checkpoint resume).
+   - Click **「导出 .lorepack」** anytime to export a single-file `.lorepack.json` bundle to share across devices.
 
 ---
 
@@ -149,9 +55,9 @@ python3 builders/build_lore.py --input path/to/worldbook.json --corpus-id my-nov
 
 [**GitHub Releases**](https://github.com/lena13144/lorecodex/releases) provides 3 targeted standalone packages so users only download what they need:
 
-1. **`lorecodex-sillytavern-tauritavern-extension-v2.1.0.zip`** — Pure frontend extension for SillyTavern & TauriTavern (mobile/desktop) with the built-in IndexedDB serverless engine + `demo-chronicles.lorepack.json`.
-2. **`lorecodex-full-server-workbench-v2.1.0.zip`** — Complete Node server + Archival Codex & Trace Workbench UI + Python offline/LLM builders + SillyTavern extension.
-3. **`lorecodex-agent-dsh-mcp-plugin-v2.1.0.zip`** — Lightweight package for AI Agents containing the **DeepSeek Harness (`@deepseek-ai/dsh` / Cordis)** plugin (`src/dsh_plugin.js` + `cordis.patch.yml`), zero-dependency **MCP stdio server** (`src/mcp_server.js`), and **Agent Skill** (`skills/lorecodex/SKILL.md`).
+1. **`lorecodex-sillytavern-tauritavern-extension-v2.1.0.zip`** — Pure frontend extension for SillyTavern & TauriTavern (mobile/desktop) with the built-in IndexedDB serverless engine, embedded Workbench UI, native TXT/GB18030/EPUB/JSON builders, in-browser LLM directory upgrader, and `demo-chronicles.lorepack.json`.
+2. **`lorecodex-agent-dsh-mcp-plugin-v2.1.0.zip`** — Lightweight package for AI Agents containing the **DeepSeek Harness (`@deepseek-ai/dsh` / Cordis)** plugin (`src/dsh_plugin.js` + `cordis.patch.yml`), zero-dependency **MCP stdio server** (`src/mcp_server.js`), and **Agent Skill** (`skills/lorecodex/SKILL.md`), exposing 9 tools (`lorecodex_list_corpora`, `lorecodex_list_series`, `lorecodex_list_arcs`, `lorecodex_expand_arc`, `lorecodex_grep_scenes`, `lorecodex_read_scenes`, `lorecodex_build_corpus`, `lorecodex_update_index_meta`, and `lorecodex_ask_agent`).
+3. **`lorecodex-full-server-workbench-v2.1.0.zip`** — Complete distribution including the optional standalone Node HTTP server (`src/server.js`), Python CLI builders (`builders/`), Workbench UI, SillyTavern extension, and Agent integrations.
 
 ```bash
 # Install directly into DeepSeek Harness (dsh):
@@ -166,16 +72,28 @@ dsh plugin --profile web add "github:lena13144/lorecodex"
 # Offline zero-API-key test suite ([1/9] to [8/9]):
 npm test
 
-# Full verification (adds live LLM regression when config.json / CHAT_KEY is present):
-npm run verify
+# Build all 4 release distribution assets under dist/releases/:
+npm run build:releases
 ```
+
+---
+
+## Why No Vector DB — and Why Even the Backend Server Became Optional?
+
+1. **Stage 1: Traditional Vector RAG (Chunking + Embedding + Rerank + Heavy Backend)**  
+   Fixed-length chunking shattered dramatic scenes and dialogue continuity, cosine similarity failed on character nicknames and timeline questions, and storing hundred-megabyte vector indexes forced every user to run a local backend server.
+2. **Stage 2: Tree TOC + Vector Fallback (The Eye-Opening Transition)**  
+   Inspired by PageIndex, we built a 3-tier LLM-summarized directory tree paired with millisecond in-RAM alias Grep while keeping vector search as a fallback. Real execution traces revealed a striking truth: **given a deterministic 3-tier TOC and a 1ms alias-aware full-text Grep, modern reasoning models chose not to call the vector fallback tool 99.9% of the time.**
+3. **Stage 3: Embracing the Agent Era (Vectorless, Serverless-First, Unleashed Native Reasoning)**  
+   Once we removed the unused vector layer, we realized that our true core assets—**LLM-distilled 3-tier directory trees (`tree_index.json`), lossless scene texts (`tree_texts.json`), millisecond in-RAM string scanning, and multi-turn tool-calling**—are 100% pure JSON and string operations. By moving the entire tree builder (including GB18030 decoding, pure-browser `.epub` decompression, and concurrent checkpointed LLM directory synthesis), Grep engine, Tree Agent, and Workbench UI into browser `IndexedDB`, and removing pre-agent era shackles (no hardcoded `max_tokens`, no disabled `thinking`, concurrent Turn-1 tool calls, and batch `read_scene`), LoreCodex runs effortlessly anywhere from mobile TauriTavern to native AI Agent harnesses.
 
 ---
 
 ## Inspiration & Acknowledgements
 
-- **[PageIndex by VectifyAI](https://github.com/VectifyAI/PageIndex)**: LoreCodex's vectorless tree-reasoning retrieval paradigm was inspired by PageIndex and independently engineered from scratch for long-form fiction, game lore, and SillyTavern roleplay.
-- **[SillyTavern](https://github.com/SillyTavern/SillyTavern)**: Thanks to the SillyTavern community for its extensible roleplay frontend and plugin architecture.
+- **[PageIndex by VectifyAI](https://github.com/VectifyAI/PageIndex)**: LoreCodex's vectorless tree-reasoning retrieval paradigm was inspired by PageIndex and independently engineered from scratch for long-form fiction, game lore, SillyTavern / TauriTavern roleplay, and native AI Agents.
+- **[SillyTavern](https://github.com/SillyTavern/SillyTavern)** & **[TauriTavern](https://github.com/Darkatse/TauriTavern)**: Thanks to the open-source roleplay frontend community.
+- **[DeepSeek Harness (`@deepseek-ai/dsh`)](https://github.com/deepseek-ai/deepseek-harness)**: Thanks for the Cordis-based modular agent harness architecture.
 
 ---
 
