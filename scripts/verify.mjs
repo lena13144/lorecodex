@@ -247,6 +247,10 @@ with zipfile.ZipFile(epub_path, "w") as zf:
               series_summary: `${serLabel}LLM总览：白川澄与林夜在星环观测站追查异常波段。`,
               aliases: [['白川澄', '小澄', '澄博士']],
               glossary: [`${serLabel}星环观测站：记录星界异常波段的北境哨所`],
+              relations: [
+                { s: '白川澄', r: '搭档', o: '林夜' },
+                { s: '白川澄', r: '驻守', o: '星环观测站' },
+              ],
             };
           } else if (content.includes('子场景')) {
             mockCounts.arc += 1;
@@ -394,6 +398,11 @@ with zipfile.ZipFile(epub_path, "w") as zf:
       assert(postIdx.series_summaries?.['第1卷'] && postIdx.series_summaries?.['第2卷'], 'Both series summaries present');
       assert.strictEqual(postIdx.stats.llm_scenes, 4);
       assert.strictEqual(postIdx.stats.llm_arcs, 3);
+      const graphPath = path.join(outDir, 'llm-upgrade-smoke', 'graph.json');
+      assert(fs.existsSync(graphPath), 'LLM build/upgrade must auto-generate graph.json');
+      const graphEdges = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+      const partnerEdge = graphEdges.find((e) => e.s === '白川澄' && e.r === '搭档' && e.o === '林夜');
+      assert(partnerEdge && partnerEdge.w >= 1, 'graph.json must contain synthesized 白川澄 -> 林夜 edge with w >= 1');
     } finally {
       mockSrv.close();
     }
@@ -552,6 +561,10 @@ async function testMcpAndBrowserEngine() {
             series_summary: '第一卷星港篇总览：苏璃与林夜捕获Zero-7异常脉冲。',
             aliases: [['苏璃', 'Zero-7', '璃姐']],
             glossary: ['灰烬星港：边境深空雷达观测站'],
+            relations: [
+              { s: '苏璃', r: '搭档', o: '林夜' },
+              { s: '苏璃', r: '驻守', o: '灰烬星港' },
+            ],
           };
         } else {
           replyObj = {
@@ -595,6 +608,17 @@ async function testMcpAndBrowserEngine() {
       'In-Browser aliases synthesized and merged'
     );
     assert(builtNovelPack.config.glossary.some((g) => g.includes('灰烬星港')), 'In-Browser glossary synthesized');
+    assert(upgRes.relationsCount >= 2, 'In-Browser LLM upgrader must report synthesized relationsCount >= 2');
+    assert(
+      Array.isArray(builtNovelPack.graphData) && builtNovelPack.graphData.length >= 2,
+      'builtNovelPack.graphData must store synthesized knowledge graph triples'
+    );
+    const upgradedAgent = browserMod.createBrowserTreeAgent(builtNovelPack);
+    const graphRels = upgradedAgent.lookupGraph('苏璃在灰烬星港');
+    assert(
+      Array.isArray(graphRels) && graphRels.some((r) => r.includes('苏璃 -[搭档]-> 林夜')),
+      'In-Browser agent lookupGraph must return synthesized 苏璃 -[搭档]-> 林夜 relation'
+    );
 
     // Second run without force must skip already upgraded chapters (checkpoint resume)
     const resumeRes = await browserMod.upgradeBrowserCorpusWithLLM(builtNovelPack, {

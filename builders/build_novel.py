@@ -745,17 +745,17 @@ def merge_alias_groups(existing_groups, new_groups, max_groups=60):
     return merged[:max_groups]
 
 
-def merge_glossary(existing_list, new_list, max_items=35):
+def merge_glossary(existing_list, new_list, max_items=40):
     def _head(item):
         for sep in ("：", ":"):
             if sep in item:
-                h = item.split(sep, 1)[0].strip().lower()
+                h = item.split(sep, 1)[0].strip().lstrip("- ").lower()
                 if h:
                     return h
-        return item.strip().lower()
+        return item.strip().lstrip("- ").lower()
 
     out = []
-    seen_heads = set()
+    head_to_idx = {}
     seen_full = set()
     for raw in existing_list or []:
         item = str(raw or "").strip()
@@ -763,26 +763,60 @@ def merge_glossary(existing_list, new_list, max_items=35):
             continue
         h = _head(item)
         full = item.lower()
-        if h in seen_heads or full in seen_full:
+        if full in seen_full:
             continue
-        seen_heads.add(h)
+        if h in head_to_idx:
+            prev = out[head_to_idx[h]]
+            if len(item) > len(prev) and len(item) <= 240:
+                out[head_to_idx[h]] = item
+            continue
+        head_to_idx[h] = len(out)
         seen_full.add(full)
         out.append(item)
 
     for raw in new_list or []:
         item = str(raw or "").strip()
-        if not item or len(item) > 220:
+        if not item or len(item) > 240:
             continue
         h = _head(item)
         full = item.lower()
-        if h in seen_heads or full in seen_full:
+        if full in seen_full:
             continue
-        seen_heads.add(h)
-        seen_full.add(full)
-        out.append(item)
+        if h in head_to_idx:
+            prev = out[head_to_idx[h]]
+            if len(item) > len(prev):
+                out[head_to_idx[h]] = item
+                seen_full.add(full)
+            continue
         if len(out) >= max_items:
             break
+        head_to_idx[h] = len(out)
+        seen_full.add(full)
+        out.append(item)
     return out[:max_items]
+
+
+def merge_relations(existing_edges, new_edges, max_edges=500):
+    edge_map = collections.OrderedDict()
+    for raw in list(existing_edges or []) + list(new_edges or []):
+        if not isinstance(raw, dict):
+            continue
+        s = str(raw.get("s") or "").strip()
+        r = str(raw.get("r") or "").strip()
+        o = str(raw.get("o") or "").strip()
+        if not s or not r or not o or s == o:
+            continue
+        w = max(1, int(raw.get("w") or 1))
+        key = (s.lower(), r.lower(), o.lower())
+        if key in edge_map:
+            edge_map[key]["w"] = edge_map[key].get("w", 1) + w
+        else:
+            rec = {"s": s, "r": r, "o": o, "w": w}
+            if isinstance(raw.get("ev"), list):
+                rec["ev"] = raw["ev"]
+            edge_map[key] = rec
+    sorted_edges = sorted(edge_map.values(), key=lambda x: x.get("w", 1), reverse=True)
+    return sorted_edges[:max_edges]
 
 
 def build_series_digest(ser_arcs, max_samples=80, max_chars=6500):
@@ -999,6 +1033,7 @@ def main():
     series_summaries = dict(existing_series_summaries)
     extracted_aliases = []
     extracted_glossary = []
+    extracted_relations = []
 
     if args.no_llm:
         for a in arcs:
@@ -1042,8 +1077,8 @@ def main():
             prompt = (
                 f"你是《{args.name}》文本目录索引员。请为下面这段完整场景生成检索索引（注意把人称代词消解为具体人名）：\n"
                 "1. title: 6-14字场景标题，概括地点/人物或核心事件；\n"
-                "2. summary: 2句话（70-130字），保留人名、化名/外号、专有名词、重要物品、数字和事件转折；\n"
-                "3. characters: 本幕直接出场或被明确提及的关键人物数组（最多6人）；\n"
+                "2. summary: 2句话（70-140字），保留人名、化名/外号、专有名词、重要物品、数字和事件转折；若角色在对话中回忆或提及往事、身世、救援、小队组建等过往经历，必须明确记录“回忆当年/提及某人某事”等线索；\n"
+                "3. characters: 本幕直接出场或对话中明确提及的关键/过往人物数组（最多6人）；\n"
                 "4. tone_tags: 从 [战斗/危机, 温情/日常, 心理/独白, 权谋/悬疑, 设定/档案, 叙事/剧情] 中选 1-2 个标签。\n"
                 "只输出严格 JSON：{\"title\":\"...\",\"summary\":\"...\",\"characters\":[],\"tone_tags\":[]}\n\n"
                 f"所属篇章：{a.get('series', '')} / {a['title']}\n正文：\n{txt}"
@@ -1122,8 +1157,8 @@ def main():
             sc_lines = "\n".join(f"- [{s['node_id']}] {s['title']}: {s['summary']}" for s in a["scenes"][:25])
             prompt = (
                 f"根据《{args.name}》篇章的子场景摘要提炼篇章总目信息：\n"
-                "1. description: 1-2句话（50-100字）概括全章核心人物与事件；\n"
-                "2. characters: 核心出场人物数组（最多8人）；\n"
+                "1. description: 1-2句话（60-120字）概括全章核心人物与事件，必须保留团队/势力/身份变动（如队长交接、更名、分队重组、吸纳新成员）与重要往事揭秘；\n"
+                "2. characters: 核心出场及关键提及人物数组（最多8人）；\n"
                 "3. tone_tags: 1-2个氛围标签。\n"
                 "只输出 JSON：{\"description\":\"...\",\"characters\":[],\"tone_tags\":[]}\n\n"
                 f"篇章：{a.get('series', '')} / {a['title']}\n子场景：\n{sc_lines}"
@@ -1186,11 +1221,12 @@ def main():
                 else:
                     digest_text, top_chars = build_series_digest(ser_arcs)
                     meta_prompt = (
-                        f"你是《{args.name}》文本资料库总编。请根据以下「{ser_name}」的章节脉络与高频人物表，提炼全卷级检索元数据：\n"
+                        f"你是《{args.name}》文本资料库总编。请根据以下「{ser_name}」的章节脉络与高频人物表，提炼全卷级检索元数据与知识图谱：\n"
                         "1. series_summary: 60-120字精炼概括本卷主线剧情、核心舞台与关键转折；\n"
                         "2. aliases: 同一人物/实体的本名、化名、外号、简称对照二维数组（每组至少2项，严禁把不同人混为一组，最多25组）；\n"
-                        "3. glossary: 本卷重要势力、组织、能力体系、核心地点或器物速查数组（每条“名称：一句话说明”，最多15条）。\n"
-                        "只输出严格 JSON：{\"series_summary\":\"60-120字概括本卷主线、核心舞台与转折\",\"aliases\":[[\"正式名\",\"化名/外号/简称\"]],\"glossary\":[\"重要势力/序列/组织/地点：一句话说明\"]}\n\n"
+                        "3. glossary: 本卷重要势力、组织、小队编制、能力体系、核心地点或器物速查数组（每条“名称：一句话说明”，对核心小队/组织务必写全各分队或各期成员名单与更迭，如一队/二队/新老成员，最多20条）；\n"
+                        "4. relations: 人物与人物、人物与组织/小队的知识图谱关系三元组数组，格式 [{\"s\":\"主体\",\"r\":\"关系(如:属于/队长/搭档/旧友/宿敌/救过/接任)\",\"o\":\"客体\"}]（最多40条）。\n"
+                        "只输出严格 JSON：{\"series_summary\":\"60-120字概括本卷主线、核心舞台与转折\",\"aliases\":[[\"正式名\",\"化名/外号/简称\"]],\"glossary\":[\"重要势力/小队/组织/地点：一句话说明（写明成员或分支）\"],\"relations\":[{\"s\":\"主体\",\"r\":\"关系\",\"o\":\"客体\"}]}\n\n"
                         f"高频人物：{', '.join(top_chars) if top_chars else '（暂无）'}\n"
                         f"章节脉络（共 {len(ser_arcs)} 章）：\n{digest_text}"
                     )
@@ -1202,11 +1238,13 @@ def main():
                             "series_summary": str(parsed.get("series_summary", "")).strip(),
                             "aliases": parsed.get("aliases") if isinstance(parsed.get("aliases"), list) else [],
                             "glossary": [str(x).strip() for x in (parsed.get("glossary") or []) if str(x).strip()],
+                            "relations": parsed.get("relations") if isinstance(parsed.get("relations"), list) else [],
                         }
                         save_ckpt(rec)
                         print(
                             f"[build_novel] synthesized meta for '{ser_name}': "
-                            f"summary={len(rec['series_summary'])}c, aliases={len(rec['aliases'])}, glossary={len(rec['glossary'])}"
+                            f"summary={len(rec['series_summary'])}c, aliases={len(rec['aliases'])}, "
+                            f"glossary={len(rec['glossary'])}, relations={len(rec['relations'])}"
                         )
                     except Exception as err:
                         print(f"[build_novel] warn series_meta '{ser_name}' skipped ({err})")
@@ -1219,6 +1257,8 @@ def main():
                         extracted_aliases.extend(rec["aliases"])
                     if rec.get("glossary"):
                         extracted_glossary.extend(rec["glossary"])
+                    if rec.get("relations"):
+                        extracted_relations.extend(rec["relations"])
 
         for a in arcs:
             for sc in a.get("scenes") or []:
@@ -1307,6 +1347,22 @@ def main():
                 f"[build_novel] merged corpus.json metadata: aliases={len(old_aliases)}->{len(new_aliases)}, "
                 f"glossary={len(old_glossary)}->{len(new_glossary)}"
             )
+
+    if extracted_relations:
+        graph_path = os.path.join(out_corpus_dir, "graph.json")
+        existing_edges = []
+        if os.path.exists(graph_path):
+            try:
+                with open(graph_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, list):
+                    existing_edges = loaded
+            except Exception:
+                existing_edges = []
+        merged_edges = merge_relations(existing_edges, extracted_relations)
+        if merged_edges:
+            atomic_write_json(graph_path, merged_edges, indent=2)
+            print(f"[build_novel] merged graph.json: {len(existing_edges)}->{len(merged_edges)} edges")
 
     if not args.no_llm:
         print(

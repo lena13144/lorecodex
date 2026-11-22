@@ -637,13 +637,22 @@ const server = http.createServer(async (req, res) => {
     const corpusDir = path.join(CORPORA_DIR, cid);
     const idxFile = ['tree_index.json', 'full_tree_index.json'].map((f) => path.join(corpusDir, f)).find((p) => fs.existsSync(p));
     const txtFile = ['tree_texts.json', 'full_tree_texts.json'].map((f) => path.join(corpusDir, f)).find((p) => fs.existsSync(p));
+    const graphFile = ['graph.json', 'graph-compact.json'].map((f) => path.join(corpusDir, f)).find((p) => fs.existsSync(p));
     if (!idxFile || !txtFile) return send({ error: 'corpus index/texts missing' }, 404);
+    let graphData = [];
+    if (graphFile) {
+      try {
+        const loadedGraph = JSON.parse(fs.readFileSync(graphFile, 'utf8'));
+        if (Array.isArray(loadedGraph)) graphData = loadedGraph;
+      } catch (_) {}
+    }
     const pack = {
       format: 'lorecodex-pack-v2',
       id: cid,
       config: meta?.config || {},
       indexData: JSON.parse(fs.readFileSync(idxFile, 'utf8')),
       textsData: JSON.parse(fs.readFileSync(txtFile, 'utf8')),
+      graphData,
       exportedAt: new Date().toISOString(),
     };
     res.writeHead(200, {

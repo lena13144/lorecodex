@@ -228,6 +228,7 @@ export async function idbSaveCorpus(pack) {
             config: normalizeCorpusConfig(pack.config, pack.id),
             indexData: pack.indexData,
             textsData: pack.textsData,
+            graphData: Array.isArray(pack.graphData) ? pack.graphData : [],
             updatedAt: new Date().toISOString(),
         });
         req.onsuccess = () => resolve(true);
@@ -648,7 +649,7 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
     };
 
     const config = normalizeCorpusConfig({ id: corpusId, name: name || corpusId }, corpusId);
-    return { id: corpusId, config, indexData, textsData };
+    return { id: corpusId, config, indexData, textsData, graphData: [] };
 }
 
 // Pure-JS Worldbook / Character Card V2 Builder (.json) for In-Browser Mode
@@ -663,6 +664,7 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
             config: normalizeCorpusConfig(parsed.config || { id: packId, name: name || parsed.indexData.corpus_name || packId }, packId),
             indexData: parsed.indexData,
             textsData: parsed.textsData,
+            graphData: Array.isArray(parsed.graphData) ? parsed.graphData : [],
         };
     }
 
@@ -771,7 +773,8 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
         arcs: baseArcs,
     };
     const config = existingPack ? existingPack.config : normalizeCorpusConfig({ id: targetId, name: targetName }, targetId);
-    return { id: targetId, config, indexData, textsData };
+    const graphData = Array.isArray(existingPack?.graphData) ? existingPack.graphData : [];
+    return { id: targetId, config, indexData, textsData, graphData };
 }
 
 // In-Browser Tree Agent & Grep Runtime
@@ -781,6 +784,37 @@ export function createBrowserTreeAgent(pack) {
     const indexData = pack.indexData || { arcs: [] };
     const textsData = pack.textsData || {};
     const seriesSummaries = indexData.series_summaries || {};
+    const graphEdges = Array.isArray(pack.graphData) ? pack.graphData.filter((e) => e && e.s && e.r && e.o) : [];
+    const graphEntities = (() => {
+        const set = new Set();
+        for (const e of graphEdges) {
+            set.add(String(e.s));
+            set.add(String(e.o));
+        }
+        return [...set].sort((a, b) => b.length - a.length);
+    })();
+
+    function lookupGraph(text, limit = 10, perEnt = 4) {
+        if (!graphEdges.length || !text) return [];
+        const hay = String(text);
+        const hits = new Set();
+        for (const ent of graphEntities) {
+            if (ent.length >= 2 && hay.includes(ent)) hits.add(ent);
+        }
+        if (!hits.size) return [];
+        const counts = new Map();
+        const out = [];
+        for (const e of graphEdges) {
+            const matched = hits.has(e.s) ? e.s : hits.has(e.o) ? e.o : null;
+            if (!matched) continue;
+            const cur = counts.get(matched) || 0;
+            if (cur >= perEnt) continue;
+            counts.set(matched, cur + 1);
+            out.push(`${e.s} -[${e.r}]-> ${e.o}${e.w > 1 ? `(×${e.w})` : ''}`);
+            if (out.length >= limit) break;
+        }
+        return out;
+    }
 
     const arcMap = new Map();
     const sceneMetaMap = new Map();
@@ -900,6 +934,7 @@ export function createBrowserTreeAgent(pack) {
         max_order: maxOrderAvailable,
         llm_scenes: Number(indexData.stats?.llm_scenes || 0),
         llm_arcs: Number(indexData.stats?.llm_arcs || 0),
+        graph_edges: graphEdges.length,
     };
     const categories = [...categorySet];
     const seriesList = [...seriesStatsMap.values()].map((s) => ({
@@ -1466,6 +1501,7 @@ ${corpusConfig.world_premise || ''}
                 guide: '',
                 scenes: [],
                 outlines: [],
+                relations: [],
             };
         }
 
@@ -1502,6 +1538,13 @@ ${corpusConfig.world_premise || ''}
         }
 
         const guide = (parsed && typeof parsed.guide === 'string' ? parsed.guide : rawAnswer).trim();
+        const graphQuery = [
+            payload.query || '',
+            guide,
+            ...finalOutlines.map((o) => o.title),
+            ...finalScenes.map((s) => `${s.arc_title} ${s.title}`),
+        ].join(' ');
+        const relations = lookupGraph(graphQuery);
         return {
             ok: true,
             corpus_id: corpusId,
@@ -1521,6 +1564,7 @@ ${corpusConfig.world_premise || ''}
             guide,
             scenes: finalScenes,
             outlines: finalOutlines,
+            relations,
         };
     }
 
@@ -1535,6 +1579,7 @@ ${corpusConfig.world_premise || ''}
         getTreeIndex,
         getSceneText,
         grepScenes,
+        lookupGraph,
         search,
     };
 }
@@ -1599,42 +1644,82 @@ function mergeAliasGroupsInBrowser(existingGroups = [], newGroups = [], maxGroup
     return merged.slice(0, maxGroups);
 }
 
-function mergeGlossaryInBrowser(existingList = [], newList = [], maxItems = 35) {
+function mergeGlossaryInBrowser(existingList = [], newList = [], maxItems = 40) {
     const headOf = (item) => {
         for (const sep of ['：', ':']) {
             const pos = item.indexOf(sep);
             if (pos > 0) {
-                const h = item.slice(0, pos).trim().toLowerCase();
+                const h = item.slice(0, pos).trim().replace(/^-+\s*/, '').toLowerCase();
                 if (h) return h;
             }
         }
-        return item.trim().toLowerCase();
+        return item.trim().replace(/^-+\s*/, '').toLowerCase();
     };
     const out = [];
-    const seenHeads = new Set();
+    const headToIdx = new Map();
     const seenFull = new Set();
-    for (const raw of existingList) {
+    for (const raw of existingList || []) {
         const item = String(raw || '').trim();
         if (!item) continue;
         const h = headOf(item);
         const full = item.toLowerCase();
-        if (seenHeads.has(h) || seenFull.has(full)) continue;
-        seenHeads.add(h);
+        if (seenFull.has(full)) continue;
+        if (headToIdx.has(h)) {
+            const idx = headToIdx.get(h);
+            if (item.length > out[idx].length && item.length <= 240) {
+                out[idx] = item;
+                seenFull.add(full);
+            }
+            continue;
+        }
+        headToIdx.set(h, out.length);
         seenFull.add(full);
         out.push(item);
     }
-    for (const raw of newList) {
+    for (const raw of newList || []) {
         const item = String(raw || '').trim();
-        if (!item || item.length > 220) continue;
+        if (!item || item.length > 240) continue;
         const h = headOf(item);
         const full = item.toLowerCase();
-        if (seenHeads.has(h) || seenFull.has(full)) continue;
-        seenHeads.add(h);
+        if (seenFull.has(full)) continue;
+        if (headToIdx.has(h)) {
+            const idx = headToIdx.get(h);
+            if (item.length > out[idx].length) {
+                out[idx] = item;
+                seenFull.add(full);
+            }
+            continue;
+        }
+        if (out.length >= maxItems) break;
+        headToIdx.set(h, out.length);
         seenFull.add(full);
         out.push(item);
-        if (out.length >= maxItems) break;
     }
     return out.slice(0, maxItems);
+}
+
+function mergeRelationsInBrowser(existingEdges = [], newEdges = [], maxEdges = 500) {
+    const edgeMap = new Map();
+    for (const raw of [...(existingEdges || []), ...(newEdges || [])]) {
+        if (!raw || typeof raw !== 'object') continue;
+        const s = String(raw.s || '').trim();
+        const r = String(raw.r || '').trim();
+        const o = String(raw.o || '').trim();
+        if (!s || !r || !o || s === o) continue;
+        const w = Math.max(1, parseInt(raw.w, 10) || 1);
+        const key = `${s.toLowerCase()}\u0000${r.toLowerCase()}\u0000${o.toLowerCase()}`;
+        if (edgeMap.has(key)) {
+            const cur = edgeMap.get(key);
+            cur.w = (cur.w || 1) + w;
+        } else {
+            const rec = { s, r, o, w };
+            if (Array.isArray(raw.ev)) rec.ev = raw.ev;
+            edgeMap.set(key, rec);
+        }
+    }
+    return [...edgeMap.values()]
+        .sort((a, b) => (b.w || 1) - (a.w || 1))
+        .slice(0, maxEdges);
 }
 
 function buildSeriesDigestInBrowser(serArcs, maxSamples = 80, maxChars = 6500) {
@@ -1754,6 +1839,7 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             upgradedArcs: 0,
             upgradedScenes: 0,
             synthesizedSeries: 0,
+            relationsCount: (pack.graphData || []).length,
             message: '所选范围内的章节均已完成 LLM 目录构建（如需重跑请勾选强制重跑）',
         };
     }
@@ -1794,8 +1880,8 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             const leafPrompt =
                 `你是《${bookName}》文本目录索引员。请为下面这段完整场景生成检索索引（注意把人称代词消解为具体人名）：\n` +
                 `1. title: 6-14字场景标题，概括地点/人物或核心事件；\n` +
-                `2. summary: 2句话（70-130字），保留人名、化名/外号、专有名词、重要物品、数字和事件转折；\n` +
-                `3. characters: 本幕直接出场或被明确提及的关键人物数组（最多6人）；\n` +
+                `2. summary: 2句话（70-140字），保留人名、化名/外号、专有名词、重要物品、数字和事件转折；若角色在对话中回忆或提及往事、身世、救援、小队组建等过往经历，必须明确记录“回忆当年/提及某人某事”等线索；\n` +
+                `3. characters: 本幕直接出场或对话中明确提及的关键/过往人物数组（最多6人）；\n` +
                 `4. tone_tags: 从 [战斗/危机, 温情/日常, 心理/独白, 权谋/悬疑, 设定/档案, 叙事/剧情] 中选 1-2 个标签。\n` +
                 `只输出严格 JSON：{"title":"...","summary":"...","characters":[],"tone_tags":[]}\n\n` +
                 `所属篇章：${arc.series || ''} / ${arc.title}\n正文：\n${rawText}`;
@@ -1826,8 +1912,8 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
                 .join('\n');
             const arcPrompt =
                 `根据《${bookName}》篇章的子场景摘要提炼篇章总目信息：\n` +
-                `1. description: 1-2句话（50-100字）概括全章核心人物与事件；\n` +
-                `2. characters: 核心出场人物数组（最多8人）；\n` +
+                `1. description: 1-2句话（60-120字）概括全章核心人物与事件，必须保留团队/势力/身份变动（如队长交接、更名、分队重组、吸纳新成员）与重要往事揭秘；\n` +
+                `2. characters: 核心出场及关键提及人物数组（最多8人）；\n` +
                 `3. tone_tags: 1-2个氛围标签。\n` +
                 `只输出 JSON：{"description":"...","characters":[],"tone_tags":[]}\n\n` +
                 `篇章：${arc.series || ''} / ${arc.title}\n子场景：\n${scLines}`;
@@ -1886,6 +1972,7 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
     let synthesizedSeries = 0;
     const extractedAliases = [];
     const extractedGlossary = [];
+    const extractedRelations = [];
 
     for (const [serName] of groupedSeries.entries()) {
         if (signal?.aborted) break;
@@ -1898,11 +1985,12 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             series: serName,
         });
         const metaPrompt =
-            `你是《${bookName}》文本资料库总编。请根据以下「${serName}」的章节脉络与高频人物表，提炼全卷级检索元数据：\n` +
+            `你是《${bookName}》文本资料库总编。请根据以下「${serName}」的章节脉络与高频人物表，提炼全卷级检索元数据与知识图谱：\n` +
             `1. series_summary: 60-120字精炼概括本卷主线剧情、核心舞台与关键转折；\n` +
             `2. aliases: 同一人物/实体的本名、化名、外号、简称对照二维数组（每组至少2项，严禁把不同人混为一组，最多25组）；\n` +
-            `3. glossary: 本卷重要势力、组织、能力体系、核心地点或器物速查数组（每条“名称：一句话说明”，最多15条）。\n` +
-            `只输出严格 JSON：{"series_summary":"60-120字概括本卷主线、核心舞台与转折","aliases":[["正式名","化名/外号/简称"]],"glossary":["重要势力/序列/组织/地点：一句话说明"]}\n\n` +
+            `3. glossary: 本卷重要势力、组织、小队编制、能力体系、核心地点或器物速查数组（每条“名称：一句话说明”，对核心小队/组织务必写全各分队或各期成员名单与更迭，如一队/二队/新老成员，最多20条）；\n` +
+            `4. relations: 人物与人物、人物与组织/小队的知识图谱关系三元组数组，格式 [{"s":"主体","r":"关系(如:属于/队长/搭档/旧友/宿敌/救过/接任)","o":"客体"}]（最多40条）。\n` +
+            `只输出严格 JSON：{"series_summary":"60-120字概括本卷主线、核心舞台与转折","aliases":[["正式名","化名/外号/简称"]],"glossary":["重要势力/小队/组织/地点：一句话说明（写明成员或分支）"],"relations":[{"s":"主体","r":"关系","o":"客体"}]}\n\n` +
             `高频人物：${topChars.length ? topChars.join(', ') : '（暂无）'}\n` +
             `章节脉络（共 ${fullSerArcs.length} 章）：\n${digestText}`;
         try {
@@ -1918,6 +2006,9 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             if (Array.isArray(parsedMeta.glossary)) {
                 extractedGlossary.push(...parsedMeta.glossary);
             }
+            if (Array.isArray(parsedMeta.relations)) {
+                extractedRelations.push(...parsedMeta.relations);
+            }
         } catch (_) {
             // Non-fatal if series meta synthesis fails on a single volume
         }
@@ -1929,6 +2020,9 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
     if (extractedGlossary.length) {
         pack.config.glossary = mergeGlossaryInBrowser(pack.config.glossary || [], extractedGlossary);
     }
+    if (extractedRelations.length) {
+        pack.graphData = mergeRelationsInBrowser(pack.graphData || [], extractedRelations);
+    }
     await persistStatsAndCheckpoint(true);
 
     return {
@@ -1937,5 +2031,6 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
         synthesizedSeries,
         aliasesCount: (pack.config.aliases || []).length,
         glossaryCount: (pack.config.glossary || []).length,
+        relationsCount: (pack.graphData || []).length,
     };
 }
