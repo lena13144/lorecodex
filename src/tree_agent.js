@@ -688,7 +688,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     rawAnswer,
     state,
     maxScenes,
-    maxChars = 36000,
+    maxChars = null,
     maxOrder = null,
     pov,
     query,
@@ -782,17 +782,17 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       }
     }
 
-    let charBudget = maxChars;
+    let charBudget = maxChars && Number(maxChars) > 0 ? Number(maxChars) : Infinity;
     const finalScenes = [];
     for (const sc of orderedScenes.slice(0, maxScenes)) {
-      if (charBudget <= 400) break;
+      if (Number.isFinite(charBudget) && charBudget <= 400) break;
       let txt = sc.text;
-      if (txt.length > charBudget) {
+      if (Number.isFinite(charBudget) && txt.length > charBudget) {
         const cut = txt.slice(0, charBudget);
         const lastNl = cut.lastIndexOf('\n');
         txt = (lastNl > 400 ? cut.slice(0, lastNl) : cut) + '\n…（后文略）';
       }
-      charBudget -= txt.length;
+      if (Number.isFinite(charBudget)) charBudget -= txt.length;
       const present = pov
         ? sc.text.includes(pov) || (sc.characters || []).some((c) => c.includes(pov))
         : null;
@@ -918,7 +918,8 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       rawMaxScenes === undefined || rawMaxScenes === null || Number(rawMaxScenes) === 0
         ? 10
         : Math.min(Math.max(Math.round(Number(rawMaxScenes)) || 10, 1), 12);
-    const maxChars = Math.min(Math.max(Math.round(Number(payload.maxChars)) || 36000, 8000), 60000);
+    const rawMaxChars = Number(payload.maxChars);
+    const maxChars = Number.isFinite(rawMaxChars) && rawMaxChars > 0 ? Math.round(rawMaxChars) : null;
     const maxOrder = resolveMaxOrder(payload.maxOrder);
 
     if (!query && !onDemand && !recentChat.length) {

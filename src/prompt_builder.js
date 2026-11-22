@@ -220,7 +220,7 @@ function buildSystemPrompt({
   toneTags,
   onDemand,
   maxScenes = 10,
-  maxChars = 36000,
+  maxChars = null,
   maxOrder = null,
   hasSeriesTool = false,
   hasFallback = false,
@@ -271,7 +271,7 @@ ${spoilerBlock}${glossaryBlock}
 【检索策略】
 ${gateRule}
 2. 高效寻路：${turn1Rule}${fallbackStep}；首次未命中可换词或别名重试。调用 \`read_scene\` 时尽量单次批量传入多个 \`scene_node_ids\`（最多 10 个）。
-3. 按跨度选幕（上限 ${maxScenes} 幕 / ${maxChars.toLocaleString()} 字）：定点查证选 1~3 幕（跨幕剧情注意连读相邻幕）；宏观回顾、群像或组织/势力过往选 4~10 幕，结合词表与目录人物表跨阶段、全分支覆盖（如前任/新晋/分队），宏观脉络可填 \`selected_arcs\`（1~10 个）${toneRoutingExtra}。
+3. 按跨度选幕（上限 ${maxScenes} 幕${maxChars ? ` / ${maxChars.toLocaleString()} 字` : ''}）：定点查证选 1~3 幕（跨幕剧情注意连读相邻幕）；宏观回顾、群像或组织/势力过往选 4~10 幕，结合词表与目录人物表跨阶段、全分支覆盖（如前任/新晋/分队），宏观脉络可填 \`selected_arcs\`（1~10 个）${toneRoutingExtra}。
 4. 事实核实：\`selected_nodes\` 必须经 \`read_scene\` 核实；未收录原创角色或外部设定${ocHint}直接输出 {"skip":true,"reason":"未收录原创或外部设定"}；若用户输入前提与原文矛盾，在 \`guide\` 开头明确澄清，严禁编造。
 5. 严格输出 JSON（停止调工具后仅输出单个 JSON 对象）：
 {
