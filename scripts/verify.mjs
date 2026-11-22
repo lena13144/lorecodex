@@ -232,6 +232,7 @@ with zipfile.ZipFile(epub_path, "w") as zf:
           } catch (_) {}
 
           assert.strictEqual(body.thinking, undefined, 'Mock LLM requests should keep thinking enabled by default');
+          assert.strictEqual(body.temperature, undefined, 'Mock LLM requests must omit temperature by default');
           assert.strictEqual(
             body.max_tokens,
             expectedMaxTokens,
@@ -554,6 +555,7 @@ async function testMcpAndBrowserEngine() {
       req.on('end', () => {
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         assert.strictEqual(body.max_tokens, undefined, 'In-Browser LLM upgrader must omit max_tokens by default');
+        assert.strictEqual(body.temperature, undefined, 'In-Browser LLM upgrader must omit temperature by default');
         const prompt = String(body?.messages?.[0]?.content || '');
         let replyObj;
         if (prompt.includes('series_summary')) {

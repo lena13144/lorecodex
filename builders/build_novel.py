@@ -640,13 +640,21 @@ def llm_json(cfg, prompt, retries=4):
                 max_tokens_val = mt_int
         except (TypeError, ValueError):
             pass
+    raw_temp = cfg.get("temperature")
+    temp_val = None
+    if raw_temp not in (None, ""):
+        try:
+            temp_val = float(raw_temp)
+        except (TypeError, ValueError):
+            pass
     last_err = None
     for attempt in range(retries):
         payload = {
             "model": cfg["chatModel"],
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
         }
+        if temp_val is not None:
+            payload["temperature"] = temp_val
         if max_tokens_val is not None:
             payload["max_tokens"] = max_tokens_val
         try:

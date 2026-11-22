@@ -267,7 +267,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     return grepEngine.grepScenes(rawQuery, normalizedOpts);
   }
 
-  async function callChat({ base, key, model, messages, tools, maxTokens = null }) {
+  async function callChat({ base, key, model, messages, tools, maxTokens = null, temperature = null }) {
     const cleanBase = String(base || '')
       .trim()
       .replace(/\/+$/, '')
@@ -277,8 +277,10 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     const body = {
       model,
       messages,
-      temperature: 0.1,
     };
+    if (temperature !== null && temperature !== undefined && temperature !== '' && Number.isFinite(Number(temperature))) {
+      body.temperature = Number(temperature);
+    }
     const parsedMaxTokens = Number(maxTokens);
     if (Number.isFinite(parsedMaxTokens) && parsedMaxTokens > 0) {
       body.max_tokens = Math.floor(parsedMaxTokens);
@@ -1004,6 +1006,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         messages,
         tools: turn < maxTurns ? tools : undefined,
         maxTokens: effectiveCfg.maxTokens,
+        temperature: effectiveCfg.temperature,
       });
       const reqMs = Date.now() - tReq;
       const u = resp.usage || {};
@@ -1096,6 +1099,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       messages,
       tools: undefined,
       maxTokens: effectiveCfg.maxTokens,
+      temperature: effectiveCfg.temperature,
     });
     const finalMs = Date.now() - tFinal;
     const fu = finalResp.usage || {};

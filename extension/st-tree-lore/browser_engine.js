@@ -1122,13 +1122,16 @@ export function createBrowserTreeAgent(pack) {
         };
     }
 
-    async function callChat({ base, key, model, messages, tools, maxTokens }) {
+    async function callChat({ base, key, model, messages, tools, maxTokens, temperature }) {
         const cleanBase = String(base || '')
             .trim()
             .replace(/\/+$/, '')
             .replace(/\/(?:chat\/completions|models)$/i, '')
             .replace(/\/+$/, '');
-        const body = { model, messages, temperature: 0.1 };
+        const body = { model, messages };
+        if (temperature !== undefined && temperature !== null && temperature !== '' && Number.isFinite(Number(temperature))) {
+            body.temperature = Number(temperature);
+        }
         const mt = Number(maxTokens);
         if (Number.isFinite(mt) && mt > 0) body.max_tokens = Math.floor(mt);
         if (tools && tools.length) {
@@ -1414,6 +1417,7 @@ ${corpusConfig.world_premise || ''}
                 messages,
                 tools: turn < maxTurns ? tools : undefined,
                 maxTokens: apiCfg.maxTokens,
+                temperature: apiCfg.temperature,
             });
             const reqMs = Date.now() - tReq;
             if (resp?.usage) {
@@ -1763,6 +1767,8 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
         .replace(/\/+$/, '');
     const model = String(apiCfg.chatModel || 'deepseek-chat').trim();
     const mt = Number(apiCfg.maxTokens);
+    const rawTemp = apiCfg.temperature;
+    const hasTemp = rawTemp !== undefined && rawTemp !== null && rawTemp !== '' && Number.isFinite(Number(rawTemp));
     let lastErr = null;
 
     for (let attempt = 0; attempt < retries; attempt++) {
@@ -1770,8 +1776,8 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
         const body = {
             model,
             messages: [{ role: 'user', content: prompt }],
-            temperature: 0.1,
         };
+        if (hasTemp) body.temperature = Number(rawTemp);
         if (Number.isFinite(mt) && mt > 0) body.max_tokens = Math.floor(mt);
         try {
             const resp = await fetch(`${cleanBase}/chat/completions`, {
