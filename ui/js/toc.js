@@ -197,7 +197,7 @@ export function renderToc() {
             <span class="series-meta">${serArcs.length}卷 · ${totalSc}幕</span>
           </div>
           <div class="series-body">
-            ${serArcs.map((a) => renderArcCard(a, cardCtx)).join('')}
+            ${isCollapsed ? '' : serArcs.map((a) => renderArcCard(a, cardCtx)).join('')}
           </div>
         </div>`;
       })

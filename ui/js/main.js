@@ -56,6 +56,17 @@ async function loadCorpusIndex(cid) {
     bar.classList.remove('visible');
   }
 
+  if ((idx.arcs || []).length > 100 && state.collapsedSeries.size === 0) {
+    const seriesNames = [];
+    for (const a of idx.arcs || []) {
+      const sk = String(a.series || a.category || '默认分卷').trim();
+      if (!seriesNames.includes(sk)) seriesNames.push(sk);
+    }
+    if (seriesNames.length >= 2) {
+      for (const sk of seriesNames.slice(1)) state.collapsedSeries.add(sk);
+    }
+  }
+
   renderFilters();
   renderToc();
   renderStage();

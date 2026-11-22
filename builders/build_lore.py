@@ -25,9 +25,15 @@ GAME_STAT_NOISE_RE = re.compile(
 )
 
 
+BOILERPLATE_CSS_MACRO_RE = re.compile(r"<style[\s\S]*?</style>|<!--[\s\S]*?-->|<[^>]+>|\{\{[^}]*\}\}", re.I)
+
+
 def is_noise_entry(text):
     clean = str(text or "").strip()
     if len(clean) < 20:
+        return True
+    stripped_markup = re.sub(r"\s+", " ", BOILERPLATE_CSS_MACRO_RE.sub(" ", clean)).strip()
+    if re.search(r"<style\b|\{\{\s*(?:setvar|getvar|addvar)", clean, re.I) and len(stripped_markup) < 40:
         return True
     hits = len(GAME_STAT_NOISE_RE.findall(clean))
     if hits >= 2 or (hits >= 1 and len(clean) < 160):
@@ -40,7 +46,15 @@ def slugify(s):
     return res[:32] or "lore"
 
 
-def load_lore_entries(input_path, filter_stats=False):
+def _parse_keys(raw_keys):
+    if isinstance(raw_keys, str):
+        return [x.strip() for x in raw_keys.split(",") if x.strip()]
+    if isinstance(raw_keys, list):
+        return [str(x).strip() for x in raw_keys if str(x).strip()]
+    return []
+
+
+def load_lore_entries(input_path, filter_stats=False, include_disabled=False):
     entries = []
     if os.path.isdir(input_path):
         for root, _, files in sorted(os.walk(input_path)):
@@ -86,33 +100,48 @@ def load_lore_entries(input_path, filter_stats=False):
                 })
         return entries
 
-    # SillyTavern Worldbook JSON
+    # SillyTavern Worldbook JSON OR Character Card V2/V3 JSON (data.character_book.entries)
     with open(input_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     raw_list = []
+    default_book_bucket = "世界观与技术档案"
     if isinstance(data, list):
         raw_list = data
     elif isinstance(data, dict):
-        ents = data.get("entries", {})
+        ents = data.get("entries")
+        if ents is None and isinstance(data.get("data"), dict) and isinstance(data["data"].get("character_book"), dict):
+            cb = data["data"]["character_book"]
+            ents = cb.get("entries")
+            if cb.get("name"):
+                default_book_bucket = str(cb["name"]).strip()
+        elif ents is None and isinstance(data.get("character_book"), dict):
+            cb = data["character_book"]
+            ents = cb.get("entries")
+            if cb.get("name"):
+                default_book_bucket = str(cb["name"]).strip()
         raw_list = list(ents.values()) if isinstance(ents, dict) else (ents if isinstance(ents, list) else [])
 
     for idx, item in enumerate(raw_list, 1):
         if not isinstance(item, dict):
             continue
-        if item.get("disable") is True and not item.get("content"):
+        is_disabled = (item.get("disable") is True) or (item.get("disabled") is True) or (item.get("enabled") is False)
+        if not include_disabled and is_disabled:
             continue
         txt = str(item.get("content") or item.get("text") or "").strip()
         if not txt or (filter_stats and is_noise_entry(txt)):
             continue
-        title = str(item.get("comment") or item.get("title") or f"世界书条目{idx}").strip()
-        keys = item.get("key") or item.get("keys") or []
-        if isinstance(keys, str):
-            keys = [x.strip() for x in keys.split(",") if x.strip()]
+        title = str(item.get("comment") or item.get("title") or item.get("name") or f"世界书条目{idx}").strip()
+        primary_keys = _parse_keys(item.get("key") if item.get("key") is not None else item.get("keys"))
+        secondary_keys = _parse_keys(
+            item.get("keysecondary") if item.get("keysecondary") is not None else item.get("secondary_keys")
+        )
+        keys = list(dict.fromkeys(primary_keys + secondary_keys))
+        ext = item.get("extensions") if isinstance(item.get("extensions"), dict) else {}
         entries.append({
             "id": f"WB{idx:03d}",
-            "bucket": str(item.get("group") or "世界观与技术档案"),
+            "bucket": str(item.get("group") or ext.get("group") or default_book_bucket),
             "title": title,
-            "keys": [str(k).strip() for k in keys if str(k).strip()],
+            "keys": keys,
             "order": item.get("lore_order") if item.get("lore_order") is not None else None,
             "text": txt,
         })
@@ -183,10 +212,15 @@ def main():
     parser.add_argument("--series", default="设定与技术档案", help="Series name for lore arcs")
     parser.add_argument("--merge-into", default="", help="Existing corpus directory to idempotently merge into")
     parser.add_argument("--filter-game-stats", action="store_true", help="Filter RPG combat stats and promotional noise")
+    parser.add_argument("--include-disabled", action="store_true", help="Include disabled worldbook entries")
     parser.add_argument("--no-llm", action="store_true", help="Build deterministically without LLM calls")
     args = parser.parse_args()
 
-    entries = load_lore_entries(args.input, filter_stats=args.filter_game_stats)
+    entries = load_lore_entries(
+        args.input,
+        filter_stats=args.filter_game_stats,
+        include_disabled=args.include_disabled,
+    )
     if not entries:
         raise RuntimeError(f"No valid lore entries extracted from {args.input}")
 

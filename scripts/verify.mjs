@@ -59,17 +59,19 @@ async function postJson(urlPath, body, headers = {}) {
   return { status: r.status, ok: r.ok, data };
 }
 
-function testEpubBuilder() {
-  console.log('\n[1/9] Testing EPUB builder (Python stdlib)...');
-  const tmpDir = path.join(ROOT, '.tmp-epub-test');
+function testEpubAndBuilders() {
+  console.log('\n[1/9] Testing real-world EPUB, web-novel TXT, and Character Card V2 builders...');
+  const tmpDir = path.join(ROOT, '.tmp-builder-test');
   fs.rmSync(tmpDir, { recursive: true, force: true });
   fs.mkdirSync(tmpDir, { recursive: true });
   const epubPath = path.join(tmpDir, 'sample.epub');
   const outDir = path.join(tmpDir, 'out');
 
   const pyMaker = `
-import zipfile
+import urllib.parse, zipfile
 epub_path = r"${epubPath.replace(/\\/g, '\\\\')}"
+ch1_name = "第1章.xhtml"
+ch1_href = urllib.parse.quote(ch1_name)
 with zipfile.ZipFile(epub_path, "w") as zf:
     zf.writestr("mimetype", "application/epub+zip")
     zf.writestr("META-INF/container.xml", '''<?xml version="1.0" encoding="UTF-8"?>
@@ -78,10 +80,10 @@ with zipfile.ZipFile(epub_path, "w") as zf:
     <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
 </container>''')
-    zf.writestr("OEBPS/content.opf", '''<?xml version="1.0" encoding="utf-8"?>
+    zf.writestr("OEBPS/content.opf", f'''<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
   <manifest>
-    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch1" href="{ch1_href}" media-type="application/xhtml+xml"/>
     <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
   </manifest>
   <spine>
@@ -89,8 +91,8 @@ with zipfile.ZipFile(epub_path, "w") as zf:
     <itemref idref="ch2"/>
   </spine>
 </package>''')
-    zf.writestr("OEBPS/ch1.xhtml", '''<html><body><h1>第一卷 星海篇</h1><h2>第1章 星海启航</h2><p>飞船穿过冰冷的星环，舰长按下启动钮。</p><p>引擎在深空中发出低吼。</p></body></html>''')
-    zf.writestr("OEBPS/ch2.xhtml", '''<html><body><h2>第2章 沉默信号</h2><p>次日清晨，雷达捕获了一段来自未知星系的旧时代频段。</p></body></html>''')
+    zf.writestr("OEBPS/" + ch1_name, '''<html><body><h1>第一卷 星海篇</h1><h2>第1章 星海启航</h2><p>飞船穿过冰冷的星环，舰长按下启动钮。</p><p>引擎在深空中发出低吼。</p></body></html>''')
+    zf.writestr("OEBPS/ch2.xhtml", '''<html><body><p class="chapter-title">第2章 沉默信号</p><p>次日清晨，雷达捕获了一段来自未知星系的旧时代频段。</p></body></html>''')
 `;
 
   try {
@@ -116,14 +118,101 @@ with zipfile.ZipFile(epub_path, "w") as zf:
 
     const idx = JSON.parse(fs.readFileSync(path.join(outDir, 'epub-smoke', 'tree_index.json'), 'utf8'));
     const txt = JSON.parse(fs.readFileSync(path.join(outDir, 'epub-smoke', 'tree_texts.json'), 'utf8'));
-    assert.strictEqual(idx.arcs.length, 2, 'EPUB should produce 2 chapters');
+    assert.strictEqual(idx.arcs.length, 2, 'EPUB with URL-encoded Chinese href & class=chapter-title should produce 2 chapters');
     assert.strictEqual(idx.arcs[0].series, '第一卷 星海篇');
     assert.strictEqual(idx.arcs[0].order, 1);
     assert.strictEqual(idx.arcs[1].order, 2);
     assert.strictEqual(idx.source, 'sample.epub', 'source field must not leak absolute path');
     const ch1Text = txt[idx.arcs[0].scenes[0].node_id].text;
     assert(ch1Text.includes('飞船穿过冰冷的星环'), 'EPUB ch1 text preserved');
-    console.log(`  PASS: EPUB parsed cleanly via ${PYTHON_BIN} into 2 ordered arcs`);
+
+    // Web-novel TXT real-world quirks: unspaced headers, pirate ads, glued prefix, chapter reset -> auto-volume, heuristic cast
+    const webNovelPath = path.join(tmpDir, 'web_novel.txt');
+    const chapBlocks = ['『测试小说/作者:夜雨』\n爱下电子书Txt版阅读 https://ixdzs8.com\n------章节内容开始-------'];
+    for (let i = 1; i <= 10; i++) {
+      chapBlocks.push(
+        `第${i}章启程\n测试小说正文卷第${i}章启程清晨雾气慢慢散开。林墨说道：“第${i}次行动开始。”\n，测试小说\n苏夏问道：“情报确认好了吗？”\n`
+      );
+    }
+    chapBlocks.push('第二卷，新大陆，敬请期待ing\n网页版章节内容慢，请下载爱阅小说app阅读最新内容');
+    chapBlocks.push('第一章远航\n新大陆的港口响起汽笛，林墨站在甲板上望向地平线。');
+    fs.writeFileSync(webNovelPath, chapBlocks.join('\n'), 'utf8');
+
+    execFileSync(
+      PYTHON_BIN,
+      [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--input',
+        webNovelPath,
+        '--corpus-id',
+        'web-novel-smoke',
+        '--name',
+        '测试小说',
+        '--out-dir',
+        outDir,
+        '--min-chars',
+        '20',
+        '--no-llm',
+      ],
+      { stdio: 'inherit' }
+    );
+    const wnIdx = JSON.parse(fs.readFileSync(path.join(outDir, 'web-novel-smoke', 'tree_index.json'), 'utf8'));
+    const wnTxt = JSON.parse(fs.readFileSync(path.join(outDir, 'web-novel-smoke', 'tree_texts.json'), 'utf8'));
+    assert.strictEqual(wnIdx.arcs.length, 11, 'Web novel should parse 10 + 1 chapters');
+    assert.strictEqual(wnIdx.arcs[0].series, '第1卷', 'Prior chapters auto-grouped into 第1卷 after Ch.1 reset');
+    assert.strictEqual(wnIdx.arcs[10].series, '第2卷', 'Chapter reset creates 第2卷 while skipping teaser line');
+    const wnCh1 = wnTxt[wnIdx.arcs[0].scenes[0].node_id].text;
+    assert(wnCh1.startsWith('清晨雾气慢慢散开'), `Glued prefix must be stripped cleanly, got: ${wnCh1.slice(0, 40)}`);
+    assert(!wnCh1.includes('爱下电子书') && !wnCh1.includes('正文卷'), 'Ad lines & glued markers removed');
+    assert(wnIdx.arcs[0].characters.includes('林墨'), 'Offline heuristic cast extraction captures protagonist 林墨');
+
+    // SillyTavern V2 Character Card character_book + disabled & CSS/macro filtering
+    const cardPath = path.join(tmpDir, 'char_card_v2.json');
+    fs.writeFileSync(
+      cardPath,
+      JSON.stringify({
+        spec: 'chara_card_v2',
+        data: {
+          name: 'TestCard',
+          character_book: {
+            name: '白塔档案',
+            entries: [
+              { id: 1, comment: '白塔历史', enabled: true, key: ['白塔'], keysecondary: ['学院'], content: '北方眺望之高塔学院建于黄昏时代之前，分为魔法与龙之两大序列。' },
+              { id: 2, comment: 'V2禁用废案', enabled: false, key: ['废案'], content: '这段是作者已关闭的 V2 废案条目，绝不应该被导入书库正文。' },
+              { id: 3, comment: 'V1禁用草稿', disable: true, key: ['草稿'], content: '这段是带有 content 但 disable=true 的旧版关闭条目，也不应该导入。' },
+              { id: 4, comment: 'UI状态栏样式', enabled: true, key: ['状态栏'], content: '<style>.hud{color:#fff;padding:8px}</style>{{setvar::hp::100}}{{getvar::mp}}' },
+            ],
+          },
+        },
+      }),
+      'utf8'
+    );
+    execFileSync(
+      PYTHON_BIN,
+      [
+        path.join(ROOT, 'builders', 'build_lore.py'),
+        '--input',
+        cardPath,
+        '--corpus-id',
+        'card-v2-smoke',
+        '--name',
+        'V2卡设定',
+        '--out-dir',
+        outDir,
+        '--filter-game-stats',
+        '--no-llm',
+      ],
+      { stdio: 'inherit' }
+    );
+    const cardIdx = JSON.parse(fs.readFileSync(path.join(outDir, 'card-v2-smoke', 'tree_index.json'), 'utf8'));
+    const cardTxtStr = fs.readFileSync(path.join(outDir, 'card-v2-smoke', 'tree_texts.json'), 'utf8');
+    assert.strictEqual(cardIdx.arcs.length, 1, 'Character Card V2 lore book extracted');
+    assert(cardTxtStr.includes('北方眺望之高塔学院'), 'Enabled V2 character_book entry preserved');
+    assert(!cardTxtStr.includes('V2禁用废案') && !cardTxtStr.includes('V1禁用草稿'), 'Disabled V1/V2 entries must be skipped');
+    assert(!cardTxtStr.includes('.hud{color'), 'CSS/macro boilerplate filtered out cleanly');
+    assert(cardIdx.arcs[0].characters.includes('白塔') && cardIdx.arcs[0].characters.includes('学院'), 'Secondary keys merged');
+
+    console.log(`  PASS: EPUB (UTF-8 %E7%AC%AC1%E7%AB%A0), web-novel auto-volume & ad cleaning, and Character Card V2 lore verified via ${PYTHON_BIN}`);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -198,7 +287,7 @@ function testHygieneAndSyntax() {
 }
 
 async function main() {
-  testEpubBuilder();
+  testEpubAndBuilders();
 
   const cfgPath = path.join(ROOT, 'config.json');
   const cfgExistedBefore = fs.existsSync(cfgPath);
