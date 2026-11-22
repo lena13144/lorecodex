@@ -1,0 +1,11 @@
+{
+  "display_name": "LoreCodex 树形典籍检索 (st-tree-lore)",
+  "loading_order": 50,
+  "requires": [],
+  "optional": [],
+  "js": "extension/st-tree-lore/index.js",
+  "css": "extension/st-tree-lore/style.css",
+  "author": "LoreCodex",
+  "version": "2.0.0",
+  "homePage": "https://github.com/lena13144/lorecodex"
+}

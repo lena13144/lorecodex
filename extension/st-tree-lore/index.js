@@ -1,14 +1,28 @@
-import {
-    extension_prompt_types,
-    extension_prompt_roles,
-    saveSettingsDebounced,
-    setExtensionPrompt,
-    eventSource,
-    event_types,
-} from '../../../../script.js';
-import { extension_settings, getContext } from '../../../extensions.js';
-import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
-import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
+const stRootUrl = new URL(
+    import.meta.url.includes('/scripts/extensions/')
+        ? import.meta.url.slice(0, import.meta.url.indexOf('/scripts/extensions/') + 1)
+        : '../../../../',
+    import.meta.url,
+);
+
+const [
+    {
+        extension_prompt_types,
+        extension_prompt_roles,
+        saveSettingsDebounced,
+        setExtensionPrompt,
+        eventSource,
+        event_types,
+    },
+    { extension_settings, getContext },
+    { SlashCommand },
+    { SlashCommandParser },
+] = await Promise.all([
+    import(new URL('script.js', stRootUrl).href),
+    import(new URL('scripts/extensions.js', stRootUrl).href),
+    import(new URL('scripts/slash-commands/SlashCommand.js', stRootUrl).href),
+    import(new URL('scripts/slash-commands/SlashCommandParser.js', stRootUrl).href),
+]);
 
 const MODULE_NAME = 'st_tree_lore';
 const PROMPT_TAG = 'lorecodex_context';

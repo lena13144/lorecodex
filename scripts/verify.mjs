@@ -464,6 +464,12 @@ function testHygieneAndSyntax() {
     execFileSync('node', ['--check', path.join(ROOT, 'ui', 'js', f)], { stdio: 'inherit' });
   }
 
+  const rootManifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+  assert.strictEqual(rootManifest.js, 'extension/st-tree-lore/index.js');
+  assert.strictEqual(rootManifest.css, 'extension/st-tree-lore/style.css');
+  assert(fs.existsSync(path.join(ROOT, rootManifest.js)), 'Root manifest.js target must exist');
+  assert(fs.existsSync(path.join(ROOT, rootManifest.css)), 'Root manifest.css target must exist');
+
   const extDir = path.join(ROOT, 'extension', 'st-tree-lore');
   const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'));
   assert.strictEqual(manifest.js, 'index.js');

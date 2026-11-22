@@ -162,9 +162,11 @@ Then click **刷新 (`Reload`)** in the UI or call `POST /corpora/reload`.
 
 ## SillyTavern Extension (`st-tree-lore`)
 
-1. Copy `extension/st-tree-lore/` into `<SillyTavern>/public/scripts/extensions/third-party/st-tree-lore/`.
-2. Reload SillyTavern and open the **Extensions** panel (`LoreCodex 树形典籍检索 (st-tree-lore)`).
-3. Click **「打开书阁」** or **「在酒馆内查看完整轨迹」** (or type `/loreui`) to open the Workbench in a fullscreen in-SillyTavern modal overlay without leaving your chat page.
+1. **Option A · One-Click Install in SillyTavern via GitHub URL (Recommended)**:  
+   Open **Extensions → Install Extension** in SillyTavern and paste `https://github.com/lena13144/lorecodex` to install and enable one-click updates (you can even launch `node src/server.js` directly inside that cloned extension directory).
+2. **Option B · Manual Copy**:  
+   Copy `extension/st-tree-lore/` into `<SillyTavern>/public/scripts/extensions/third-party/st-tree-lore/` and reload SillyTavern.
+3. Open the **Extensions** panel (`LoreCodex 树形典籍检索 (st-tree-lore)`) and click **「打开书阁」** or **「在酒馆内查看完整轨迹」** (or type `/loreui`) to open the Workbench in a fullscreen in-SillyTavern modal overlay without leaving your chat page.
 4. Slash commands:
    - `/lorecodex [on|off]` — toggle retrieval
    - `/lorecorpus <corpus_id>` — switch active corpus

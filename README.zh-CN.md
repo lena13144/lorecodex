@@ -160,9 +160,11 @@ python3 builders/build_lore.py --input path/to/worldbook.json --corpus-id my-nov
 
 ## SillyTavern 酒馆插件安装（`st-tree-lore`）
 
-1. 将 `extension/st-tree-lore/` 复制到酒馆目录 `<SillyTavern>/public/scripts/extensions/third-party/st-tree-lore/`。
-2. 刷新酒馆页面，在扩展面板中展开 **「LoreCodex 树形典籍检索 (st-tree-lore)」**。
-3. 点击面板里的 **「打开书阁」** 或 **「在酒馆内查看完整轨迹」**（也可发送 `/loreui`），即可在酒馆当前页面直接弹出全屏典籍工作台浮层，无需跳转外部网页。
+1. **方式 A · 酒馆内 GitHub 一键安装（推荐）**：  
+   在 SillyTavern 右上角打开 **「扩展 (Extensions) → 安装扩展 (Install Extension)」**，粘贴仓库地址 `https://github.com/lena13144/lorecodex` 即可直接安装并支持后续在酒馆内一键检查更新（安装后也可直接进入酒馆克隆出的该扩展目录运行 `node src/server.js` 启动后端服务）。
+2. **方式 B · 手动复制安装**：  
+   将 `extension/st-tree-lore/` 复制到酒馆目录 `<SillyTavern>/public/scripts/extensions/third-party/st-tree-lore/` 并刷新页面。
+3. 在扩展面板中展开 **「LoreCodex 树形典籍检索 (st-tree-lore)」**，点击 **「打开书阁」** 或 **「在酒馆内查看完整轨迹」**（也可发送 `/loreui`），即可在酒馆当前页面直接弹出全屏典籍工作台浮层，无需跳转外部网页。
 4. 支持的斜杠命令：
    - `/lorecodex [on|off]` — 开关树检索
    - `/lorecorpus <corpus_id>` — 切换当前挂载书库
