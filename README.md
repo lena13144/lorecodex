@@ -22,7 +22,7 @@
 
 ---
 
-## Core Architecture: `--tree-only` Progressive Disclosure
+## Core Architecture: Progressive Tree Disclosure
 
 Instead of stuffing giant worldbooks or lossy vector fragments into your main model, a lightweight sidecar agent inspects your corpus in progressive tiers:
 
@@ -51,7 +51,7 @@ SillyTavern Chat Turn / API Request
 ## Key Capabilities
 
 1. **Zero-Dependency Runtime & Sub-Second Cold Boot**  
-   Pure Node.js (`>= 18`) runtime (`src/server.js`) with zero npm dependencies and zero vector/rerank API requirements.
+   Pure Node.js (`>= 18`) runtime (`src/server.js`) with zero npm dependencies, no vector database, and no Embedding or Rerank API required.
 2. **Multi-Corpus Pack Registry (`corpora/<id>/`)**  
    Hot-pluggable corpus packages (`corpus.json` + `tree_index.json` + `tree_texts.json` + optional `graph.json`). Every work can customize aliases, glossaries, stage-card disambiguation patterns, user-identity guards, DB scrubbers, and prompt XML framing.
 3. **Hardware-Level Spoiler Gate (`maxOrder`)**  
@@ -76,7 +76,7 @@ SillyTavern Chat Turn / API Request
 ```text
 lorecodex/
 ├── src/
-│   ├── server.js          # Zero-dependency HTTP server (--tree-only)
+│   ├── server.js          # Zero-dependency HTTP server
 │   ├── corpus_manager.js  # Multi-corpus discovery, metadata & lazy caching
 │   ├── tree_agent.js      # Progressive tree navigation, spoiler gate & LLM loop
 │   ├── prompt_builder.js  # Dynamic prompt & tool schema builder from corpus.json
@@ -208,6 +208,22 @@ npm test
 ```bash
 npm run verify
 ```
+
+---
+
+## Why Vectorless? (Design Journey)
+
+LoreCodex didn't start out vectorless—we took the full detour through traditional vector RAG first:
+
+1. **Stage 1: Traditional Vector RAG (Chunking + Embedding + Rerank)**  
+   When indexing multi-million-character fiction and game scripts, standard vector pipelines quickly hit three narrative walls:
+   - **Chunk fragmentation**: Fixed-size chunks slice dialogues and plot twists in half, feeding the RP model stripped-down fragments without emotional or timeline context.
+   - **Coreference & alias blindness**: Roleplay turns full of pronouns ("what she said back then"), character codenames/nicknames, or uncredited cameos often retrieve semantically similar but wrong scenes.
+   - **Heavy setup & maintenance**: Every new chapter meant re-embedding, loading large vector index files at boot, and configuring extra Embedding + Rerank APIs.
+2. **Stage 2: Tree Navigation + Vector Fallback (Hybrid Phase)**  
+   Inspired by PageIndex, we built a hierarchical Table of Contents so an inexpensive sidecar LLM could browse like a human reader and read complete scenes verbatim—while initially keeping vector search as a fallback. Once we paired tree browsing with millisecond, alias-aware in-RAM `grep_scenes`, trace logs showed a clear pattern: **the sidecar agent virtually never needed the vector fallback anymore**.
+3. **Stage 3: Dropping the Baggage (LoreCodex v2)**  
+   Removing the vector stack altogether left a dramatically faster, simpler engine: **hierarchical tree reasoning + millisecond alias/cameo grep + verbatim scene reading + spoiler gating**, with zero external dependencies and drag-and-drop corpus building.
 
 ---
 
