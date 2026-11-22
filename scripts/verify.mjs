@@ -1,8 +1,12 @@
 import assert from 'assert';
 import fs from 'fs';
+import http from 'http';
 import path from 'path';
-import { spawn, execFileSync, spawnSync } from 'child_process';
+import { spawn, execFile, execFileSync, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -59,8 +63,8 @@ async function postJson(urlPath, body, headers = {}) {
   return { status: r.status, ok: r.ok, data };
 }
 
-function testEpubAndBuilders() {
-  console.log('\n[1/9] Testing real-world EPUB, web-novel TXT, and Character Card V2 builders...');
+async function testEpubAndBuilders() {
+  console.log('\n[1/9] Testing real-world EPUB, web-novel TXT, Character Card V2, and in-place LLM upgrade builders...');
   const tmpDir = path.join(ROOT, '.tmp-builder-test');
   fs.rmSync(tmpDir, { recursive: true, force: true });
   fs.mkdirSync(tmpDir, { recursive: true });
@@ -212,7 +216,181 @@ with zipfile.ZipFile(epub_path, "w") as zf:
     assert(!cardTxtStr.includes('.hud{color'), 'CSS/macro boilerplate filtered out cleanly');
     assert(cardIdx.arcs[0].characters.includes('白塔') && cardIdx.arcs[0].characters.includes('学院'), 'Secondary keys merged');
 
-    console.log(`  PASS: EPUB (UTF-8 %E7%AC%AC1%E7%AB%A0), web-novel auto-volume & ad cleaning, and Character Card V2 lore verified via ${PYTHON_BIN}`);
+    // Mock OpenAI endpoint to verify in-place --upgrade, single-scene skip, ckpt caching, and series_meta extraction
+    const mockCounts = { leaf: 0, arc: 0, seriesMeta: 0 };
+    const mockSrv = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url.endsWith('/chat/completions')) {
+        const chunks = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => {
+          let content = '';
+          let body = {};
+          try {
+            body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            content = String(body?.messages?.[0]?.content || '');
+          } catch (_) {}
+
+          assert.strictEqual(body.thinking, undefined, 'Mock LLM requests should keep thinking enabled by default');
+          assert((body.max_tokens || 0) >= 2048, `Expected scaled max_tokens >= 2048 when thinking enabled, got ${body.max_tokens}`);
+
+          let replyObj;
+          if (content.includes('series_summary')) {
+            mockCounts.seriesMeta += 1;
+            const serMatch = content.match(/「([^」]+)」/);
+            const serLabel = serMatch ? serMatch[1] : '本卷';
+            replyObj = {
+              series_summary: `${serLabel}LLM总览：白川澄与林夜在星环观测站追查异常波段。`,
+              aliases: [['白川澄', '小澄', '澄博士']],
+              glossary: [`${serLabel}星环观测站：记录星界异常波段的北境哨所`],
+            };
+          } else if (content.includes('子场景')) {
+            mockCounts.arc += 1;
+            replyObj = {
+              description: '多幕章LLM汇总：白川澄在观测站校准信标并发现异常信号。',
+              characters: ['白川澄', '林夜'],
+              tone_tags: ['叙事/剧情'],
+            };
+          } else {
+            mockCounts.leaf += 1;
+            replyObj = {
+              title: '观测站异动',
+              summary: '白川澄在北境星环观测站校准旧历信标，记录到异常电波脉冲并联系林夜复核。',
+              characters: ['白川澄', '林夜'],
+              tone_tags: ['设定/档案'],
+            };
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(
+            JSON.stringify({
+              choices: [{ message: { content: JSON.stringify(replyObj) } }],
+              usage: { prompt_tokens: 120, completion_tokens: 45 },
+            })
+          );
+        });
+        return;
+      }
+      res.writeHead(404);
+      res.end('{}');
+    });
+
+    await new Promise((resolve) => mockSrv.listen(0, '127.0.0.1', resolve));
+    try {
+      const mockPort = mockSrv.address().port;
+      const mockCfgPath = path.join(tmpDir, 'mock_llm_cfg.json');
+      fs.writeFileSync(
+        mockCfgPath,
+        JSON.stringify({
+          chatBase: `http://127.0.0.1:${mockPort}/v1`,
+          chatKey: 'mock-key',
+          chatModel: 'mock-flash',
+        }),
+        'utf8'
+      );
+
+      const segA = '北境的风雪拍打着观测站穹顶。'.repeat(60) + '白川澄记下第1组异常频段。';
+      const segB = '深夜仪表盘突然闪烁蓝光。'.repeat(60) + '林夜推门走入记录室查看波形。';
+      const upgBookPath = path.join(tmpDir, 'upgrade_sample.txt');
+      fs.writeFileSync(
+        upgBookPath,
+        [
+          '# 第1卷',
+          '## 第1章 单幕序章',
+          '清晨的观测站还很安静，白川澄独自整理着旧历电报档案，准备等待星环信号。',
+          '## 第2章 双幕变局',
+          segA,
+          '***',
+          segB,
+          '# 第2卷',
+          '## 第3章 新篇章',
+          '第二卷开始时，南方的信使带回了新的星图拓本与密函，准备启程核对古碑坐标。',
+        ].join('\n'),
+        'utf8'
+      );
+
+      execFileSync(
+        PYTHON_BIN,
+        [
+          path.join(ROOT, 'builders', 'build_novel.py'),
+          '--input',
+          upgBookPath,
+          '--corpus-id',
+          'llm-upgrade-smoke',
+          '--name',
+          '升级测试传',
+          '--out-dir',
+          outDir,
+          '--min-chars',
+          '200',
+          '--target-chars',
+          '900',
+          '--max-chars',
+          '1200',
+          '--no-llm',
+        ],
+        { stdio: 'inherit' }
+      );
+
+      const preIdx = JSON.parse(fs.readFileSync(path.join(outDir, 'llm-upgrade-smoke', 'tree_index.json'), 'utf8'));
+      assert.strictEqual(preIdx.arcs.length, 3);
+      assert.strictEqual(preIdx.arcs[0].scenes.length, 1, 'Ch.1 must have 1 scene');
+      assert.strictEqual(preIdx.arcs[1].scenes.length, 2, 'Ch.2 must have 2 scenes');
+      assert.strictEqual(preIdx.arcs[2].scenes.length, 1, 'Ch.3 must have 1 scene');
+      const ch3OfflineSummary = preIdx.arcs[2].scenes[0].summary;
+
+      // Upgrade Vol 1 only: 3 leaf calls + 1 multi-scene arc call (Ch.1 single-scene skipped!) + 1 series_meta = 5
+      await execFileAsync(PYTHON_BIN, [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--upgrade',
+        '--corpus-id',
+        'llm-upgrade-smoke',
+        '--out-dir',
+        outDir,
+        '--config',
+        mockCfgPath,
+        '--series',
+        '第1卷',
+        '--workers',
+        '2',
+      ]);
+      assert.deepStrictEqual(mockCounts, { leaf: 3, arc: 1, seriesMeta: 1 }, `Unexpected Vol 1 LLM call counts: ${JSON.stringify(mockCounts)}`);
+
+      const midIdx = JSON.parse(fs.readFileSync(path.join(outDir, 'llm-upgrade-smoke', 'tree_index.json'), 'utf8'));
+      const midCfg = JSON.parse(fs.readFileSync(path.join(outDir, 'llm-upgrade-smoke', 'corpus.json'), 'utf8'));
+      assert(midIdx.series_summaries?.['第1卷']?.includes('LLM总览'), 'Vol 1 series_summary saved');
+      assert.strictEqual(midIdx.stats.llm_scenes, 3);
+      assert.strictEqual(midIdx.stats.llm_arcs, 2);
+      assert.strictEqual(midIdx.arcs[2].scenes[0].summary, ch3OfflineSummary, 'Vol 2 Ch.3 must stay untouched after Vol 1 upgrade');
+      assert(midCfg.aliases.some((g) => g.includes('白川澄') && g.includes('澄博士')), 'Aliases merged into corpus.json');
+      assert(midCfg.glossary.some((g) => g.includes('星环观测站')), 'Glossary merged into corpus.json');
+
+      // Upgrade full book: Vol 1 must hit ckpt (0 duplicate leaf/arc/meta calls); only Vol 2 (1 leaf + 1 seriesMeta) runs
+      mockCounts.leaf = 0;
+      mockCounts.arc = 0;
+      mockCounts.seriesMeta = 0;
+      await execFileAsync(PYTHON_BIN, [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--upgrade',
+        '--corpus-id',
+        'llm-upgrade-smoke',
+        '--out-dir',
+        outDir,
+        '--config',
+        mockCfgPath,
+        '--workers',
+        '2',
+      ]);
+      assert.deepStrictEqual(mockCounts, { leaf: 1, arc: 0, seriesMeta: 1 }, `Unexpected cached resume LLM counts: ${JSON.stringify(mockCounts)}`);
+
+      const postIdx = JSON.parse(fs.readFileSync(path.join(outDir, 'llm-upgrade-smoke', 'tree_index.json'), 'utf8'));
+      assert(postIdx.series_summaries?.['第1卷'] && postIdx.series_summaries?.['第2卷'], 'Both series summaries present');
+      assert.strictEqual(postIdx.stats.llm_scenes, 4);
+      assert.strictEqual(postIdx.stats.llm_arcs, 3);
+    } finally {
+      mockSrv.close();
+    }
+
+    console.log(`  PASS: EPUB, web-novel, Character Card V2, and in-place LLM --upgrade verified via ${PYTHON_BIN}`);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -287,7 +465,7 @@ function testHygieneAndSyntax() {
 }
 
 async function main() {
-  testEpubAndBuilders();
+  await testEpubAndBuilders();
 
   const cfgPath = path.join(ROOT, 'config.json');
   const cfgExistedBefore = fs.existsSync(cfgPath);
@@ -358,6 +536,9 @@ async function main() {
 
     const impOriginBlocked = await postJson('/corpora/import', { kind: 'novel', corpusId: 'x' }, { Origin: 'https://evil.example' });
     assert.strictEqual(impOriginBlocked.status, 403, 'POST /corpora/import from foreign origin must return 403');
+
+    const upgOriginBlocked = await postJson('/corpora/demo-chronicles/upgrade', { series: '' }, { Origin: 'https://evil.example' });
+    assert.strictEqual(upgOriginBlocked.status, 403, 'POST /corpora/:id/upgrade from foreign origin must return 403');
 
     const cfgLocalOk = await postJson('/config', {}, { Origin: BASE });
     assert.strictEqual(cfgLocalOk.status, 200, 'POST /config from localhost origin must succeed');

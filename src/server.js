@@ -46,7 +46,6 @@ const defaultCfg = {
   chatBase: 'https://api.openai.com/v1',
   chatKey: '',
   chatModel: 'deepseek-chat',
-  disableThinking: true,
 };
 
 let runtimeCfg = { ...defaultCfg };
@@ -63,9 +62,6 @@ if (process.env.CHAT_BASE) runtimeCfg.chatBase = process.env.CHAT_BASE;
 if (process.env.CHAT_KEY) runtimeCfg.chatKey = process.env.CHAT_KEY;
 if (process.env.CHAT_MODEL) runtimeCfg.chatModel = process.env.CHAT_MODEL;
 if (process.env.DEFAULT_CORPUS) runtimeCfg.defaultCorpus = process.env.DEFAULT_CORPUS;
-if (process.env.DISABLE_THINKING !== undefined) {
-  runtimeCfg.disableThinking = process.env.DISABLE_THINKING !== 'false';
-}
 if (cli.port && Number.isFinite(cli.port)) runtimeCfg.port = cli.port;
 if (cli.defaultCorpus) runtimeCfg.defaultCorpus = cli.defaultCorpus;
 
@@ -104,9 +100,7 @@ function saveCfg(patch) {
   if (typeof patch.chatBase === 'string' && normalizeBaseUrl(runtimeCfg.chatBase) !== prevBase && !hasNewKey) {
     runtimeCfg.chatKey = '';
   }
-  if (typeof patch.disableThinking === 'boolean') {
-    runtimeCfg.disableThinking = patch.disableThinking;
-  }
+  delete runtimeCfg.disableThinking;
   try {
     fs.writeFileSync(CFG_FILE, JSON.stringify(runtimeCfg, null, 2) + '\n', 'utf8');
   } catch (err) {
@@ -128,9 +122,6 @@ function mergeCfg(patch) {
     }
     if (typeof patch.chatBase === 'string' && normalizeBaseUrl(out.chatBase) !== prevBase && !hasNewKey) {
       out.chatKey = '';
-    }
-    if (typeof patch.disableThinking === 'boolean') {
-      out.disableThinking = patch.disableThinking;
     }
   }
   return out;
@@ -205,6 +196,75 @@ function pushJobLogs(job, chunk) {
   }
 }
 
+function runBuilderJob({ kind, corpusId, filename, bytes = 0, initLog, scriptArgs, cleanupFn = null }) {
+  const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  const job = {
+    id: jobId,
+    status: 'running',
+    kind,
+    corpusId,
+    filename,
+    bytes,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    logs: [initLog],
+    error: '',
+  };
+
+  importJobs.unshift(job);
+  if (importJobs.length > 20) {
+    const removed = importJobs.pop();
+    if (removed) importJobMap.delete(removed.id);
+  }
+  importJobMap.set(jobId, job);
+
+  const child = spawn(detectPythonBin(), scriptArgs, {
+    cwd: ROOT_DIR,
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  });
+
+  child.stdout.on('data', (d) => pushJobLogs(job, d.toString('utf8')));
+  child.stderr.on('data', (d) => pushJobLogs(job, d.toString('utf8')));
+
+  const doCleanup = () => {
+    if (typeof cleanupFn === 'function') {
+      try {
+        cleanupFn();
+      } catch (_) {}
+    }
+  };
+
+  child.on('error', (err) => {
+    doCleanup();
+    job.status = 'error';
+    job.error = err.message;
+    job.finishedAt = new Date().toISOString();
+    pushJobLogs(job, `[error] spawn failed: ${err.message}`);
+  });
+
+  child.on('close', (code) => {
+    doCleanup();
+    job.finishedAt = new Date().toISOString();
+    if (code === 0) {
+      try {
+        corpusManager.reload();
+        job.status = 'done';
+        pushJobLogs(job, `[${kind}] completed and reloaded corpora (${corpusManager.listCorpora().length} packs)`);
+      } catch (err) {
+        job.status = 'error';
+        job.error = err.message;
+        pushJobLogs(job, `[error] reload failed: ${err.message}`);
+      }
+    } else {
+      job.status = 'error';
+      job.error = `builder exited with code ${code}`;
+      pushJobLogs(job, `[error] ${job.error}`);
+    }
+  });
+
+  return job;
+}
+
 function startImportJob({
   kind,
   corpusId,
@@ -218,38 +278,17 @@ function startImportJob({
   filterGameStats,
   overwriteConfig,
 }) {
-  const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  const prepId = 'prep_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
   const safeName = path.basename(String(filename || 'upload.txt')).replace(/[^a-zA-Z0-9\u4e00-\u9fff._-]/g, '_') || 'upload.txt';
-  const jobTmpDir = path.join(TMP_UPLOADS_DIR, jobId);
+  const jobTmpDir = path.join(TMP_UPLOADS_DIR, prepId);
   fs.mkdirSync(jobTmpDir, { recursive: true });
   const uploadPath = path.join(jobTmpDir, safeName);
   fs.writeFileSync(uploadPath, fileBuffer);
 
   const targetCorpusId = kind === 'lore' && mergeInto ? mergeInto : corpusId;
-  const job = {
-    id: jobId,
-    status: 'running',
-    kind,
-    corpusId: targetCorpusId,
-    filename: safeName,
-    bytes: fileBuffer.length,
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-    logs: [`[import] queued ${kind} build for "${targetCorpusId}" (${safeName}, ${fileBuffer.length} bytes)`],
-    error: '',
-  };
-
-  importJobs.unshift(job);
-  if (importJobs.length > 20) {
-    const removed = importJobs.pop();
-    if (removed) importJobMap.delete(removed.id);
-  }
-  importJobMap.set(jobId, job);
-
-  let scriptPath = '';
   let args = [];
   if (kind === 'novel') {
-    scriptPath = path.join(ROOT_DIR, 'builders', 'build_novel.py');
+    const scriptPath = path.join(ROOT_DIR, 'builders', 'build_novel.py');
     args = [
       scriptPath,
       '--input',
@@ -267,7 +306,7 @@ function startImportJob({
     if (!useLlm) args.push('--no-llm');
     if (overwriteConfig) args.push('--overwrite-config');
   } else {
-    scriptPath = path.join(ROOT_DIR, 'builders', 'build_lore.py');
+    const scriptPath = path.join(ROOT_DIR, 'builders', 'build_lore.py');
     args = [
       scriptPath,
       '--input',
@@ -285,49 +324,48 @@ function startImportJob({
     if (!useLlm) args.push('--no-llm');
   }
 
-  const child = spawn(detectPythonBin(), args, {
-    cwd: ROOT_DIR,
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  return runBuilderJob({
+    kind,
+    corpusId: targetCorpusId,
+    filename: safeName,
+    bytes: fileBuffer.length,
+    initLog: `[import] queued ${kind} build for "${targetCorpusId}" (${safeName}, ${fileBuffer.length} bytes)`,
+    scriptArgs: args,
+    cleanupFn: () => fs.rmSync(jobTmpDir, { recursive: true, force: true }),
   });
+}
 
-  child.stdout.on('data', (d) => pushJobLogs(job, d.toString('utf8')));
-  child.stderr.on('data', (d) => pushJobLogs(job, d.toString('utf8')));
+function startUpgradeJob({ corpusId, series = '', limitArcs = 0, startArc = 1, workers = 10, skipMeta = false, force = false }) {
+  const scriptPath = path.join(ROOT_DIR, 'builders', 'build_novel.py');
+  const args = [
+    scriptPath,
+    '--upgrade',
+    '--corpus-id',
+    corpusId,
+    '--out-dir',
+    CORPORA_DIR,
+    '--config',
+    CFG_FILE,
+  ];
+  const ser = String(series || '').trim();
+  if (ser) args.push('--series', ser);
+  const w = Math.min(Math.max(Number(workers) || 10, 1), 24);
+  args.push('--workers', String(w));
+  const sa = Math.max(1, Number(startArc) || 1);
+  if (sa > 1) args.push('--start-arc', String(sa));
+  const la = Math.max(0, Number(limitArcs) || 0);
+  if (la > 0) args.push('--limit-arcs', String(la));
+  if (skipMeta) args.push('--skip-meta');
+  if (force) args.push('--force');
 
-  const cleanupTmp = () => {
-    try {
-      fs.rmSync(jobTmpDir, { recursive: true, force: true });
-    } catch (_) {}
-  };
-
-  child.on('error', (err) => {
-    cleanupTmp();
-    job.status = 'error';
-    job.error = err.message;
-    job.finishedAt = new Date().toISOString();
-    pushJobLogs(job, `[error] spawn failed: ${err.message}`);
+  return runBuilderJob({
+    kind: 'upgrade',
+    corpusId,
+    filename: ser ? `upgrade:${ser}` : 'upgrade:all',
+    bytes: 0,
+    initLog: `[upgrade] queued in-place LLM summary upgrade for "${corpusId}"${ser ? ` (series=${ser})` : ''}${la > 0 ? ` limit=${la}` : ''}`,
+    scriptArgs: args,
   });
-
-  child.on('close', (code) => {
-    cleanupTmp();
-    job.finishedAt = new Date().toISOString();
-    if (code === 0) {
-      try {
-        corpusManager.reload();
-        job.status = 'done';
-        pushJobLogs(job, `[import] completed and reloaded corpora (${corpusManager.listCorpora().length} packs)`);
-      } catch (err) {
-        job.status = 'error';
-        job.error = err.message;
-        pushJobLogs(job, `[error] reload failed: ${err.message}`);
-      }
-    } else {
-      job.status = 'error';
-      job.error = `builder exited with code ${code}`;
-      pushJobLogs(job, `[error] ${job.error}`);
-    }
-  });
-
-  return job;
 }
 
 async function readJsonBody(req, maxBytes = 2 * 1024 * 1024) {
@@ -499,6 +537,38 @@ const server = http.createServer(async (req, res) => {
       const patch = await readJsonBody(req);
       const updated = corpusManager.updateCorpusConfig(cid, patch);
       return send({ ok: true, corpus: updated });
+    } catch (e) {
+      return send({ error: e.message }, e.statusCode || 400);
+    }
+  }
+
+  const corpusUpgradeMatch = pathname.match(/^\/corpora\/([^/]+)\/upgrade$/);
+  if (req.method === 'POST' && corpusUpgradeMatch) {
+    if (!isLocalOrAllowedOrigin(req.headers.origin)) {
+      return send({ error: 'origin not allowed' }, 403);
+    }
+    try {
+      const cid = decodeURIComponent(corpusUpgradeMatch[1]).trim();
+      if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(cid)) {
+        return send({ error: 'invalid corpus id' }, 400);
+      }
+      if (!corpusManager.hasCorpus(cid)) {
+        return send({ error: `corpus "${cid}" not found` }, 404);
+      }
+      if (!runtimeCfg.chatBase || !runtimeCfg.chatKey) {
+        return send({ error: '请先在服务配置中填好 chatBase 与 chatKey 后再执行 LLM 目录补全' }, 400);
+      }
+      const payload = await readJsonBody(req);
+      const job = startUpgradeJob({
+        corpusId: cid,
+        series: payload.series || '',
+        limitArcs: payload.limitArcs || 0,
+        startArc: payload.startArc || 1,
+        workers: payload.workers || 10,
+        skipMeta: Boolean(payload.skipMeta),
+        force: Boolean(payload.force),
+      });
+      return send({ ok: true, job }, 202);
     } catch (e) {
       return send({ error: e.message }, e.statusCode || 400);
     }

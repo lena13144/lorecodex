@@ -6,11 +6,45 @@ import {
   fetchCorpusDetail,
   saveCorpusConfig,
   importCorpus,
+  upgradeCorpus,
   fetchJob,
   fetchCorpora,
 } from './api.js';
 
+let activeModalPoll = null;
+function clearModalPoll() {
+  if (activeModalPoll) {
+    clearInterval(activeModalPoll);
+    activeModalPoll = null;
+  }
+}
+
+function startModalJobPoll({ jobId, logsEl, statusEl, runningText, onDone, onError }) {
+  clearModalPoll();
+  activeModalPoll = setInterval(async () => {
+    try {
+      const jr = await fetchJob(jobId);
+      const job = jr.job;
+      if (logsEl) {
+        logsEl.textContent = (job.logs || []).join('\n');
+        logsEl.scrollTop = logsEl.scrollHeight;
+      }
+      if (job.status === 'done') {
+        clearModalPoll();
+        if (onDone) await onDone(job);
+      } else if (job.status === 'error') {
+        clearModalPoll();
+        if (statusEl) statusEl.textContent = `任务失败: ${job.error}`;
+        if (onError) await onError(job);
+      } else if (statusEl) {
+        statusEl.textContent = runningText ? runningText(job) : `正在运行 (${job.kind})...`;
+      }
+    } catch (_) {}
+  }, 500);
+}
+
 export function closeModal() {
+  clearModalPoll();
   $('#modalBackdrop').classList.remove('open');
   $('#modalDialog').className = 'modal-dialog';
   $('#modalDialog').innerHTML = '';
@@ -64,17 +98,9 @@ export async function openSettingsModal() {
             <button id="cfgFetchModels" type="button" class="btn-sm" style="white-space:nowrap;">拉取模型</button>
           </div>
         </div>
-        <div class="fld-row-2">
-          <div class="fld-group">
-            <label class="fld">默认启动书库</label>
-            <select id="cfgDefaultCorpus" class="fld-sel">${corpusOptions}</select>
-          </div>
-          <div class="fld-group" style="justify-content:flex-end;">
-            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;">
-              <input id="cfgDisableThinking" type="checkbox" ${cfg.disableThinking !== false ? 'checked' : ''} />
-              <span>请求附带 thinking: disabled（不支持时自动降级）</span>
-            </label>
-          </div>
+        <div class="fld-group">
+          <label class="fld">默认启动书库</label>
+          <select id="cfgDefaultCorpus" class="fld-sel">${corpusOptions}</select>
         </div>
         <div id="cfgStatus" class="pane-sub"></div>
       </div>
@@ -108,7 +134,6 @@ export async function openSettingsModal() {
           chatBase: $('#cfgBase').value.trim(),
           chatModel: $('#cfgModel').value.trim(),
           defaultCorpus: $('#cfgDefaultCorpus').value,
-          disableThinking: $('#cfgDisableThinking').checked,
         };
         const newKey = $('#cfgKey').value.trim();
         if (newKey) patch.chatKey = newKey;
@@ -144,6 +169,16 @@ export async function openCorpusModal() {
     const boilerText = (c.db_scrubber?.boilerplate_patterns || []).join('\n');
     const sumPriText = (c.db_scrubber?.summary_priority_patterns || []).join('\n');
 
+    const seriesList = Array.isArray(state.index?.series) ? state.index.series : [];
+    const totalScenes = Number(state.index?.stats?.scenes || detail.stats?.scenes || 0);
+    const llmScenes = Number(state.index?.stats?.llm_scenes || 0);
+    const seriesOptions = [
+      '<option value="">全部卷宗</option>',
+      ...seriesList.map(
+        (s) => `<option value="${esc(s.series)}">${esc(s.series)} (${s.arcs}卷 / ${s.scenes}幕)</option>`
+      ),
+    ].join('');
+
     $('#modalDialog').innerHTML = `
       <div class="modal-head">
         <span class="modal-title">语料包在线配置 · ${esc(c.name)} (${esc(c.id)})</span>
@@ -153,6 +188,7 @@ export async function openCorpusModal() {
         <div class="modal-tab active" data-ctab="basic">基础与世界观</div>
         <div class="modal-tab" data-ctab="aliases">别名与编制表</div>
         <div class="modal-tab" data-ctab="framing">防误判与注入包装</div>
+        <div class="modal-tab" data-ctab="upgrade">LLM 目录补全</div>
       </div>
       <div class="modal-body">
         <div id="ctab-basic" class="ctab-pane" style="display:flex;flex-direction:column;gap:10px;">
@@ -205,6 +241,39 @@ export async function openCorpusModal() {
             <div class="fld-group"><label class="fld">优先摘要正则（每行一条）</label><textarea id="ccSumPri" rows="2">${esc(sumPriText)}</textarea></div>
           </div>
         </div>
+
+        <div id="ctab-upgrade" class="ctab-pane" style="display:none;flex-direction:column;gap:10px;">
+          <div class="pane-sub" id="ccUpgCoverage">
+            当前 LLM 目录覆盖度：<b>${llmScenes}</b> / ${totalScenes} 幕（单幕章节自动复用幕级摘要，支持断点续传与分卷补全）
+          </div>
+          <div class="fld-row-2">
+            <div class="fld-group">
+              <label class="fld">目标分卷范围</label>
+              <select id="ccUpgSeries" class="fld-sel">${seriesOptions}</select>
+            </div>
+            <div class="fld-group">
+              <label class="fld">限量章数（0 = 所选范围全部）</label>
+              <input id="ccUpgLimit" type="number" min="0" value="0" />
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;font-size:12px;">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input id="ccUpgSynthMeta" type="checkbox" checked />
+              <span>同时提炼别名表、设定速查与分卷简介</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input id="ccUpgForce" type="checkbox" />
+              <span>强制重生成已有摘要</span>
+            </label>
+          </div>
+          <div>
+            <button id="ccUpgStartBtn" type="button" class="btn-seal">开始原地补全 LLM 目录</button>
+          </div>
+          <div id="ccUpgJobWrap" style="display:none;flex-direction:column;gap:6px;">
+            <div id="ccUpgJobStatus" style="font-size:12px;font-weight:600;">准备补全...</div>
+            <div id="ccUpgJobLogs" class="job-logs"></div>
+          </div>
+        </div>
       </div>
       <div class="modal-foot">
         <button data-close-modal>取消</button>
@@ -223,6 +292,44 @@ export async function openCorpusModal() {
           $(`#ctab-${tab.dataset.ctab}`).style.display = 'flex';
         });
       });
+
+    $('#ccUpgStartBtn')?.addEventListener('click', async () => {
+      const upgBtn = $('#ccUpgStartBtn');
+      upgBtn.disabled = true;
+      $('#ccUpgJobWrap').style.display = 'flex';
+      $('#ccUpgJobStatus').textContent = '正在提交 LLM 目录补全任务...';
+      try {
+        const res = await upgradeCorpus(c.id, {
+          series: $('#ccUpgSeries').value,
+          limitArcs: Math.max(0, Number($('#ccUpgLimit').value) || 0),
+          skipMeta: !$('#ccUpgSynthMeta').checked,
+          force: $('#ccUpgForce').checked,
+        });
+        startModalJobPoll({
+          jobId: res.job.id,
+          logsEl: $('#ccUpgJobLogs'),
+          statusEl: $('#ccUpgJobStatus'),
+          runningText: () => '正在执行 LLM 目录补全（可切回主页面或稍候）...',
+          onDone: async () => {
+            $('#ccUpgJobStatus').textContent = '补全完成！正在热重载书库索引...';
+            const listRes = await fetchCorpora();
+            state.corpora = listRes.corpora || [];
+            await actions.switchCorpus?.(c.id, { keepRun: true });
+            const newLlm = state.index?.stats?.llm_scenes || 0;
+            const newTot = state.index?.stats?.scenes || totalScenes;
+            $('#ccUpgCoverage').innerHTML = `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已完成本轮补全并重载）`;
+            showToast(`书库「${c.id}」LLM 目录补全完成！`, 'ok');
+            upgBtn.disabled = false;
+          },
+          onError: () => {
+            upgBtn.disabled = false;
+          },
+        });
+      } catch (e) {
+        $('#ccUpgJobStatus').textContent = '提交失败: ' + e.message;
+        upgBtn.disabled = false;
+      }
+    });
 
     $('#ccSaveBtn').addEventListener('click', async () => {
       try {
@@ -276,7 +383,6 @@ export async function openCorpusModal() {
 
 export function openImportModal() {
   let selectedFile = null;
-  let pollTimer = null;
 
   const mergeOptions = [
     '<option value="">（新建独立设定书库）</option>',
@@ -354,7 +460,6 @@ export function openImportModal() {
   `);
 
   const cleanupClose = () => {
-    clearInterval(pollTimer);
     closeModal();
   };
   $('#modalDialog').querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', cleanupClose));
@@ -434,33 +539,28 @@ export function openImportModal() {
 
       const jobId = res.job.id;
       const targetId = res.job.corpusId;
-      pollTimer = setInterval(async () => {
-        try {
-          const jr = await fetchJob(jobId);
-          const job = jr.job;
-          $('#impJobLogs').textContent = (job.logs || []).join('\n');
-          $('#impJobLogs').scrollTop = $('#impJobLogs').scrollHeight;
-          if (job.status === 'done') {
-            clearInterval(pollTimer);
-            $('#impJobStatus').textContent = `构建完成！书库 "${targetId}" 已入库`;
-            const listRes = await fetchCorpora();
-            state.corpora = listRes.corpora || [];
-            showToast(`书库「${targetId}」导入建树成功！`, 'ok');
-            const switchBtn = $('#impDoneSwitchBtn');
-            switchBtn.style.display = 'inline-flex';
-            switchBtn.onclick = async () => {
-              await actions.switchCorpus?.(targetId);
-              cleanupClose();
-            };
-          } else if (job.status === 'error') {
-            clearInterval(pollTimer);
-            $('#impJobStatus').textContent = `构建失败: ${job.error}`;
-            startBtn.disabled = false;
-          } else {
-            $('#impJobStatus').textContent = `正在运行 (${job.kind})...`;
-          }
-        } catch (_) {}
-      }, 450);
+      startModalJobPoll({
+        jobId,
+        logsEl: $('#impJobLogs'),
+        statusEl: $('#impJobStatus'),
+        runningText: (job) => `正在运行 (${job.kind})...`,
+        onDone: async () => {
+          $('#impJobStatus').textContent = `构建完成！书库 "${targetId}" 已入库`;
+          const listRes = await fetchCorpora();
+          state.corpora = listRes.corpora || [];
+          showToast(`书库「${targetId}」导入建树成功！`, 'ok');
+          const switchBtn = $('#impDoneSwitchBtn');
+          switchBtn.style.display = 'inline-flex';
+          switchBtn.onclick = async () => {
+            await actions.switchCorpus?.(targetId);
+            cleanupClose();
+          };
+        },
+        onError: (job) => {
+          $('#impJobStatus').textContent = `构建失败: ${job.error}`;
+          startBtn.disabled = false;
+        },
+      });
     } catch (e) {
       $('#impJobStatus').textContent = '提交失败: ' + e.message;
       startBtn.disabled = false;

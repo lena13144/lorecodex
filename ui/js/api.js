@@ -93,6 +93,14 @@ export function importCorpus(payload) {
   });
 }
 
+export function upgradeCorpus(id, payload) {
+  return reqJson(`/corpora/${encodeURIComponent(id)}/upgrade`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export function fetchJob(jobId) {
   return reqJson(`/jobs/${encodeURIComponent(jobId)}`);
 }

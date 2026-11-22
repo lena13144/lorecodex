@@ -159,12 +159,20 @@ export function renderTrace(out) {
         })
         .join('');
 
+      const reasoningHtml = st.reasoning
+        ? `<details class="raw-block">
+          <summary>思考过程 (${st.reasoning.length} 字)</summary>
+          <pre class="raw-pre">${esc(st.reasoning)}</pre>
+        </details>`
+        : '';
+
       return `
       <div class="turn-card">
         <div class="turn-head">
           <span class="turn-title">第 ${st.turn} 轮 · ${kindText}</span>
           <span class="turn-stat">LLM ${st.llm_ms}ms${st.tool_ms ? ` · Tool ${st.tool_ms}ms` : ''}</span>
         </div>
+        ${reasoningHtml}
         ${calls || '<div style="font-size:11.5px;color:var(--ink-muted);">模型未再调用工具，直接输出最终 JSON。</div>'}
       </div>
     `;

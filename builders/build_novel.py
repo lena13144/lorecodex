@@ -22,7 +22,11 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 CN_NUM_MAP = {
     "零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
@@ -627,17 +631,14 @@ def heuristic_scene_meta(arc_title, scene_idx, total_in_arc, text, alias_pool=No
 
 def llm_json(cfg, prompt, max_tokens=280, retries=4):
     url = cfg["chatBase"].rstrip("/") + "/chat/completions"
-    disable_thinking = cfg.get("disableThinking", True)
     last_err = None
     for attempt in range(retries):
         payload = {
             "model": cfg["chatModel"],
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
-            "max_tokens": max_tokens,
+            "max_tokens": max(max_tokens + 2000, 2400),
         }
-        if disable_thinking:
-            payload["thinking"] = {"type": "disabled"}
         try:
             req = urllib.request.Request(
                 url,
@@ -651,7 +652,7 @@ def llm_json(cfg, prompt, max_tokens=280, retries=4):
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             txt = data["choices"][0]["message"]["content"]
-            usage = data.get("usage", {})
+            usage = data.get("usage") or {}
             m = re.search(r"```(?:json)?\s*([\s\S]*?)```", txt)
             raw = m.group(1) if m else txt
             m2 = re.search(r"(\{[\s\S]*\})", raw)
@@ -659,9 +660,6 @@ def llm_json(cfg, prompt, max_tokens=280, retries=4):
             return parsed, usage
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace")
-            if e.code == 400 and disable_thinking and re.search(r"thinking|unrecognized|unknown", err_body, re.I):
-                disable_thinking = False
-                continue
             last_err = f"HTTP {e.code}: {err_body[:150]}"
             wait_s = min(25.0, 1.5 * (2 ** attempt)) if e.code in (429, 500, 502, 503, 504) else 1.2 * (attempt + 1)
             time.sleep(wait_s)
@@ -671,11 +669,160 @@ def llm_json(cfg, prompt, max_tokens=280, retries=4):
     raise RuntimeError(f"LLM failed after {retries} attempts: {last_err}")
 
 
+def atomic_write_json(path, obj, indent=None):
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=indent)
+    os.replace(tmp_path, path)
+
+
+def merge_alias_groups(existing_groups, new_groups, max_groups=60):
+    existing_terms_lower = set()
+    merged = []
+
+    def _absorb(group, is_new=False):
+        if not isinstance(group, (list, tuple)):
+            return
+        seen_local = set()
+        clean = []
+        for raw in group:
+            term = str(raw or "").strip()
+            if not term:
+                continue
+            low = term.lower()
+            if is_new and len(term) < 2 and low not in existing_terms_lower:
+                continue
+            if low in seen_local:
+                continue
+            seen_local.add(low)
+            clean.append(term)
+        if len(clean) < 2:
+            return
+        if not is_new:
+            for t in clean:
+                existing_terms_lower.add(t.lower())
+
+        clean_lower = {t.lower() for t in clean}
+        hit_indices = []
+        for idx, grp in enumerate(merged):
+            if any(t.lower() in clean_lower for t in grp):
+                hit_indices.append(idx)
+
+        if not hit_indices:
+            merged.append(clean)
+            return
+
+        primary = hit_indices[0]
+        combined = []
+        combined_lower = set()
+        for idx in hit_indices:
+            for t in merged[idx]:
+                if t.lower() not in combined_lower:
+                    combined_lower.add(t.lower())
+                    combined.append(t)
+        for t in clean:
+            if t.lower() not in combined_lower:
+                combined_lower.add(t.lower())
+                combined.append(t)
+        merged[primary] = combined
+        for idx in reversed(hit_indices[1:]):
+            merged.pop(idx)
+
+    for grp in existing_groups or []:
+        _absorb(grp, is_new=False)
+    for grp in new_groups or []:
+        _absorb(grp, is_new=True)
+    return merged[:max_groups]
+
+
+def merge_glossary(existing_list, new_list, max_items=35):
+    def _head(item):
+        for sep in ("：", ":"):
+            if sep in item:
+                h = item.split(sep, 1)[0].strip().lower()
+                if h:
+                    return h
+        return item.strip().lower()
+
+    out = []
+    seen_heads = set()
+    seen_full = set()
+    for raw in existing_list or []:
+        item = str(raw or "").strip()
+        if not item:
+            continue
+        h = _head(item)
+        full = item.lower()
+        if h in seen_heads or full in seen_full:
+            continue
+        seen_heads.add(h)
+        seen_full.add(full)
+        out.append(item)
+
+    for raw in new_list or []:
+        item = str(raw or "").strip()
+        if not item or len(item) > 220:
+            continue
+        h = _head(item)
+        full = item.lower()
+        if h in seen_heads or full in seen_full:
+            continue
+        seen_heads.add(h)
+        seen_full.add(full)
+        out.append(item)
+        if len(out) >= max_items:
+            break
+    return out[:max_items]
+
+
+def build_series_digest(ser_arcs, max_samples=80, max_chars=6500):
+    if len(ser_arcs) <= max_samples:
+        sampled = ser_arcs
+    else:
+        step_indices = [int(i * (len(ser_arcs) - 1) / (max_samples - 1)) for i in range(max_samples)]
+        sampled = [ser_arcs[i] for i in dict.fromkeys(step_indices)]
+
+    lines = []
+    used = 0
+    for a in sampled:
+        ord_tag = f"第{a.get('order')}章 " if a.get("order") is not None else ""
+        desc = str(a.get("description") or "").replace("\n", " ").strip()[:65]
+        line = f"- {ord_tag}{a.get('title', '')}: {desc}"
+        if used + len(line) + 1 > max_chars and lines:
+            break
+        lines.append(line)
+        used += len(line) + 1
+
+    char_freq = collections.Counter()
+    for a in ser_arcs:
+        for ch in a.get("characters") or []:
+            cs = str(ch or "").strip()
+            if cs:
+                char_freq[cs] += 1
+    top_chars = [c for c, _ in char_freq.most_common(20)]
+    return "\n".join(lines), top_chars
+
+
+def select_target_arcs(arcs, series_filter="", start_arc=1, limit_arcs=0):
+    scoped = list(arcs)
+    ser = str(series_filter or "").strip()
+    if ser:
+        scoped = [a for a in scoped if str(a.get("series") or "").strip() == ser]
+        if not scoped:
+            avail = list(dict.fromkeys(str(a.get("series") or "").strip() or "(无分卷)" for a in arcs))
+            raise RuntimeError(f"Series '{ser}' not found. Available series: {', '.join(avail[:20])}")
+    start_idx = max(0, int(start_arc or 1) - 1)
+    scoped = scoped[start_idx:]
+    if limit_arcs and int(limit_arcs) > 0:
+        scoped = scoped[: int(limit_arcs)]
+    return scoped
+
+
 def main():
     parser = argparse.ArgumentParser(description="LoreCodex universal novel/TXT/MD/EPUB tree builder")
-    parser.add_argument("--input", required=True, help="Path to .txt / .md / .epub file or directory")
+    parser.add_argument("--input", default="", help="Path to .txt / .md / .epub file or directory")
     parser.add_argument("--corpus-id", required=True, help="Target corpus ID (e.g. my-novel)")
-    parser.add_argument("--name", required=True, help="Display name of the work")
+    parser.add_argument("--name", default="", help="Display name of the work")
     parser.add_argument("--out-dir", default="corpora", help="Corpora root directory (default: corpora)")
     parser.add_argument("--config", default="config.json", help="Config file with chatBase/chatKey/chatModel")
     parser.add_argument("--category", default="正文", help="Default category label (default: 正文)")
@@ -686,87 +833,122 @@ def main():
     parser.add_argument("--no-llm", action="store_true", help="Build deterministically without calling LLM API")
     parser.add_argument("--no-clean-ads", action="store_true", help="Disable web-novel ad/watermark line stripping")
     parser.add_argument("--overwrite-config", action="store_true", help="Overwrite existing corpus.json if present")
+    parser.add_argument("--upgrade", action="store_true", help="Upgrade an existing corpus index in place with LLM summaries")
+    parser.add_argument("--series", default="", help="Only LLM-summarize arcs belonging to this exact series")
+    parser.add_argument("--start-arc", type=int, default=1, help="1-based arc offset inside filtered scope")
+    parser.add_argument("--limit-arcs", type=int, default=0, help="Max arcs to LLM-summarize (0 = all)")
+    parser.add_argument("--skip-meta", action="store_true", help="Skip post-summarization series summary/aliases/glossary synthesis")
+    parser.add_argument("--force", action="store_true", help="Ignore cached LLM checkpoints for targeted arcs")
     args = parser.parse_args()
 
     out_corpus_dir = os.path.join(args.out_dir, args.corpus_id)
     os.makedirs(out_corpus_dir, exist_ok=True)
-
-    # Load optional existing aliases from corpus.json for heuristic character matching
-    alias_pool = []
     corpus_cfg_path = os.path.join(out_corpus_dir, "corpus.json")
+
+    existing_corpus_cfg = {}
+    alias_pool = []
     if os.path.exists(corpus_cfg_path):
         try:
             with open(corpus_cfg_path, "r", encoding="utf-8") as f:
-                cc = json.load(f)
-            for grp in cc.get("aliases", []):
+                existing_corpus_cfg = json.load(f)
+            for grp in existing_corpus_cfg.get("aliases", []):
                 alias_pool.extend(grp)
         except Exception:
-            pass
+            existing_corpus_cfg = {}
 
-    lines = load_input_lines(args.input)
-    chapters = parse_structure(lines, default_series_name="正文卷", book_name=args.name, clean_ads=not args.no_clean_ads)
-    if not chapters:
-        raise RuntimeError(f"No readable chapters parsed from {args.input}")
+    if args.upgrade:
+        if args.no_llm:
+            raise RuntimeError("--upgrade requires LLM mode and cannot be combined with --no-llm")
+        idx_path = os.path.join(out_corpus_dir, "tree_index.json")
+        txt_path = os.path.join(out_corpus_dir, "tree_texts.json")
+        if not os.path.exists(idx_path) or not os.path.exists(txt_path):
+            raise RuntimeError(f"Cannot --upgrade: tree_index.json or tree_texts.json missing in {out_corpus_dir}")
+        with open(idx_path, "r", encoding="utf-8") as f:
+            existing_index = json.load(f)
+        with open(txt_path, "r", encoding="utf-8") as f:
+            texts_map = json.load(f)
+        arcs = existing_index.get("arcs") or []
+        source_name = existing_index.get("source") or args.corpus_id
+        existing_series_summaries = dict(existing_index.get("series_summaries") or {})
+        if not args.name:
+            args.name = str(existing_corpus_cfg.get("name") or args.corpus_id).strip()
+        freq = collections.Counter()
+        for a in arcs:
+            for ch in a.get("characters") or []:
+                freq[ch] += 1
+        cast_pool = list(dict.fromkeys(alias_pool + [c for c, _ in freq.most_common(45)]))
+    else:
+        if not args.input:
+            raise RuntimeError("--input is required unless --upgrade is passed")
+        if not args.name:
+            args.name = os.path.splitext(os.path.basename(args.input))[0] or args.corpus_id
+        source_name = os.path.basename(os.path.normpath(args.input))
+        existing_series_summaries = {}
 
-    cast_pool = build_book_cast(chapters, alias_pool=alias_pool)
+        lines = load_input_lines(args.input)
+        chapters = parse_structure(lines, default_series_name="正文卷", book_name=args.name, clean_ads=not args.no_clean_ads)
+        if not chapters:
+            raise RuntimeError(f"No readable chapters parsed from {args.input}")
 
-    arcs = []
-    texts_map = {}
-    node_counter = 1
+        cast_pool = build_book_cast(chapters, alias_pool=alias_pool)
 
-    def next_nid():
-        nonlocal node_counter
-        v = f"{node_counter:04d}"
-        node_counter += 1
-        return v
+        arcs = []
+        texts_map = {}
+        node_counter = 1
 
-    for ch in chapters:
-        arc_id = next_nid()
-        raw_scenes = split_chapter_to_scenes(
-            ch["lines"],
-            min_chars=args.min_chars,
-            target_chars=args.target_chars,
-            max_chars=args.max_chars,
-        )
-        leaf_nodes = []
-        for idx, sc_text in enumerate(raw_scenes, 1):
-            nid = next_nid()
-            texts_map[nid] = {
+        def next_nid():
+            nonlocal node_counter
+            v = f"{node_counter:04d}"
+            node_counter += 1
+            return v
+
+        for ch in chapters:
+            arc_id = next_nid()
+            raw_scenes = split_chapter_to_scenes(
+                ch["lines"],
+                min_chars=args.min_chars,
+                target_chars=args.target_chars,
+                max_chars=args.max_chars,
+            )
+            leaf_nodes = []
+            for idx, sc_text in enumerate(raw_scenes, 1):
+                nid = next_nid()
+                texts_map[nid] = {
+                    "arc_id": arc_id,
+                    "arc_key": f"ch_{ch['order']:04d}",
+                    "arc_title": ch["title"],
+                    "group": f"ch_{ch['order']:04d}_{idx:02d}",
+                    "group_title": ch["title"],
+                    "chars": len(sc_text),
+                    "text": sc_text,
+                }
+                leaf_nodes.append({
+                    "node_id": nid,
+                    "group": f"ch_{ch['order']:04d}_{idx:02d}",
+                    "group_title": ch["title"],
+                    "scene_ids": [nid],
+                    "chars": len(sc_text),
+                    "order": ch["order"],
+                    "title": "",
+                    "summary": "",
+                    "tone_tags": [],
+                })
+
+            arcs.append({
                 "arc_id": arc_id,
                 "arc_key": f"ch_{ch['order']:04d}",
-                "arc_title": ch["title"],
-                "group": f"ch_{ch['order']:04d}_{idx:02d}",
-                "group_title": ch["title"],
-                "chars": len(sc_text),
-                "text": sc_text,
-            }
-            leaf_nodes.append({
-                "node_id": nid,
-                "group": f"ch_{ch['order']:04d}_{idx:02d}",
-                "group_title": ch["title"],
-                "scene_ids": [nid],
-                "chars": len(sc_text),
+                "series": ch["series"],
+                "category": args.category,
                 "order": ch["order"],
-                "title": "",
-                "summary": "",
+                "title": ch["title"],
+                "description": "",
+                "characters": [],
                 "tone_tags": [],
+                "groups": [s["group"] for s in leaf_nodes],
+                "total_chars": sum(s["chars"] for s in leaf_nodes),
+                "scenes": leaf_nodes,
+                "key_items": [],
             })
-
-        arcs.append({
-            "arc_id": arc_id,
-            "arc_key": f"ch_{ch['order']:04d}",
-            "series": ch["series"],
-            "category": args.category,
-            "order": ch["order"],
-            "title": ch["title"],
-            "description": "",
-            "characters": [],
-            "tone_tags": [],
-            "groups": [s["group"] for s in leaf_nodes],
-            "total_chars": sum(s["chars"] for s in leaf_nodes),
-            "scenes": leaf_nodes,
-            "key_items": [],
-        })
 
     cfg = {}
     if not args.no_llm:
@@ -786,12 +968,24 @@ def main():
                     rec = json.loads(l)
                     ckpt[rec["key"]] = rec
     ckpt_lock = threading.Lock()
+    usage_stats = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "reused_single_arcs": 0}
 
     def save_ckpt(rec):
         with ckpt_lock:
             ckpt[rec["key"]] = rec
             with open(ckpt_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    def record_usage(usage):
+        with ckpt_lock:
+            usage_stats["calls"] += 1
+            if isinstance(usage, dict):
+                usage_stats["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+                usage_stats["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+
+    series_summaries = dict(existing_series_summaries)
+    extracted_aliases = []
+    extracted_glossary = []
 
     if args.no_llm:
         for a in arcs:
@@ -811,11 +1005,17 @@ def main():
             a["description"] = "；".join(s["summary"][:60] for s in a["scenes"][:2])[:140]
             a["key_items"] = [s["title"] for s in a["scenes"][:8] if s["title"]]
     else:
+        target_arcs = select_target_arcs(arcs, args.series, args.start_arc, args.limit_arcs)
+        print(
+            f"[build_novel] LLM target scope: {len(target_arcs)}/{len(arcs)} arcs"
+            + (f" (series={args.series})" if args.series else "")
+        )
+
         todo_leaves = []
-        for a in arcs:
+        for a in target_arcs:
             for sc in a["scenes"]:
                 key = f"leaf:{sc['node_id']}"
-                if key in ckpt:
+                if not args.force and key in ckpt:
                     sc["title"] = ckpt[key].get("title", "")
                     sc["summary"] = ckpt[key].get("summary", "")
                     sc["tone_tags"] = ckpt[key].get("tone_tags", [])
@@ -825,23 +1025,24 @@ def main():
 
         def _run_leaf(item):
             a, sc, key = item
-            txt = texts_map[sc["node_id"]]["text"][:5200]
+            txt = texts_map[sc["node_id"]]["text"][:5400]
             prompt = (
                 f"你是《{args.name}》文本目录索引员。请为下面这段完整场景生成检索索引（注意把人称代词消解为具体人名）：\n"
                 "1. title: 6-14字场景标题，概括地点/人物或核心事件；\n"
-                "2. summary: 2句话（70-130字），保留人名、专有名词、重要物品、数字和事件转折；\n"
+                "2. summary: 2句话（70-130字），保留人名、化名/外号、专有名词、重要物品、数字和事件转折；\n"
                 "3. characters: 本幕直接出场或被明确提及的关键人物数组（最多6人）；\n"
                 "4. tone_tags: 从 [战斗/危机, 温情/日常, 心理/独白, 权谋/悬疑, 设定/档案, 叙事/剧情] 中选 1-2 个标签。\n"
                 "只输出严格 JSON：{\"title\":\"...\",\"summary\":\"...\",\"characters\":[],\"tone_tags\":[]}\n\n"
-                f"所属篇章：{a['series']} / {a['title']}\n正文：\n{txt}"
+                f"所属篇章：{a.get('series', '')} / {a['title']}\n正文：\n{txt}"
             )
-            parsed, _ = llm_json(cfg, prompt, max_tokens=300)
+            parsed, usage = llm_json(cfg, prompt, max_tokens=300)
+            record_usage(usage)
             rec = {
                 "key": key,
                 "title": str(parsed.get("title", "")).strip() or f"{a['title']}·片段",
                 "summary": str(parsed.get("summary", "")).strip(),
-                "characters": list(parsed.get("characters", []))[:6],
-                "tone_tags": list(parsed.get("tone_tags", []))[:2] or ["叙事/剧情"],
+                "characters": [str(x).strip() for x in (parsed.get("characters") or []) if str(x).strip()][:6],
+                "tone_tags": [str(x).strip() for x in (parsed.get("tone_tags") or []) if str(x).strip()][:2] or ["叙事/剧情"],
             }
             save_ckpt(rec)
             return sc, rec
@@ -874,15 +1075,34 @@ def main():
                         print(f"[build_novel] leaf progress: {done_cnt}/{len(todo_leaves)}")
 
         todo_arcs = []
-        for a in arcs:
+        for a in target_arcs:
+            scenes = a.get("scenes") or []
+            if len(scenes) == 1:
+                sc = scenes[0]
+                a["description"] = sc["summary"]
+                a["characters"] = list(sc.get("_chars") or a.get("characters") or [])[:8]
+                a["tone_tags"] = list(sc.get("tone_tags") or ["叙事/剧情"])[:2]
+                a["key_items"] = [sc["title"]] if sc.get("title") else []
+                usage_stats["reused_single_arcs"] += 1
+                continue
+
+            if not scenes:
+                continue
+
             key = f"arc:{a['arc_id']}"
-            if key in ckpt:
+            if not args.force and key in ckpt:
                 a["description"] = ckpt[key].get("description", "")
                 a["characters"] = ckpt[key].get("characters", [])
                 a["tone_tags"] = ckpt[key].get("tone_tags", [])
                 a["key_items"] = ckpt[key].get("key_items", [])
             else:
                 todo_arcs.append((a, key))
+
+        if usage_stats["reused_single_arcs"]:
+            print(
+                f"[build_novel] reused leaf summaries for {usage_stats['reused_single_arcs']} single-scene arcs "
+                f"(saved {usage_stats['reused_single_arcs']} LLM calls)"
+            )
 
         def _run_arc(item):
             a, key = item
@@ -893,21 +1113,22 @@ def main():
                 "2. characters: 核心出场人物数组（最多8人）；\n"
                 "3. tone_tags: 1-2个氛围标签。\n"
                 "只输出 JSON：{\"description\":\"...\",\"characters\":[],\"tone_tags\":[]}\n\n"
-                f"篇章：{a['series']} / {a['title']}\n子场景：\n{sc_lines}"
+                f"篇章：{a.get('series', '')} / {a['title']}\n子场景：\n{sc_lines}"
             )
-            parsed, _ = llm_json(cfg, prompt, max_tokens=280)
+            parsed, usage = llm_json(cfg, prompt, max_tokens=280)
+            record_usage(usage)
             rec = {
                 "key": key,
                 "description": str(parsed.get("description", "")).strip(),
-                "characters": list(parsed.get("characters", []))[:8],
-                "tone_tags": list(parsed.get("tone_tags", []))[:2] or ["叙事/剧情"],
+                "characters": [str(x).strip() for x in (parsed.get("characters") or []) if str(x).strip()][:8],
+                "tone_tags": [str(x).strip() for x in (parsed.get("tone_tags") or []) if str(x).strip()][:2] or ["叙事/剧情"],
                 "key_items": [s["title"] for s in a["scenes"][:8] if s.get("title")],
             }
             save_ckpt(rec)
             return a, rec
 
         if todo_arcs:
-            print(f"[build_novel] summarizing {len(todo_arcs)} arcs with LLM...")
+            print(f"[build_novel] summarizing {len(todo_arcs)} multi-scene arcs with LLM...")
             arc_done = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
                 fut_map = {ex.submit(_run_arc, it): it for it in todo_arcs}
@@ -918,10 +1139,17 @@ def main():
                         a, rec = fut.result()
                     except Exception as err:
                         print(f"[build_novel] warn arc {a['arc_id']} fallback ({err})")
+                        fb_chars = []
+                        seen_fc = set()
+                        for sc in a["scenes"]:
+                            for ch in sc.get("_chars") or []:
+                                if ch not in seen_fc:
+                                    seen_fc.add(ch)
+                                    fb_chars.append(ch)
                         rec = {
                             "key": key,
                             "description": "；".join(s["summary"][:60] for s in a["scenes"][:2])[:140],
-                            "characters": [],
+                            "characters": fb_chars[:8],
                             "tone_tags": ["叙事/剧情"],
                             "key_items": [s["title"] for s in a["scenes"][:8] if s.get("title")],
                         }
@@ -932,39 +1160,106 @@ def main():
                     if arc_done % 50 == 0 or arc_done == len(todo_arcs):
                         print(f"[build_novel] arc progress: {arc_done}/{len(todo_arcs)}")
 
+        if not args.skip_meta and target_arcs:
+            grouped = collections.OrderedDict()
+            for a in target_arcs:
+                ser_name = str(a.get("series") or a.get("category") or "正文卷").strip()
+                grouped.setdefault(ser_name, []).append(a)
+
+            for ser_name, ser_arcs in grouped.items():
+                meta_key = f"series_meta:{ser_name}:{len(ser_arcs)}"
+                if not args.force and meta_key in ckpt:
+                    rec = ckpt[meta_key]
+                else:
+                    digest_text, top_chars = build_series_digest(ser_arcs)
+                    meta_prompt = (
+                        f"你是《{args.name}》文本资料库总编。请根据以下「{ser_name}」的章节脉络与高频人物表，提炼全卷级检索元数据：\n"
+                        "1. series_summary: 60-120字精炼概括本卷主线剧情、核心舞台与关键转折；\n"
+                        "2. aliases: 同一人物/实体的本名、化名、外号、简称对照二维数组（每组至少2项，严禁把不同人混为一组，最多25组）；\n"
+                        "3. glossary: 本卷重要势力、组织、能力体系、核心地点或器物速查数组（每条“名称：一句话说明”，最多15条）。\n"
+                        "只输出严格 JSON：{\"series_summary\":\"60-120字概括本卷主线、核心舞台与转折\",\"aliases\":[[\"正式名\",\"化名/外号/简称\"]],\"glossary\":[\"重要势力/序列/组织/地点：一句话说明\"]}\n\n"
+                        f"高频人物：{', '.join(top_chars) if top_chars else '（暂无）'}\n"
+                        f"章节脉络（共 {len(ser_arcs)} 章）：\n{digest_text}"
+                    )
+                    try:
+                        parsed, usage = llm_json(cfg, meta_prompt, max_tokens=900)
+                        record_usage(usage)
+                        rec = {
+                            "key": meta_key,
+                            "series_summary": str(parsed.get("series_summary", "")).strip(),
+                            "aliases": parsed.get("aliases") if isinstance(parsed.get("aliases"), list) else [],
+                            "glossary": [str(x).strip() for x in (parsed.get("glossary") or []) if str(x).strip()],
+                        }
+                        save_ckpt(rec)
+                        print(
+                            f"[build_novel] synthesized meta for '{ser_name}': "
+                            f"summary={len(rec['series_summary'])}c, aliases={len(rec['aliases'])}, glossary={len(rec['glossary'])}"
+                        )
+                    except Exception as err:
+                        print(f"[build_novel] warn series_meta '{ser_name}' skipped ({err})")
+                        rec = None
+
+                if rec:
+                    if rec.get("series_summary"):
+                        series_summaries[ser_name] = rec["series_summary"]
+                    if rec.get("aliases"):
+                        extracted_aliases.extend(rec["aliases"])
+                    if rec.get("glossary"):
+                        extracted_glossary.extend(rec["glossary"])
+
         for a in arcs:
-            for sc in a["scenes"]:
+            for sc in a.get("scenes") or []:
                 sc.pop("_chars", None)
 
-    total_scenes = sum(len(a["scenes"]) for a in arcs)
-    total_chars = sum(a["total_chars"] for a in arcs)
+    total_scenes = sum(len(a.get("scenes") or []) for a in arcs)
+    total_chars = sum(
+        int(a.get("total_chars") or sum(int(s.get("chars") or 0) for s in (a.get("scenes") or [])))
+        for a in arcs
+    )
+    ckpt_keys = set(ckpt.keys())
+    llm_scenes_count = 0
+    llm_arcs_count = 0
+    for a in arcs:
+        sc_list = a.get("scenes") or []
+        if sc_list and all(f"leaf:{sc['node_id']}" in ckpt_keys for sc in sc_list):
+            if len(sc_list) == 1 or f"arc:{a['arc_id']}" in ckpt_keys:
+                llm_arcs_count += 1
+        for sc in sc_list:
+            if f"leaf:{sc['node_id']}" in ckpt_keys:
+                llm_scenes_count += 1
+
     index_doc = {
         "version": 2,
-        "source": os.path.basename(os.path.normpath(args.input)),
+        "source": source_name,
         "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "stats": {
             "arcs": len(arcs),
             "groups": total_scenes,
             "scenes": total_scenes,
             "total_chars": total_chars,
+            "llm_scenes": llm_scenes_count,
+            "llm_arcs": llm_arcs_count,
         },
         "arcs": arcs,
     }
+    if series_summaries:
+        index_doc["series_summaries"] = series_summaries
 
-    with open(os.path.join(out_corpus_dir, "tree_index.json"), "w", encoding="utf-8") as f:
-        json.dump(index_doc, f, ensure_ascii=False, indent=2)
-    with open(os.path.join(out_corpus_dir, "tree_texts.json"), "w", encoding="utf-8") as f:
-        json.dump(texts_map, f, ensure_ascii=False)
+    atomic_write_json(os.path.join(out_corpus_dir, "tree_index.json"), index_doc, indent=2)
+    if not args.upgrade:
+        atomic_write_json(os.path.join(out_corpus_dir, "tree_texts.json"), texts_map)
 
     if args.overwrite_config or not os.path.exists(corpus_cfg_path):
+        merged_aliases = merge_alias_groups([], extracted_aliases)
+        merged_glossary = merge_glossary([], extracted_glossary)
         corpus_cfg = {
             "id": args.corpus_id,
             "name": args.name,
             "description": f"《{args.name}》长文本典籍树（共 {len(arcs)} 卷 / {total_scenes} 幕 / {total_chars:,} 字）。",
             "language": "zh-CN",
             "world_premise": f"当前语料库收录了《{args.name}》的章节正文与相关背景资料。请严格基于已核实的章节原文提供角色扮演回忆或设定解答。",
-            "aliases": [],
-            "glossary": [],
+            "aliases": merged_aliases,
+            "glossary": merged_glossary,
             "spoiler_gate": {
                 "enabled": True,
                 "order_label": "章节进度",
@@ -984,11 +1279,33 @@ def main():
                 "presets": [],
             },
         }
-        with open(corpus_cfg_path, "w", encoding="utf-8") as f:
-            json.dump(corpus_cfg, f, ensure_ascii=False, indent=2)
+        atomic_write_json(corpus_cfg_path, corpus_cfg, indent=2)
+    elif extracted_aliases or extracted_glossary:
+        cur_cfg = dict(existing_corpus_cfg)
+        old_aliases = cur_cfg.get("aliases") or []
+        old_glossary = cur_cfg.get("glossary") or []
+        new_aliases = merge_alias_groups(old_aliases, extracted_aliases)
+        new_glossary = merge_glossary(old_glossary, extracted_glossary)
+        if new_aliases != old_aliases or new_glossary != old_glossary:
+            cur_cfg["aliases"] = new_aliases
+            cur_cfg["glossary"] = new_glossary
+            atomic_write_json(corpus_cfg_path, cur_cfg, indent=2)
+            print(
+                f"[build_novel] merged corpus.json metadata: aliases={len(old_aliases)}->{len(new_aliases)}, "
+                f"glossary={len(old_glossary)}->{len(new_glossary)}"
+            )
+
+    if not args.no_llm:
+        print(
+            f"[build_novel] LLM stats: calls={usage_stats['calls']}, "
+            f"reused_single_arcs={usage_stats['reused_single_arcs']}, "
+            f"prompt_tokens={usage_stats['prompt_tokens']}, "
+            f"completion_tokens={usage_stats['completion_tokens']}"
+        )
 
     print(
-        f"[build_novel] DONE corpus={args.corpus_id}: arcs={len(arcs)}, scenes={total_scenes}, chars={total_chars} -> {out_corpus_dir}"
+        f"[build_novel] DONE corpus={args.corpus_id}: arcs={len(arcs)}, scenes={total_scenes}, "
+        f"llm_scenes={llm_scenes_count}, llm_arcs={llm_arcs_count}, chars={total_chars} -> {out_corpus_dir}"
     )
 
 

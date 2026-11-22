@@ -117,8 +117,7 @@ lorecodex/
   "defaultCorpus": "demo-chronicles",
   "chatBase": "https://api.openai.com/v1",
   "chatKey": "your-api-key",
-  "chatModel": "deepseek-chat",
-  "disableThinking": true
+  "chatModel": "deepseek-chat"
 }
 ```
 

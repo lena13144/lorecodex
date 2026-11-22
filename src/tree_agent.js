@@ -58,6 +58,10 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
   const indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
   const textsData = JSON.parse(fs.readFileSync(textsPath, 'utf8'));
   const graphEngine = createGraphEngine(graphPath);
+  const seriesSummaries =
+    indexData.series_summaries && typeof indexData.series_summaries === 'object'
+      ? indexData.series_summaries
+      : {};
 
   const arcMap = new Map();
   const sceneMetaMap = new Map();
@@ -169,6 +173,8 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     total_chars: indexData.stats?.total_chars || totalChars,
     max_order: maxOrderAvailable,
     graph_edges: graphEngine.edgeCount,
+    llm_scenes: Number(indexData.stats?.llm_scenes || 0),
+    llm_arcs: Number(indexData.stats?.llm_arcs || 0),
   };
   const categories = [...categorySet];
   const toneTags = [...toneSet];
@@ -180,6 +186,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     min_order: s.min_order,
     max_order: s.max_order,
     categories: [...s.categories],
+    summary: String(seriesSummaries[s.series] || '').trim(),
   }));
 
   const grepEngine = createGrepEngine(searchableScenes, corpusConfig);
@@ -250,6 +257,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         .sort((a, b) => b[1] - a[1])
         .slice(0, 6)
         .map((x) => x[0]),
+      summary: String(seriesSummaries[e.series] || '').trim(),
     }));
   }
 
@@ -259,51 +267,58 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     return grepEngine.grepScenes(rawQuery, normalizedOpts);
   }
 
-  async function callChat({ base, key, model, messages, tools, disableThinking = true }) {
+  async function callChat({ base, key, model, messages, tools }) {
     const url = String(base || '').replace(/\/+$/, '') + '/chat/completions';
-    const makeBody = (withThinking) => {
-      const body = {
-        model,
-        messages,
-        temperature: 0.1,
-        max_tokens: 1400,
-      };
-      if (withThinking) {
-        body.thinking = { type: 'disabled' };
-      }
-      if (tools && tools.length) {
-        body.tools = tools;
-        body.tool_choice = 'auto';
-      }
-      return body;
+    const body = {
+      model,
+      messages,
+      temperature: 0.1,
+      max_tokens: 4096,
     };
+    if (tools && tools.length) {
+      body.tools = tools;
+      body.tool_choice = 'auto';
+    }
+    const payloadStr = JSON.stringify(body);
 
-    const doFetch = (withThinking) =>
-      fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: 'Bearer ' + key,
-        },
-        body: JSON.stringify(makeBody(withThinking)),
-        signal: AbortSignal.timeout(45000),
-      });
-
-    let resp = await doFetch(disableThinking !== false);
-    if (!resp.ok && disableThinking !== false && resp.status === 400) {
-      const errText = await resp.text().catch(() => '');
-      if (/thinking|unrecognized|unknown|extra_forbidden/i.test(errText)) {
-        console.warn(`[tree-agent:${corpusId}] upstream rejected thinking param, retrying without thinking`);
-        resp = await doFetch(false);
-      } else {
-        throw new Error(`chat HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+    const maxAttempts = 2;
+    let lastErr = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + key,
+          },
+          body: payloadStr,
+          signal: AbortSignal.timeout(45000),
+        });
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => '');
+          if ([429, 502, 503, 504].includes(resp.status) && attempt + 1 < maxAttempts) {
+            console.warn(`[tree-agent:${corpusId}] transient HTTP ${resp.status}, retrying in 1.5s...`);
+            await new Promise((r) => setTimeout(r, 1500));
+            continue;
+          }
+          throw new Error(`chat HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+        }
+        return resp.json();
+      } catch (err) {
+        lastErr = err;
+        const isTransient =
+          err?.name === 'TimeoutError' ||
+          err?.name === 'AbortError' ||
+          /timeout|aborted|fetch failed|ECONNRESET|ETIMEDOUT/i.test(String(err?.message || ''));
+        if (isTransient && attempt + 1 < maxAttempts) {
+          console.warn(`[tree-agent:${corpusId}] transient error (${err.message}), retrying in 1.5s...`);
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        throw err;
       }
     }
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => '');
-      throw new Error(`chat HTTP ${resp.status}: ${errText.slice(0, 200)}`);
-    }
-    return resp.json();
+    throw lastErr;
   }
 
   async function execTool(name, args, state, effectiveCfg) {
@@ -319,13 +334,15 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
           (x) =>
             x.series.toLowerCase().includes(kw) ||
             x.categories.some((c) => c.toLowerCase().includes(kw)) ||
-            x.top_characters.some((c) => c.toLowerCase().includes(kw))
+            x.top_characters.some((c) => c.toLowerCase().includes(kw)) ||
+            String(x.summary || '').toLowerCase().includes(kw)
         );
       }
       const lines = items.map((s) => {
         const range = s.min_order !== null ? ` | 序:${s.min_order}~${s.max_order}` : '';
         const chars = s.top_characters.length ? ` | 核心人物:${s.top_characters.join(',')}` : '';
-        return `[${s.series}] ${s.arcs}卷 ${s.scenes}幕 (${formatCharCount(s.total_chars)})${range}${chars}`;
+        const sumStr = s.summary ? ` | 简介:${s.summary}` : '';
+        return `[${s.series}] ${s.arcs}卷 ${s.scenes}幕 (${formatCharCount(s.total_chars)})${range}${chars}${sumStr}`;
       });
       return {
         text: lines.length ? lines.join('\n') : '未匹配到任何分部',
@@ -350,7 +367,8 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
           ...seriesOverview.map((s) => {
             const range = s.min_order !== null ? ` | 序:${s.min_order}~${s.max_order}` : '';
             const chars = s.top_characters.length ? ` | 人物:${s.top_characters.join(',')}` : '';
-            return `- [${s.series}] ${s.arcs}卷 ${s.scenes}幕 (${formatCharCount(s.total_chars)})${range}${chars}`;
+            const sumStr = s.summary ? ` | 简介:${s.summary}` : '';
+            return `- [${s.series}] ${s.arcs}卷 ${s.scenes}幕 (${formatCharCount(s.total_chars)})${range}${chars}${sumStr}`;
           }),
         ];
         return {
@@ -967,7 +985,6 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         model: effectiveCfg.chatModel,
         messages,
         tools: turn < maxTurns ? tools : undefined,
-        disableThinking: effectiveCfg.disableThinking !== false,
       });
       const reqMs = Date.now() - tReq;
       const u = resp.usage || {};
@@ -977,6 +994,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       const msg = resp?.choices?.[0]?.message;
       if (!msg) throw new Error('empty LLM choice');
       messages.push(msg);
+      const reasoning = String(msg.reasoning_content || msg.reasoning || '').trim().slice(0, 3000);
 
       const tcs = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
       if (!tcs.length) {
@@ -986,6 +1004,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
           llm_ms: reqMs,
           tool_ms: 0,
           usage: { prompt: u.prompt_tokens || 0, completion: u.completion_tokens || 0 },
+          reasoning,
           calls: [],
         });
         return buildResponse({
@@ -1040,6 +1059,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         llm_ms: reqMs,
         tool_ms: toolMs,
         usage: { prompt: u.prompt_tokens || 0, completion: u.completion_tokens || 0 },
+        reasoning,
         calls: stepCalls,
       });
     }
@@ -1056,19 +1076,20 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       model: effectiveCfg.chatModel,
       messages,
       tools: undefined,
-      disableThinking: effectiveCfg.disableThinking !== false,
     });
     const finalMs = Date.now() - tFinal;
     const fu = finalResp.usage || {};
     usage.prompt += fu.prompt_tokens || 0;
     usage.completion += fu.completion_tokens || 0;
     const fMsg = finalResp?.choices?.[0]?.message;
+    const fReasoning = String(fMsg?.reasoning_content || fMsg?.reasoning || '').trim().slice(0, 3000);
     steps.push({
       turn: maxTurns + 1,
       kind: 'final_forced',
       llm_ms: finalMs,
       tool_ms: 0,
       usage: { prompt: fu.prompt_tokens || 0, completion: fu.completion_tokens || 0 },
+      reasoning: fReasoning,
       calls: [],
     });
 
@@ -1123,10 +1144,13 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
                 scenes: visScenesCount,
                 total_chars: visChars,
                 max_order: stats.max_order,
+                llm_scenes: stats.llm_scenes,
+                llm_arcs: stats.llm_arcs,
               }
             : stats,
         categories,
         series: seriesList,
+        series_summaries: seriesSummaries,
         tone_tags: toneTags,
         arcs,
         aliases: corpusConfig.aliases || [],
