@@ -97,6 +97,7 @@ export async function openSettingsModal() {
             <datalist id="cfgModelList"></datalist>
             <button id="cfgFetchModels" type="button" class="btn-sm" style="white-space:nowrap;">拉取模型</button>
           </div>
+          <select id="cfgModelSelect" class="fld-sel" style="display:none;margin-top:6px;"></select>
         </div>
         <div class="fld-row-2">
           <div class="fld-group">
@@ -122,13 +123,31 @@ export async function openSettingsModal() {
       inp.type = inp.type === 'password' ? 'text' : 'password';
     });
 
+    $('#cfgModelSelect').addEventListener('change', (e) => {
+      const picked = e.target.value.trim();
+      if (picked) $('#cfgModel').value = picked;
+    });
+
     $('#cfgFetchModels').addEventListener('click', async () => {
       $('#cfgStatus').textContent = '正在拉取模型列表...';
       try {
         const j = await fetchModels($('#cfgBase').value.trim(), $('#cfgKey').value.trim());
+        const models = j.models || [];
         const dl = $('#cfgModelList');
-        if (dl) dl.innerHTML = (j.models || []).map((m) => `<option value="${esc(m)}"></option>`).join('');
-        $('#cfgStatus').textContent = `已拉取 ${(j.models || []).length} 个可用模型`;
+        if (dl) dl.innerHTML = models.map((m) => `<option value="${esc(m)}"></option>`).join('');
+        const sel = $('#cfgModelSelect');
+        if (sel && models.length) {
+          const cur = $('#cfgModel').value.trim();
+          sel.innerHTML =
+            `<option value="">-- 从已拉取的 ${models.length} 个模型中选择 --</option>` +
+            models.map((m) => `<option value="${esc(m)}" ${m === cur ? 'selected' : ''}>${esc(m)}</option>`).join('');
+          sel.style.display = 'block';
+          if (!cur || !models.includes(cur)) {
+            $('#cfgModel').value = models[0];
+            sel.value = models[0];
+          }
+        }
+        $('#cfgStatus').textContent = `已拉取 ${models.length} 个可用模型，可在下拉框直接选择`;
       } catch (e) {
         $('#cfgStatus').textContent = '拉取失败: ' + e.message;
       }

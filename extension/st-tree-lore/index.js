@@ -778,16 +778,18 @@ jQuery(async () => {
                     <div class="lorecodex-row">
                         <div style="flex:1;">
                             <small>模型名称：</small>
-                            <input id="lorecodex_chat_model" class="text_pole" type="text" value="${escHtml(cfg.chatModel || '')}" list="lorecodex_model_list" />
+                            <input id="lorecodex_chat_model" class="text_pole" type="text" value="${escHtml(cfg.chatModel || '')}" list="lorecodex_model_list" placeholder="可手动输入或点击右侧拉取后在下拉框选择" />
                             <datalist id="lorecodex_model_list"></datalist>
                         </div>
                         <button id="lorecodex_fetch_models" class="menu_button" style="width:auto;margin-top:16px;padding:4px 8px;">拉取模型</button>
                     </div>
+                    <select id="lorecodex_model_select" class="text_pole" style="display:none;"></select>
                     <div>
                         <small>单次输出 Max Tokens（留空 = 不限制，沿用模型默认）：</small>
                         <input id="lorecodex_max_tokens" class="text_pole" type="number" min="0" step="256" value="${Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : ''}" placeholder="沿用模型默认" />
                     </div>
                     <button id="lorecodex_save_srv" class="menu_button" style="width:100%;">保存当前模型与默认书库到服务端</button>
+                    <div id="lorecodex_model_status" class="lorecodex-status"></div>
                 </div>
             </details>
 
@@ -909,8 +911,17 @@ jQuery(async () => {
         }
     });
 
+    $('#lorecodex_model_select').on('change', function () {
+        const picked = String($(this).val() || '').trim();
+        if (!picked) return;
+        cfg.chatModel = picked;
+        $('#lorecodex_chat_model').val(picked);
+        saveSettingsDebounced();
+        $('#lorecodex_model_status').text(`已选择模型：${picked}（可点上方按钮同步保存到服务端）`);
+    });
+
     $('#lorecodex_fetch_models').on('click', async () => {
-        const st = $('#lorecodex_status');
+        const st = $('#lorecodex_model_status');
         st.text('正在拉取模型列表...');
         try {
             const r = await fetch(`${getServerBase(cfg)}/models`, {
@@ -920,16 +931,33 @@ jQuery(async () => {
             });
             const j = await r.json();
             if (!j.ok) throw new Error(j.error || 'failed');
+            const models = Array.isArray(j.models) ? j.models : [];
             const dl = $('#lorecodex_model_list').empty();
-            for (const m of j.models) dl.append(`<option value="${escHtml(m)}"></option>`);
-            st.text(`已拉取 ${j.models.length} 个模型`);
+            const sel = $('#lorecodex_model_select').empty();
+            sel.append(`<option value="">-- 点击此处从已拉取的 ${models.length} 个模型中选择 --</option>`);
+            for (const m of models) {
+                dl.append(`<option value="${escHtml(m)}"></option>`);
+                sel.append(`<option value="${escHtml(m)}" ${m === cfg.chatModel ? 'selected' : ''}>${escHtml(m)}</option>`);
+            }
+            if (models.length > 0) {
+                sel.show();
+                if (!cfg.chatModel || !models.includes(cfg.chatModel)) {
+                    cfg.chatModel = models[0];
+                    $('#lorecodex_chat_model').val(models[0]);
+                    sel.val(models[0]);
+                    saveSettingsDebounced();
+                }
+            }
+            st.text(`已拉取 ${models.length} 个模型，可在上方下拉框直接切换（当前：${cfg.chatModel || '未选'}）`);
+            if (typeof toastr !== 'undefined') toastr.success(`已拉取 ${models.length} 个模型`);
         } catch (e) {
             st.text('拉取失败: ' + e.message);
+            if (typeof toastr !== 'undefined') toastr.error('拉取模型失败: ' + e.message);
         }
     });
 
     $('#lorecodex_save_srv').on('click', async () => {
-        const st = $('#lorecodex_status');
+        const st = $('#lorecodex_model_status');
         try {
             const body = buildApiConfig(cfg);
             body.maxTokens = Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null;
@@ -941,6 +969,7 @@ jQuery(async () => {
             });
             const j = await r.json();
             st.text(j.ok ? '已保存配置到 LoreCodex 服务端 config.json' : ('保存失败: ' + j.error));
+            if (j.ok && typeof toastr !== 'undefined') toastr.success('已保存模型配置到 LoreCodex 服务端');
         } catch (e) {
             st.text('连接服务端失败: ' + e.message);
         }
