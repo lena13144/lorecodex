@@ -723,7 +723,8 @@ async function runLoreRetrieval(chat) {
     const clear = () => clearInjection(cfg);
     try {
         const ctx = getContext();
-        const msgs = Array.isArray(chat) && chat.length ? chat : (ctx?.chat || []);
+        // 读原始聊天记录：interceptor 传入的 chat 已套用仅作用于提示词的正则并拼入附件，内容和用户原话不一定一致。
+        const msgs = Array.isArray(ctx?.chat) && ctx.chat.length ? ctx.chat : (Array.isArray(chat) ? chat : []);
         const { query, onDemand, sessionRecall } = buildRetrievalInput(msgs);
         if (!query) { clear(); return; }
         await runTreeRetrieval(cfg, ctx, msgs, { query, onDemand, sessionRecall, clear });

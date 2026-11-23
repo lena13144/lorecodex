@@ -223,6 +223,14 @@ export async function testStExtension() {
     lc.searchGate = null;
     assert.strictEqual(lc.payloads.length, 1, 'concurrent run must not start a second search');
 
+    // 6b) The interceptor's chat is ST's coreChat (prompt-only regex applied, attachments appended); retrieval
+    //     must read the raw chat from getContext() instead.
+    lc.prompts.length = 0;
+    lc.payloads.length = 0;
+    lc.context.chat = [userMsg('雷达室那晚说了什么')];
+    await interceptor([{ ...userMsg('<被正则改写的提示词版本>') }], 8192, () => {}, 'normal');
+    assert.strictEqual(lc.payloads[0]?.query, '雷达室那晚说了什么', 'retrieval reads the raw chat, not the regexed coreChat');
+
     // 7) depth 0 is honoured (used to be coerced to 1).
     settings.depth = 0;
     await run([userMsg('雷达室那晚')]);
