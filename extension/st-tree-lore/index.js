@@ -63,6 +63,7 @@ const defaultSettings = {
     maxTokens: '',
     temperature: '',
     reasoningEffort: '',
+    llmStream: true,
     customXmlTag: '',
     customHeader: '',
     customPriorityRule: '',
@@ -204,6 +205,7 @@ function buildApiConfig(cfg) {
     if (t !== '') out.temperature = t;
     const re = normalizeReasoningEffort(cfg.reasoningEffort);
     if (re) out.reasoningEffort = re;
+    out.llmStream = cfg.llmStream !== false;
     return out;
 }
 
@@ -283,6 +285,7 @@ function openWorkbenchModal(cfg, { runId = '', corpusId = '', action = '' } = {}
             maxTokens: Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null,
             temperature: optionalTempOrNull(cfg.temperature),
             reasoningEffort: optionalReasoningOrNull(cfg.reasoningEffort),
+            llmStream: cfg.llmStream !== false,
         }).catch(() => {});
     }
     const { embedUrl, standaloneUrl } = buildWorkbenchUrls(cfg, { runId, corpusId, action });
@@ -1060,6 +1063,7 @@ jQuery(async () => {
                     cfg.maxTokens = Number(localCfg.maxTokens) > 0 ? Number(localCfg.maxTokens) : '';
                     cfg.temperature = normalizeTemperature(localCfg.temperature);
                     cfg.reasoningEffort = normalizeReasoningEffort(localCfg.reasoningEffort);
+                    cfg.llmStream = localCfg.llmStream !== false;
                 } else {
                     if ((cfg.maxTokens === '' || cfg.maxTokens === undefined || cfg.maxTokens === null) && Number(localCfg.maxTokens) > 0) {
                         cfg.maxTokens = Number(localCfg.maxTokens);
@@ -1085,6 +1089,7 @@ jQuery(async () => {
                 cfg.maxTokens = Number(srvCfg.maxTokens) > 0 ? Number(srvCfg.maxTokens) : '';
                 cfg.temperature = normalizeTemperature(srvCfg.temperature);
                 cfg.reasoningEffort = normalizeReasoningEffort(srvCfg.reasoningEffort);
+                cfg.llmStream = srvCfg.llmStream !== false;
             } else {
                 if ((cfg.maxTokens === '' || cfg.maxTokens === undefined || cfg.maxTokens === null) && Number(srvCfg.maxTokens) > 0) {
                     cfg.maxTokens = Number(srvCfg.maxTokens);
@@ -1359,6 +1364,7 @@ jQuery(async () => {
                 cfg.maxTokens = Number(localCfg.maxTokens) > 0 ? Number(localCfg.maxTokens) : '';
                 cfg.temperature = normalizeTemperature(localCfg.temperature);
                 cfg.reasoningEffort = normalizeReasoningEffort(localCfg.reasoningEffort);
+                cfg.llmStream = localCfg.llmStream !== false;
             }
         }
         saveSettingsDebounced();

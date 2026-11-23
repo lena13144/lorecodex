@@ -957,6 +957,79 @@ def heuristic_scene_meta(arc_title, scene_idx, total_in_arc, text, alias_pool=No
     }
 
 
+class _LlmHttpError(Exception):
+    def __init__(self, code, body):
+        super().__init__(f"HTTP {code}: {body[:150]}")
+        self.code = code
+
+
+def _post_chat(url, key, payload, stream=True, idle_timeout=90, total_timeout=60):
+    """POST /chat/completions; returns (content, finish_reason, usage).
+
+    stream=True sends ``stream: true`` and assembles the SSE deltas. The socket
+    timeout then applies per read, i.e. it is an idle timeout, so long reasoning is
+    not cut off. Endpoints that ignore ``stream`` and answer with plain JSON work too;
+    endpoints that reject it (HTTP 400/404/415/422) are retried once without it.
+    """
+    body = dict(payload)
+    if stream:
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream, application/json" if stream else "application/json",
+            "Authorization": f"Bearer {key}",
+        },
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=idle_timeout if stream else total_timeout)
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        if stream and e.code in (400, 404, 415, 422):
+            return _post_chat(url, key, payload, stream=False, idle_timeout=idle_timeout, total_timeout=total_timeout)
+        raise _LlmHttpError(e.code, err_body)
+    with resp:
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if not stream or ("json" in ctype and "event-stream" not in ctype):
+            data = json.loads(resp.read().decode("utf-8"))
+            choice = (data.get("choices") or [{}])[0]
+            return (choice.get("message") or {}).get("content"), choice.get("finish_reason"), data.get("usage") or {}
+        parts, finish, usage, saw = [], None, {}, False
+        for raw_line in resp:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            chunk = line[5:].strip()
+            if not chunk or chunk == "[DONE]":
+                continue
+            try:
+                j = json.loads(chunk)
+            except ValueError:
+                continue
+            if j.get("error"):
+                err = j["error"]
+                raise RuntimeError("stream error: " + str(err.get("message") if isinstance(err, dict) else err)[:200])
+            if j.get("usage"):
+                usage = j["usage"]
+            choices = j.get("choices") or []
+            if not choices:
+                continue
+            saw = True
+            ch = choices[0]
+            if ch.get("finish_reason"):
+                finish = ch["finish_reason"]
+            delta = ch.get("delta") or ch.get("message") or {}
+            if isinstance(delta.get("content"), str):
+                parts.append(delta["content"])
+        if not saw:
+            raise RuntimeError("empty stream response from LLM")
+        return "".join(parts), finish, usage
+
+
 def llm_json(cfg, prompt, retries=4):
     url = cfg["chatBase"].rstrip("/") + "/chat/completions"
     raw_mt = cfg.get("maxTokens") if cfg.get("maxTokens") is not None else cfg.get("max_tokens")
@@ -976,6 +1049,7 @@ def llm_json(cfg, prompt, retries=4):
         except (TypeError, ValueError):
             pass
     raw_re = str(cfg.get("reasoningEffort") or cfg.get("reasoning_effort") or "").strip().lower()
+    use_stream = cfg.get("llmStream") is not False
     last_err = None
     for attempt in range(retries):
         payload = {
@@ -989,25 +1063,12 @@ def llm_json(cfg, prompt, retries=4):
         if max_tokens_val is not None:
             payload["max_tokens"] = max_tokens_val
         try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {cfg['chatKey']}",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            choice = (data.get("choices") or [{}])[0]
-            txt = (choice.get("message") or {}).get("content")
-            usage = data.get("usage") or {}
+            txt, finish_reason, usage = _post_chat(url, cfg["chatKey"], payload, stream=use_stream)
             if not txt or not str(txt).strip():
                 # An empty content body is almost always the model spending the whole
                 # budget on reasoning tokens (finish_reason=length). Report that directly
                 # instead of letting re.search() raise a bare TypeError downstream.
-                finish = choice.get("finish_reason") or "unknown"
+                finish = finish_reason or "unknown"
                 used = usage.get("completion_tokens")
                 detail = f"finish_reason={finish}"
                 if used is not None:
@@ -1025,9 +1086,8 @@ def llm_json(cfg, prompt, retries=4):
             m2 = re.search(r"(\{[\s\S]*\})", raw)
             parsed = json.loads(m2.group(1) if m2 else raw)
             return parsed, usage
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="replace")
-            last_err = f"HTTP {e.code}: {err_body[:150]}"
+        except _LlmHttpError as e:
+            last_err = str(e)
             wait_s = min(25.0, 1.5 * (2 ** attempt)) if e.code in (429, 500, 502, 503, 504) else 1.2 * (attempt + 1)
             time.sleep(wait_s)
         except Exception as e:
@@ -1341,6 +1401,7 @@ def main():
     parser.add_argument("--force", action="store_true", help="Ignore cached LLM checkpoints for targeted arcs")
     parser.add_argument("--max-tokens", type=int, default=0, help="Optional max_tokens for LLM requests (0 = omit, use model default)")
     parser.add_argument("--temperature", type=float, default=None, help="Optional temperature for LLM requests (omit by default to use model default)")
+    parser.add_argument("--no-stream", action="store_true", help="Send non-streaming LLM requests (for endpoints that do not support SSE)")
     parser.add_argument("--reasoning-effort", default="", help="Optional reasoning_effort for LLM requests, e.g. low/medium/high (empty = omit, use model default)")
     args = parser.parse_args()
 
@@ -1491,6 +1552,8 @@ def main():
             cfg["temperature"] = args.temperature
         if str(args.reasoning_effort or "").strip():
             cfg["reasoningEffort"] = str(args.reasoning_effort).strip().lower()
+        if args.no_stream:
+            cfg["llmStream"] = False
         if not cfg.get("chatBase") or not cfg.get("chatKey"):
             raise RuntimeError("chatBase/chatKey missing in config.json (pass --no-llm for offline build)")
 

@@ -52,6 +52,7 @@ function loadRuntimeConfig() {
   }
   base.temperature = parseOptionalTemp(base.temperature);
   base.reasoningEffort = String(base.reasoningEffort ?? base.reasoning_effort ?? '').trim().toLowerCase() || null;
+  base.llmStream = base.llmStream !== false && !/^(0|false|no|off)$/i.test(String(process.env.CHAT_STREAM || '').trim());
   if (cli.defaultCorpus) base.defaultCorpus = cli.defaultCorpus;
   if (process.env.DEFAULT_CORPUS) base.defaultCorpus = process.env.DEFAULT_CORPUS;
   return base;

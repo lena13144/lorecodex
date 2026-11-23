@@ -69,6 +69,7 @@ async function getLocalApiConfig(be) {
     maxTokens: Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null,
     temperature: parseOptionalTemp(cfg.temperature),
     reasoningEffort: parseOptionalReasoningEffort(cfg.reasoningEffort),
+    llmStream: cfg.llmStream !== false,
   };
 }
 
@@ -261,7 +262,7 @@ export async function fetchRuns() {
   return { runs };
 }
 
-export async function runTreeSearch(payload) {
+export async function runTreeSearch(payload, { onProgress = null } = {}) {
   if (!forceLocalMode) {
     return reqJson('/tree-search', {
       method: 'POST',
@@ -271,7 +272,7 @@ export async function runTreeSearch(payload) {
   }
   const { be, agent } = await getLocalAgentAndPack(payload.corpus);
   const cfg = await getLocalApiConfig(be);
-  const out = await agent.search(payload, cfg);
+  const out = await agent.search(payload, cfg, { onProgress });
   const run = await be.idbRecordRun(payload, out);
   return { ...out, run_id: run.id };
 }
@@ -315,6 +316,7 @@ export async function saveConfig(patch) {
     temperature: patch.temperature !== undefined ? parseOptionalTemp(patch.temperature) : cur.temperature,
     reasoningEffort:
       patch.reasoningEffort !== undefined ? parseOptionalReasoningEffort(patch.reasoningEffort) : cur.reasoningEffort,
+    llmStream: patch.llmStream !== undefined ? patch.llmStream !== false : cur.llmStream,
   };
   await be.idbSetMeta('local_api_config', next);
   return { ok: true, config: { ...next, chatKey: next.chatKey ? '***' : '' } };

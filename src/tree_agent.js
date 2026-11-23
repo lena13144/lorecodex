@@ -5,6 +5,7 @@ const path = require('path');
 const { stripMarkup, extractJsonObject, normalizeOrder, isOrderAllowed, formatCharCount } = require('./utils');
 const { createGraphEngine } = require('./graph_engine');
 const { createGrepEngine } = require('./grep_engine');
+const { postChatCompletion } = require('./llm_stream');
 const {
   normalizeCorpusConfig,
   buildTools,
@@ -267,7 +268,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     return grepEngine.grepScenes(rawQuery, normalizedOpts);
   }
 
-  async function callChat({ base, key, model, messages, tools, maxTokens = null, temperature = null, reasoningEffort = null }) {
+  async function callChat({ base, key, model, messages, tools, maxTokens = null, temperature = null, reasoningEffort = null, stream = true, onDelta = null }) {
     const cleanBase = String(base || '')
       .trim()
       .replace(/\/+$/, '')
@@ -293,43 +294,38 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       body.tools = tools;
       body.tool_choice = 'auto';
     }
-    const payloadStr = JSON.stringify(body);
 
+    // stream=true: idle timeout (90s without any byte), so long reasoning is not cut off.
+    // stream=false: the old behaviour, a 45s total timeout.
+    const useStream = stream !== false;
     const maxAttempts = 2;
     let lastErr = null;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        const resp = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: 'Bearer ' + key,
-          },
-          body: payloadStr,
-          signal: AbortSignal.timeout(45000),
+        return await postChatCompletion({
+          url,
+          key,
+          body,
+          stream: useStream,
+          idleMs: 90000,
+          totalMs: 45000,
+          onDelta,
         });
-        if (!resp.ok) {
-          const errText = await resp.text().catch(() => '');
-          if ([429, 502, 503, 504].includes(resp.status) && attempt + 1 < maxAttempts) {
-            console.warn(`[tree-agent:${corpusId}] transient HTTP ${resp.status}, retrying in 1.5s...`);
-            await new Promise((r) => setTimeout(r, 1500));
-            continue;
-          }
-          throw new Error(`chat HTTP ${resp.status}: ${errText.slice(0, 200)}`);
-        }
-        return resp.json();
       } catch (err) {
         lastErr = err;
+        const status = Number(err?.status) || 0;
         const isTransient =
-          err?.name === 'TimeoutError' ||
-          err?.name === 'AbortError' ||
-          /timeout|aborted|fetch failed|ECONNRESET|ETIMEDOUT/i.test(String(err?.message || ''));
+          [429, 502, 503, 504].includes(status) ||
+          (!status &&
+            (err?.name === 'TimeoutError' ||
+              err?.name === 'AbortError' ||
+              /timeout|aborted|fetch failed|terminated|ECONNRESET|ETIMEDOUT/i.test(String(err?.message || ''))));
         if (isTransient && attempt + 1 < maxAttempts) {
           console.warn(`[tree-agent:${corpusId}] transient error (${err.message}), retrying in 1.5s...`);
           await new Promise((r) => setTimeout(r, 1500));
           continue;
         }
-        throw err;
+        throw status ? new Error(`chat ${err.message}`) : err;
       }
     }
     throw lastErr;
@@ -1011,6 +1007,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         maxTokens: effectiveCfg.maxTokens,
         temperature: effectiveCfg.temperature,
         reasoningEffort: effectiveCfg.reasoningEffort ?? effectiveCfg.reasoning_effort,
+        stream: effectiveCfg.llmStream !== false,
       });
       const reqMs = Date.now() - tReq;
       const u = resp.usage || {};
@@ -1105,6 +1102,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       maxTokens: effectiveCfg.maxTokens,
       temperature: effectiveCfg.temperature,
       reasoningEffort: effectiveCfg.reasoningEffort ?? effectiveCfg.reasoning_effort,
+      stream: effectiveCfg.llmStream !== false,
     });
     const finalMs = Date.now() - tFinal;
     const fu = finalResp.usage || {};

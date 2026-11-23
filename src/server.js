@@ -66,6 +66,7 @@ const defaultCfg = {
   maxTokens: null,
   temperature: null,
   reasoningEffort: null,
+  llmStream: true,
 };
 
 let runtimeCfg = { ...defaultCfg };
@@ -79,6 +80,7 @@ if (fs.existsSync(CFG_FILE)) {
 runtimeCfg.maxTokens = parseOptionalMaxTokens(runtimeCfg.maxTokens ?? runtimeCfg.max_tokens);
 runtimeCfg.temperature = parseOptionalTemperature(runtimeCfg.temperature);
 runtimeCfg.reasoningEffort = parseOptionalReasoningEffort(runtimeCfg.reasoningEffort ?? runtimeCfg.reasoning_effort);
+runtimeCfg.llmStream = runtimeCfg.llmStream !== false;
 
 if (process.env.PORT) runtimeCfg.port = Number(process.env.PORT) || runtimeCfg.port;
 if (process.env.CHAT_BASE) runtimeCfg.chatBase = process.env.CHAT_BASE;
@@ -87,6 +89,7 @@ if (process.env.CHAT_MODEL) runtimeCfg.chatModel = process.env.CHAT_MODEL;
 if (process.env.CHAT_MAX_TOKENS !== undefined) runtimeCfg.maxTokens = parseOptionalMaxTokens(process.env.CHAT_MAX_TOKENS);
 if (process.env.CHAT_TEMPERATURE !== undefined) runtimeCfg.temperature = parseOptionalTemperature(process.env.CHAT_TEMPERATURE);
 if (process.env.CHAT_REASONING_EFFORT !== undefined) runtimeCfg.reasoningEffort = parseOptionalReasoningEffort(process.env.CHAT_REASONING_EFFORT);
+if (process.env.CHAT_STREAM !== undefined) runtimeCfg.llmStream = !/^(0|false|no|off)$/i.test(String(process.env.CHAT_STREAM).trim());
 if (process.env.DEFAULT_CORPUS) runtimeCfg.defaultCorpus = process.env.DEFAULT_CORPUS;
 if (cli.port && Number.isFinite(cli.port)) runtimeCfg.port = cli.port;
 if (cli.defaultCorpus) runtimeCfg.defaultCorpus = cli.defaultCorpus;
@@ -166,6 +169,9 @@ function saveCfg(patch) {
   if ('reasoningEffort' in patch || 'reasoning_effort' in patch) {
     runtimeCfg.reasoningEffort = parseOptionalReasoningEffort(patch.reasoningEffort ?? patch.reasoning_effort);
   }
+  if ('llmStream' in patch) {
+    runtimeCfg.llmStream = patch.llmStream !== false;
+  }
   delete runtimeCfg.disableThinking;
   delete runtimeCfg.max_tokens;
   delete runtimeCfg.reasoning_effort;
@@ -199,6 +205,9 @@ function mergeCfg(patch) {
     }
     if ('reasoningEffort' in patch || 'reasoning_effort' in patch) {
       out.reasoningEffort = parseOptionalReasoningEffort(patch.reasoningEffort ?? patch.reasoning_effort);
+    }
+    if ('llmStream' in patch) {
+      out.llmStream = patch.llmStream !== false;
     }
   }
   return out;

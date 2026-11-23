@@ -137,6 +137,7 @@ function main() {
     'mcp_server.js',
     'corpus_manager.js',
     'tree_agent.js',
+    'llm_stream.js',
     'prompt_builder.js',
     'grep_engine.js',
     'graph_engine.js',

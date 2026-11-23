@@ -36,6 +36,31 @@ function detectPythonBin() {
 
 const PYTHON_BIN = detectPythonBin();
 
+// Mock LLM reply: SSE (content split into small deltas) when the request asked for stream, plain JSON otherwise.
+function replyChat(res, body, message, { usage = null, finish = 'stop' } = {}) {
+  if (!body || body.stream !== true) {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ choices: [{ message, finish_reason: finish }], ...(usage ? { usage } : {}) }));
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+  const send = (o) => res.write('data: ' + JSON.stringify(o) + '\n\n');
+  send({ choices: [{ index: 0, delta: { role: 'assistant' } }] });
+  if (message.reasoning_content) send({ choices: [{ index: 0, delta: { reasoning_content: message.reasoning_content } }] });
+  const text = String(message.content || '');
+  for (let i = 0; i < text.length; i += 7) send({ choices: [{ index: 0, delta: { content: text.slice(i, i + 7) } }] });
+  (message.tool_calls || []).forEach((tc, index) => {
+    const args = String(tc.function.arguments || '');
+    send({ choices: [{ index: 0, delta: { tool_calls: [{ index, id: tc.id, type: 'function', function: { name: tc.function.name, arguments: '' } }] } }] });
+    for (let i = 0; i < args.length; i += 5) {
+      send({ choices: [{ index: 0, delta: { tool_calls: [{ index, function: { arguments: args.slice(i, i + 5) } }] } }] });
+    }
+  });
+  send({ choices: [{ index: 0, delta: {}, finish_reason: finish }] });
+  if (usage) send({ choices: [], usage });
+  res.end('data: [DONE]\n\n');
+}
+
 async function waitForServer(timeoutMs = 8000) {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
@@ -418,6 +443,7 @@ with zipfile.ZipFile(epub_path, "w") as zf:
 
     // Mock OpenAI endpoint to verify in-place --upgrade, single-scene skip, ckpt caching, and series_meta extraction
     const mockCounts = { leaf: 0, arc: 0, seriesMeta: 0 };
+    let pyStreamed = 0;
     let expectedMaxTokens = undefined;
     let mockEmptyContent = false;
     const mockSrv = http.createServer((req, res) => {
@@ -441,16 +467,11 @@ with zipfile.ZipFile(epub_path, "w") as zf:
             `Expected body.max_tokens=${expectedMaxTokens}, got ${body.max_tokens}`
           );
 
+          if (body.stream === true) pyStreamed += 1;
           if (mockEmptyContent) {
             // Simulates a reasoning model that spends the whole token budget on
             // thinking: finish_reason=length with a null content body.
-            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(
-              JSON.stringify({
-                choices: [{ message: { content: null }, finish_reason: 'length' }],
-                usage: { prompt_tokens: 120, completion_tokens: 8192 },
-              })
-            );
+            replyChat(res, body, { content: null }, { usage: { prompt_tokens: 120, completion_tokens: 8192 }, finish: 'length' });
             return;
           }
 
@@ -485,13 +506,7 @@ with zipfile.ZipFile(epub_path, "w") as zf:
             };
           }
 
-          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(
-            JSON.stringify({
-              choices: [{ message: { content: JSON.stringify(replyObj) } }],
-              usage: { prompt_tokens: 120, completion_tokens: 45 },
-            })
-          );
+          replyChat(res, body, { content: JSON.stringify(replyObj) }, { usage: { prompt_tokens: 120, completion_tokens: 45 } });
         });
         return;
       }
@@ -578,6 +593,7 @@ with zipfile.ZipFile(epub_path, "w") as zf:
         '--workers',
         '2',
       ]);
+      assert(pyStreamed > 0, 'build_novel.py must send streaming LLM requests by default');
       assert.deepStrictEqual(mockCounts, { leaf: 3, arc: 1, seriesMeta: 1 }, `Unexpected Vol 1 LLM call counts: ${JSON.stringify(mockCounts)}`);
 
       const midIdx = JSON.parse(fs.readFileSync(path.join(outDir, 'llm-upgrade-smoke', 'tree_index.json'), 'utf8'));
@@ -831,6 +847,18 @@ function testHygieneAndSyntax() {
   execFileSync('node', ['--check', path.join(extDir, 'index.js')], { stdio: 'inherit' });
   execFileSync('node', ['--check', path.join(extDir, 'browser_engine.js')], { stdio: 'inherit' });
   assert(fs.existsSync(path.join(ROOT, 'skills', 'lorecodex', 'SKILL.md')), 'skills/lorecodex/SKILL.md must exist');
+  // browser_engine.js cannot require() src/llm_stream.js, so it carries a copy: keep them identical.
+  {
+    const nodeSrc = fs.readFileSync(path.join(ROOT, 'src', 'llm_stream.js'), 'utf8').replace(/\r\n/g, '\n');
+    const brSrc = fs.readFileSync(path.join(extDir, 'browser_engine.js'), 'utf8').replace(/\r\n/g, '\n');
+    const fnBody = (src, sig) => {
+      const i = src.indexOf(sig);
+      return i < 0 ? null : src.slice(i, src.indexOf('\n}\n', i) + 2);
+    };
+    for (const sig of ['async function postChatCompletion(', 'function parseChatPayloadText(', 'function createChatStreamAccumulator(']) {
+      assert(fnBody(nodeSrc, sig) && fnBody(nodeSrc, sig) === fnBody(brSrc, sig), `${sig} differs between src/llm_stream.js and browser_engine.js`);
+    }
+  }
   console.log('  PASS: zero leaked secrets/private paths & all JS modules syntax-verified');
 }
 
@@ -984,6 +1012,7 @@ async function testMcpAndBrowserEngine() {
   }
 
   // Test In-Browser LLM Corpus Directory Upgrader (upgradeBrowserCorpusWithLLM)
+  let browserStreamed = 0;
   const browserMockSrv = http.createServer((req, res) => {
     if (req.method === 'POST' && req.url.endsWith('/chat/completions')) {
       const chunks = [];
@@ -1013,8 +1042,8 @@ async function testMcpAndBrowserEngine() {
             tone_tags: ['叙事/剧情'],
           };
         }
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(replyObj) } }] }));
+        if (body.stream === true) browserStreamed += 1;
+        replyChat(res, body, { content: JSON.stringify(replyObj) });
       });
       return;
     }
@@ -1036,6 +1065,7 @@ async function testMcpAndBrowserEngine() {
       }
     );
     assert.strictEqual(upgRes.upgradedArcs, 2, 'In-Browser LLM upgrader must upgrade both chapters');
+    assert(browserStreamed > 0, 'In-Browser LLM upgrader must send streaming requests by default');
     assert.strictEqual(upgRes.synthesizedSeries, 1, 'In-Browser LLM upgrader must synthesize series summary');
     assert(savedSnapshots >= 1, 'In-Browser LLM upgrader must checkpoint via onSave');
     assert(
@@ -1127,6 +1157,101 @@ async function testMcpAndBrowserEngine() {
       seenUserPrompt.includes('【本局记忆召回】') && seenUserPrompt.includes('AM0022 芙拉米尔交代委托规则'),
       'In-Browser search must carry session recall in its own section'
     );
+  }
+
+  // Streaming: tool_calls arrive as fragments over SSE and must be reassembled identically by both agents;
+  // endpoints that reject `stream` fall back to a plain request; a stalled stream trips the idle timeout.
+  {
+    const { createTreeAgent } = require('../src/tree_agent.js');
+    const { postChatCompletion } = require('../src/llm_stream.js');
+    const demoIdx = JSON.parse(fs.readFileSync(path.join(ROOT, 'corpora', 'demo-chronicles', 'tree_index.json'), 'utf8'));
+    const sceneId = String(demoIdx.arcs[0].scenes[0].node_id);
+    const seen = [];
+    let rejectStream = false;
+    const streamSrv = http.createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        if (req.url.includes('/stall/')) {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant' } }] }) + '\n\n');
+          return; // never finishes
+        }
+        seen.push({ stream: body.stream === true, hasTools: Array.isArray(body.tools) });
+        if (rejectStream && body.stream) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end('{"error":{"message":"stream not supported"}}');
+          return;
+        }
+        const toolRound = !body.messages.some((m) => m.role === 'tool');
+        if (toolRound) {
+          replyChat(
+            res,
+            body,
+            {
+              content: null,
+              reasoning_content: '先读第一幕核实。',
+              tool_calls: [{ id: 'call_r1', type: 'function', function: { name: 'read_scene', arguments: JSON.stringify({ scene_node_ids: [sceneId] }) } }],
+            },
+            { usage: { prompt_tokens: 50, completion_tokens: 10 }, finish: 'tool_calls' }
+          );
+        } else {
+          replyChat(
+            res,
+            body,
+            { content: JSON.stringify({ skip: false, selected_nodes: [sceneId], selected_arcs: [], timeline_note: '开篇', guide: `导读 [${sceneId}]` }) },
+            { usage: { prompt_tokens: 80, completion_tokens: 20 } }
+          );
+        }
+      });
+    });
+    await new Promise((r) => streamSrv.listen(0, '127.0.0.1', r));
+    try {
+      const sPort = streamSrv.address().port;
+      const apiCfg = { chatBase: `http://127.0.0.1:${sPort}/v1`, chatKey: 'mock-key', chatModel: 'mock-model' };
+      const q = { query: '雷达室那晚发生了什么', onDemand: '', recentChat: [], sceneAnchor: { charName: '灰烬星港', userName: '旅人' } };
+
+      const progress = [];
+      const bOut = await localAgent.search(q, apiCfg, { onProgress: (d) => progress.push(d) });
+      assert.deepStrictEqual(bOut.scenes.map((x) => String(x.node_id)), [sceneId], 'In-Browser agent must reassemble streamed tool_calls and final JSON');
+      assert(seen.every((x) => x.stream), 'In-Browser agent must stream by default');
+      assert(progress.some((d) => d.kind === 'tool' && d.toolNames.includes('read_scene')), 'onProgress must report streamed tool names');
+      assert(progress.some((d) => d.kind === 'reasoning' && d.reasoningChars > 0), 'onProgress must report streamed reasoning');
+      assert.strictEqual(bOut.steps[0].reasoning, '先读第一幕核实。', 'streamed reasoning_content must be kept on the step');
+
+      const nodeAgent = createTreeAgent({ corpusId: 'demo-chronicles', corpusDir: path.join(ROOT, 'corpora', 'demo-chronicles') });
+      seen.length = 0;
+      const nOut = await nodeAgent.search(q, apiCfg);
+      assert.deepStrictEqual(nOut.scenes.map((x) => String(x.node_id)), [sceneId], 'Node agent must reassemble streamed tool_calls and final JSON');
+      assert(seen.every((x) => x.stream), 'Node agent must stream by default');
+      assert.strictEqual(nOut.usage.prompt, 130, 'Node agent must read usage from the final stream chunk');
+
+      seen.length = 0;
+      await nodeAgent.search(q, { ...apiCfg, llmStream: false });
+      assert(seen.length >= 2 && seen.every((x) => !x.stream), 'llmStream:false must send plain requests');
+
+      seen.length = 0;
+      rejectStream = true;
+      const fbOut = await localAgent.search(q, apiCfg);
+      rejectStream = false;
+      assert.deepStrictEqual(fbOut.scenes.map((x) => String(x.node_id)), [sceneId], 'stream rejected with HTTP 400 must fall back to a plain request');
+      assert.deepStrictEqual(seen.map((x) => x.stream), [true, false, true, false], 'each round tries stream first, then falls back');
+
+      let stallErr = null;
+      const tStall = Date.now();
+      try {
+        await postChatCompletion({ url: `http://127.0.0.1:${sPort}/stall/chat/completions`, key: 'k', body: { model: 'm', messages: [] }, idleMs: 300 });
+      } catch (e) {
+        stallErr = e;
+      }
+      assert(stallErr && stallErr.name === 'TimeoutError', 'stalled stream must raise TimeoutError');
+      assert(Date.now() - tStall < 3000, 'idle timeout must fire promptly');
+    } finally {
+      streamSrv.closeAllConnections?.();
+      streamSrv.close();
+    }
+    console.log('  PASS: streamed tool_calls reassembled (browser + node), plain fallback, idle timeout');
   }
 
   // 2. Test src/mcp_server.js over stdio JSON-RPC 2.0

@@ -270,7 +270,16 @@ export async function executeSearch() {
       maxOrder: Number.isFinite(maxOrderVal) && maxOrderVal > 0 ? maxOrderVal : 0,
       sceneAnchor: { charName: $('#qChar').value.trim(), userName: $('#qUser').value.trim() },
     };
-    const out = await runTreeSearch(payload);
+    const toolLabel = (n) => ({ list_series: '分卷', list_story_arcs: '篇章目录', expand_story_arc: '展开篇章', read_scenes: '精读原文', grep_scenes: '全文扫描' }[n] || n);
+    const out = await runTreeSearch(payload, {
+      onProgress: (d) => {
+        const parts = [`第 ${d.turn} 轮`];
+        if (d.reasoningChars) parts.push(`思考 ${d.reasoningChars} 字`);
+        if (d.toolNames && d.toolNames.length) parts.push('调用 ' + d.toolNames.map(toolLabel).join('、'));
+        else if (d.contentChars) parts.push(`输出 ${d.contentChars} 字`);
+        $('#runStatus').textContent = '正在翻检目录树… ' + parts.join(' · ');
+      },
+    });
     $('#runStatus').textContent = `完成（${out.took_ms}ms，${out.turns} 轮）`;
     if (out.run_id) state.lastSeenTopRunId = out.run_id;
     await pollRuns({ autoSelectNewest: false });

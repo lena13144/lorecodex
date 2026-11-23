@@ -440,6 +440,10 @@ export async function openSettingsModal() {
             <input id="cfgTemperature" type="number" min="0" max="2" step="0.1" value="${cfg.temperature !== null && cfg.temperature !== undefined && cfg.temperature !== '' ? cfg.temperature : ''}" placeholder="沿用模型默认（留空不传）" />
           </div>
         </div>
+        <label class="fld-check" style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+          <input id="cfgStream" type="checkbox" ${cfg.llmStream !== false ? 'checked' : ''} />
+          <span>流式请求（推荐）：长时间思考不会被超时或中转站掐断。若接口不支持流式，关掉即可。</span>
+        </label>
         <div id="cfgStatus" class="pane-sub"></div>
       </div>
       <div class="modal-foot">
@@ -513,6 +517,7 @@ export async function openSettingsModal() {
           maxTokens: Number.isFinite(rawMaxTokens) && rawMaxTokens > 0 ? Math.floor(rawMaxTokens) : null,
           temperature: parsedTemp !== null && Number.isFinite(parsedTemp) && parsedTemp >= 0 && parsedTemp <= 2 ? parsedTemp : null,
           reasoningEffort: reVal || null,
+          llmStream: $('#cfgStream') ? $('#cfgStream').checked : true,
         };
         const newKey = $('#cfgKey').value.trim();
         if (newKey) patch.chatKey = newKey;
