@@ -1041,6 +1041,8 @@ export function openImportModal() {
         </div>
       </div>
 
+      <div id="impLoreEntriesWrap" class="lore-pick" style="display:none;"></div>
+
       <div id="impNovelOpts" style="display:flex;flex-direction:column;gap:6px;">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;">
           <input id="impCleanAds" type="checkbox" checked />
@@ -1092,13 +1094,58 @@ export function openImportModal() {
     $('#impLoreOpts').style.display = isLore ? 'grid' : 'none';
     const novelOpts = $('#impNovelOpts');
     if (novelOpts) novelOpts.style.display = isLore ? 'none' : 'flex';
+    const pick = $('#impLoreEntriesWrap');
+    if (pick && !isLore) { pick.style.display = 'none'; pick.innerHTML = ''; loreEntries = null; }
     if (isLore && $('#impCategory').value === '正文') $('#impCategory').value = '档案设定';
     if (!isLore && $('#impCategory').value === '档案设定') $('#impCategory').value = '正文';
   };
 
   let previewSeq = 0;
+  // 世界书条目勾选：null 表示未解析（非世界书或解析失败），此时按旧行为导入已启用条目。
+  let loreEntries = null;
+  let loreChecked = new Set();
+  const LORE_STATE_LABEL = { constant: '常驻（绿灯）', keyword: '关键词（蓝灯）', disabled: '未启用' };
+  const selectedLoreUids = () => (loreEntries ? [...loreChecked] : null);
+  const renderLorePicker = () => {
+    const wrap = $('#impLoreEntriesWrap');
+    if (!wrap) return;
+    if (!loreEntries || !loreEntries.length) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+    const count = (st) => loreEntries.filter((e) => e.state === st).length;
+    const picked = (st) => loreEntries.filter((e) => e.state === st && loreChecked.has(e.uid)).length;
+    const groups = ['constant', 'keyword', 'disabled'].filter((st) => count(st) > 0);
+    wrap.innerHTML = `
+      <div class="lore-pick-head">
+        <span>选择要交给 LoreCodex 检索的条目（已选 ${loreChecked.size} / ${loreEntries.length}）</span>
+        <span class="lore-pick-actions">
+          ${groups.map((st) => `<button type="button" class="btn-sm" data-lore-toggle="${st}">${picked(st) === count(st) ? '取消' : '全选'}${LORE_STATE_LABEL[st]}</button>`).join('')}
+        </span>
+      </div>
+      <div class="pane-sub" style="margin:0;">只读取文件，不会改动酒馆里的世界书。已启用的条目导入后酒馆仍会照常注入；若想改为按需检索，请导入后在世界书里关闭它们。人设、写作规则这类每轮都要遵守的内容建议继续留在世界书。</div>
+      <div class="lore-pick-list">
+        ${loreEntries.map((e) => `<label class="lore-pick-row${e.noise ? ' is-noise' : ''}">
+            <input type="checkbox" data-lore-uid="${esc(e.uid)}" ${loreChecked.has(e.uid) ? 'checked' : ''} />
+            <span class="lore-state lore-state-${e.state}">${LORE_STATE_LABEL[e.state]}</span>
+            <span class="lore-title">${esc(e.title)}</span>
+            <span class="lore-meta">${e.noise ? esc(e.noise) + ' · ' : ''}${e.chars.toLocaleString()} 字</span>
+          </label>`).join('')}
+      </div>`;
+    wrap.style.display = 'flex';
+    wrap.querySelectorAll('[data-lore-uid]').forEach((cb) => cb.addEventListener('change', () => {
+      if (cb.checked) loreChecked.add(cb.dataset.loreUid); else loreChecked.delete(cb.dataset.loreUid);
+      renderLorePicker();
+      if (selectedFile) runFileSplitPreview(selectedFile, { keepLoreSelection: true });
+    }));
+    wrap.querySelectorAll('[data-lore-toggle]').forEach((btn) => btn.addEventListener('click', () => {
+      const st = btn.dataset.loreToggle;
+      const all = loreEntries.filter((e) => e.state === st);
+      const on = all.some((e) => !loreChecked.has(e.uid));
+      all.forEach((e) => (on ? loreChecked.add(e.uid) : loreChecked.delete(e.uid)));
+      renderLorePicker();
+      if (selectedFile) runFileSplitPreview(selectedFile, { keepLoreSelection: true });
+    }));
+  };
 
-  const runFileSplitPreview = async (file) => {
+  const runFileSplitPreview = async (file, { keepLoreSelection = false } = {}) => {
     const wrap = $('#impSplitPreviewWrap');
     if (!wrap) return;
     if (!file || file.name.toLowerCase().endsWith('.lorepack.json')) {
@@ -1122,8 +1169,22 @@ export function openImportModal() {
         workers: Math.min(Math.max(Number($('#impWorkers')?.value) || 8, 1), 24),
         cleanAds: $('#impCleanAds')?.checked !== false,
         stripBlocks: $('#impStripBlocks')?.value || '',
+        selectedUids: keepLoreSelection ? selectedLoreUids() : null,
+        filterGameStats: $('#impKind').value === 'lore' ? $('#impFilterStats').checked : false,
       });
       if (seq !== previewSeq) return;
+      if (!keepLoreSelection) {
+        loreEntries = Array.isArray(res?.loreEntries) && res.loreEntries.length ? res.loreEntries : null;
+        // 默认全选。只有「样式/变量脚本」「内容过短」默认不勾；「游戏数值/运营文案」是关键词启发式，
+        // 剧情原文也可能命中（如“维护”“掩体”），只在勾选「过滤数值/噪点」时才取消。
+        const filterOn = $('#impFilterStats')?.checked;
+        loreChecked = new Set((loreEntries || []).filter((e) => !e.noise || (e.noise === '游戏数值/运营文案' && !filterOn)).map((e) => e.uid));
+        renderLorePicker();
+        if (loreEntries) {
+          // 首次预检按旧规则跑；勾选集合确定后再按勾选重跑一次，保证统计和导入一致。
+          return runFileSplitPreview(file, { keepLoreSelection: true });
+        }
+      }
       if (!res?.ok || !res.report) {
         if (res?.error) {
           wrap.innerHTML = `<div class="split-warn-item err">${esc(res.error)}</div>`;
@@ -1150,6 +1211,14 @@ export function openImportModal() {
   });
   $('#impWorkers')?.addEventListener('input', () => {
     if (selectedFile) runFileSplitPreview(selectedFile);
+  });
+  $('#impFilterStats')?.addEventListener('change', () => {
+    if (!loreEntries) return;
+    // 勾选「过滤数值/噪点」时同步取消疑似噪声条目，取消勾选时恢复。
+    const on = $('#impFilterStats').checked;
+    loreEntries.filter((e) => e.noise === '游戏数值/运营文案').forEach((e) => (on ? loreChecked.delete(e.uid) : loreChecked.add(e.uid)));
+    renderLorePicker();
+    if (selectedFile) runFileSplitPreview(selectedFile, { keepLoreSelection: true });
   });
   $('#impCleanAds')?.addEventListener('change', () => {
     if (selectedFile) runFileSplitPreview(selectedFile);
@@ -1258,6 +1327,7 @@ export function openImportModal() {
         filterGameStats: $('#impFilterStats').checked,
         cleanAds: $('#impCleanAds')?.checked !== false,
         stripBlocks: $('#impStripBlocks')?.value || '',
+        selectedUids: kind === 'lore' && !isLorepack ? selectedLoreUids() : null,
       });
 
       const jobId = res.job.id;
@@ -1325,6 +1395,12 @@ export function openImportModal() {
           $('#impJobStatus').textContent = canManualLlm
             ? `离线切分完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！书库 "${targetId}" 已入库，请确认结构无误后点击「开始 LLM 建立目录」`
             : `导入完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！书库 "${targetId}" 已入库`;
+          if (kind === 'lore' && loreEntries) {
+            const activeImported = loreEntries.filter((e) => e.state !== 'disabled' && loreChecked.has(e.uid)).length;
+            if (activeImported > 0) {
+              $('#impJobStatus').textContent += `。其中 ${activeImported} 条在酒馆世界书里仍是启用状态，会继续常驻或按关键词注入；如需改由 LoreCodex 按需检索，请在世界书里关闭它们`;
+            }
+          }
           const listRes = await fetchCorpora();
           state.corpora = listRes.corpora || [];
           showToast(

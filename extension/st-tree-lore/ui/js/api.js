@@ -381,7 +381,7 @@ export function findRunningJobForCorpus(corpusId) {
   return null;
 }
 
-export async function previewLocalImportFile({ filename = 'upload.txt', buffer, kind = 'novel', corpusId = 'preview', name = '预览书库', category = '', workers = 8, cleanAds = true, stripBlocks = '' }) {
+export async function previewLocalImportFile({ filename = 'upload.txt', buffer, kind = 'novel', corpusId = 'preview', name = '预览书库', category = '', workers = 8, cleanAds = true, stripBlocks = '', selectedUids = null, filterGameStats = false }) {
   try {
     const be = await getBrowserEngine();
     const rawBytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
@@ -399,6 +399,8 @@ export async function previewLocalImportFile({ filename = 'upload.txt', buffer, 
           corpusId: corpusId || 'preview',
           name: name || corpusId || '预览书库',
           category: category || '档案设定',
+          selectedUids,
+          filterGameStats,
         })
       : be.buildNovelCorpusInBrowser({
           rawText,
@@ -409,9 +411,13 @@ export async function previewLocalImportFile({ filename = 'upload.txt', buffer, 
           stripBlocks,
         });
     const report = be.inspectCorpusStructure(pack);
+    let loreEntries = null;
+    if (isJson) {
+      try { loreEntries = be.listWorldbookEntriesInBrowser(rawText); } catch (_) { loreEntries = null; }
+    }
     const safeWorkers = Math.min(Math.max(Number(workers) || 8, 1), 24);
     const estimate = isJson ? null : be.estimateBrowserLlmUpgradePlan(pack, { workers: safeWorkers });
-    return { ok: true, report, estimate };
+    return { ok: true, report, estimate, loreEntries };
   } catch (e) {
     return { ok: false, error: e?.message || String(e) };
   }
@@ -499,6 +505,8 @@ export async function importCorpus(payload) {
             name: payload.name || payload.corpusId,
             category: payload.category || '档案设定',
             existingPack: mergeTarget,
+            selectedUids: Array.isArray(payload.selectedUids) ? payload.selectedUids : null,
+            filterGameStats: Boolean(payload.filterGameStats),
           })
         : be.buildNovelCorpusInBrowser({
             rawText,

@@ -1026,8 +1026,74 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
     return { id: corpusId, config, indexData, textsData, graphData: [], cleanStats };
 }
 
+// ── 世界书条目解析 ───────────────────────────────────────────────────────────
+// LoreCodex 不替作者决定哪些设定该常驻：导入时列出全部条目及其在酒馆里的状态，
+// 由用户勾选要交给按需检索的部分（例如把大块参考设定从常驻改为检索后，在酒馆里关掉）。
+
+const GAME_STAT_NOISE_RE = /伤害提高|暴击率|稳态伤害|导染指数|不可叠加|回合最多触发|造成.{0,12}伤害|防御提高|攻击力提高|生命上限|暴击伤害|技能冷却|精准伤害|范围伤害|掩体|格挡|破稳|活动期间|累计登录|活动奖励|充值|礼包|掉落率|穿甲等级|穿透等级|抽奖券|每周一重置|是否确认选择序列|是否确认重置序列|敬请期待|版本更新|维护|可获赠|用于.{0,16}兑换/g;
+const MARKUP_MACRO_RE = /<style[\s\S]*?<\/style>|<!--[\s\S]*?-->|<[^>]+>|\{\{[^}]*\}\}/gi;
+
+/** 与 builders/build_lore.py 的 is_noise_entry 一致：极短、几乎全是样式/变量宏、或游戏数值/运营文案。 */
+function loreNoiseReason(text) {
+    const clean = String(text || '').trim();
+    if (clean.length < 20) return '内容过短';
+    const stripped = clean.replace(MARKUP_MACRO_RE, ' ').replace(/\s+/g, ' ').trim();
+    if (/<style\b|\{\{\s*(?:setvar|getvar|addvar)/i.test(clean) && stripped.length < 40) return '样式/变量脚本';
+    const hits = (clean.match(GAME_STAT_NOISE_RE) || []).length;
+    if (hits >= 2 || (hits >= 1 && clean.length < 160)) return '游戏数值/运营文案';
+    return '';
+}
+
+function extractWorldbookRawEntries(parsed) {
+    const pick = (e) => (Array.isArray(e) ? e : Object.values(e || {}));
+    if (parsed?.data?.character_book?.entries) return pick(parsed.data.character_book.entries);
+    if (parsed?.character_book?.entries) return pick(parsed.character_book.entries);
+    if (parsed?.entries) return pick(parsed.entries);
+    if (Array.isArray(parsed)) return parsed;
+    return [];
+}
+
+function worldbookEntryState(ent) {
+    if (ent.disable === true || ent.disabled === true || ent.enabled === false) return 'disabled';
+    if (ent.constant === true || ent.extensions?.constant === true) return 'constant';
+    return 'keyword';
+}
+
+/**
+ * 列出世界书 / V2 角色卡里的全部条目及状态，供导入前勾选。
+ * state: constant（常驻/绿灯）| keyword（关键词触发/蓝灯）| disabled（未启用）。
+ * noise 非空表示疑似脚本或数值文案，默认不勾选。
+ */
+export function listWorldbookEntriesInBrowser(rawJson) {
+    const parsed = typeof rawJson === 'string' ? JSON.parse(rawJson) : rawJson;
+    if (parsed && parsed.indexData && parsed.textsData) return [];
+    const out = [];
+    extractWorldbookRawEntries(parsed).forEach((ent, idx) => {
+        if (!ent || typeof ent !== 'object') return;
+        const content = String(ent.content || ent.text || '').trim();
+        if (!content) return;
+        const keys = [
+            ...(Array.isArray(ent.key) ? ent.key : []),
+            ...(Array.isArray(ent.keys) ? ent.keys : []),
+            ...(Array.isArray(ent.keysecondary) ? ent.keysecondary : []),
+        ]
+            .map((k) => String(k || '').trim())
+            .filter(Boolean);
+        out.push({
+            uid: String(ent.uid ?? ent.id ?? idx),
+            title: String(ent.comment || ent.title || ent.name || keys[0] || `条目 ${idx + 1}`).trim(),
+            state: worldbookEntryState(ent),
+            chars: content.length,
+            keys: keys.slice(0, 6),
+            noise: loreNoiseReason(content),
+        });
+    });
+    return out;
+}
+
 // Pure-JS Worldbook / Character Card V2 Builder (.json) for In-Browser Mode
-export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '档案设定', existingPack = null }) {
+// selectedUids：只导入这些条目（来自 listWorldbookEntriesInBrowser）；省略时沿用旧行为——导入已启用条目。
+export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '档案设定', existingPack = null, selectedUids = null, filterGameStats = false }) {
     const parsed = typeof rawJson === 'string' ? JSON.parse(rawJson) : rawJson;
 
     // Also support full .lorepack.json export bundle
@@ -1042,18 +1108,8 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
         };
     }
 
-    let entriesRaw = [];
-    if (parsed?.data?.character_book?.entries) {
-        const e = parsed.data.character_book.entries;
-        entriesRaw = Array.isArray(e) ? e : Object.values(e);
-    } else if (parsed?.character_book?.entries) {
-        const e = parsed.character_book.entries;
-        entriesRaw = Array.isArray(e) ? e : Object.values(e);
-    } else if (parsed?.entries) {
-        entriesRaw = Array.isArray(parsed.entries) ? parsed.entries : Object.values(parsed.entries);
-    } else if (Array.isArray(parsed)) {
-        entriesRaw = parsed;
-    }
+    const entriesRaw = extractWorldbookRawEntries(parsed);
+    const selected = Array.isArray(selectedUids) ? new Set(selectedUids.map(String)) : null;
 
     const baseArcs = existingPack ? [...(existingPack.indexData.arcs || [])] : [];
     const textsData = existingPack ? { ...(existingPack.textsData || {}) } : {};
@@ -1061,13 +1117,19 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
     let nodeSeq = Object.keys(textsData).length + 1;
 
     const cleanEntries = [];
-    for (const ent of entriesRaw) {
-        if (!ent || typeof ent !== 'object') continue;
-        if (ent.disable === true || ent.disabled === true || ent.enabled === false) continue;
+    entriesRaw.forEach((ent, idx) => {
+        if (!ent || typeof ent !== 'object') return;
+        if (selected) {
+            if (!selected.has(String(ent.uid ?? ent.id ?? idx))) return;
+        } else if (worldbookEntryState(ent) === 'disabled') {
+            return;
+        }
         const content = String(ent.content || ent.text || '').trim();
-        if (!content || content.length < 10) continue;
+        if (!content || content.length < 10) return;
+        // 用户逐条勾选时以勾选为准；未传勾选时才按开关过滤疑似脚本/数值条目。
+        if (!selected && filterGameStats && loreNoiseReason(content)) return;
         if (/<style[\s>]|{{setvar::|{{getvar::/i.test(content) && content.replace(/<style[\s\S]*?<\/style>/gi, '').trim().length < 20) {
-            continue;
+            return;
         }
         const title = String(ent.comment || ent.title || ent.name || (Array.isArray(ent.key) ? ent.key[0] : '') || `设定条目 ${cleanEntries.length + 1}`).trim();
         const keys = [
@@ -1078,7 +1140,7 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
             .map((k) => String(k || '').trim())
             .filter(Boolean);
         cleanEntries.push({ title, content, keys });
-    }
+    });
 
     const arcId = 'L' + String(arcSeq).padStart(3, '0');
     const scenes = [];

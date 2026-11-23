@@ -356,6 +356,7 @@ function startImportJob({
   overwriteConfig,
   cleanAds = true,
   stripBlocks = [],
+  selectedUids = null,
 }) {
   const prepId = 'prep_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
   const safeName = path.basename(String(filename || 'upload.txt')).replace(/[^a-zA-Z0-9\u4e00-\u9fff._-]/g, '_') || 'upload.txt';
@@ -402,6 +403,12 @@ function startImportJob({
     if (series) args.push('--series', series);
     if (mergeInto) args.push('--merge-into', path.join(CORPORA_DIR, mergeInto));
     if (filterGameStats) args.push('--filter-game-stats');
+    if (Array.isArray(selectedUids)) {
+      // 用户在导入界面逐条勾选：以勾选为准，包括未启用条目。
+      const uidsPath = path.join(jobTmpDir, 'selected_uids.json');
+      fs.writeFileSync(uidsPath, JSON.stringify(selectedUids.map(String)));
+      args.push('--uids-file', uidsPath);
+    }
     if (!useLlm) args.push('--no-llm');
   }
 
@@ -613,6 +620,7 @@ const server = http.createServer(async (req, res) => {
           .map((x) => x.trim())
           .filter((x) => x && !x.startsWith('#'))
           .slice(0, 50),
+        selectedUids: Array.isArray(payload.selectedUids) ? payload.selectedUids.slice(0, 20000) : null,
       });
       return send({ ok: true, job }, 202);
     } catch (e) {

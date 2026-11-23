@@ -54,7 +54,8 @@ def _parse_keys(raw_keys):
     return []
 
 
-def load_lore_entries(input_path, filter_stats=False, include_disabled=False):
+def load_lore_entries(input_path, filter_stats=False, include_disabled=False, selected_uids=None):
+    """selected_uids: 只导入这些条目（uid/id/序号，字符串）。传入时以勾选为准，忽略启用状态与噪声过滤。"""
     entries = []
     if os.path.isdir(input_path):
         for root, _, files in sorted(os.walk(input_path)):
@@ -124,12 +125,18 @@ def load_lore_entries(input_path, filter_stats=False, include_disabled=False):
     for idx, item in enumerate(raw_list, 1):
         if not isinstance(item, dict):
             continue
-        is_disabled = (item.get("disable") is True) or (item.get("disabled") is True) or (item.get("enabled") is False)
-        if not include_disabled and is_disabled:
-            continue
+        uid = item.get("uid") if item.get("uid") is not None else item.get("id")
+        uid = str(uid if uid is not None else idx - 1)
         txt = str(item.get("content") or item.get("text") or "").strip()
-        if not txt or (filter_stats and is_noise_entry(txt)):
-            continue
+        if selected_uids is not None:
+            if uid not in selected_uids or not txt:
+                continue
+        else:
+            is_disabled = (item.get("disable") is True) or (item.get("disabled") is True) or (item.get("enabled") is False)
+            if not include_disabled and is_disabled:
+                continue
+            if not txt or (filter_stats and is_noise_entry(txt)):
+                continue
         title = str(item.get("comment") or item.get("title") or item.get("name") or f"世界书条目{idx}").strip()
         primary_keys = _parse_keys(item.get("key") if item.get("key") is not None else item.get("keys"))
         secondary_keys = _parse_keys(
@@ -213,13 +220,19 @@ def main():
     parser.add_argument("--merge-into", default="", help="Existing corpus directory to idempotently merge into")
     parser.add_argument("--filter-game-stats", action="store_true", help="Filter RPG combat stats and promotional noise")
     parser.add_argument("--include-disabled", action="store_true", help="Include disabled worldbook entries")
+    parser.add_argument("--uids-file", default="", help="JSON array of entry uids to import (overrides enabled state and noise filter)")
     parser.add_argument("--no-llm", action="store_true", help="Build deterministically without LLM calls")
     args = parser.parse_args()
 
+    selected_uids = None
+    if args.uids_file:
+        with open(args.uids_file, "r", encoding="utf-8") as f:
+            selected_uids = {str(x) for x in json.load(f)}
     entries = load_lore_entries(
         args.input,
         filter_stats=args.filter_game_stats,
         include_disabled=args.include_disabled,
+        selected_uids=selected_uids,
     )
     if not entries:
         raise RuntimeError(f"No valid lore entries extracted from {args.input}")

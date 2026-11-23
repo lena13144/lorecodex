@@ -393,6 +393,29 @@ with zipfile.ZipFile(epub_path, "w") as zf:
     assert(!cardTxtStr.includes('.hud{color'), 'CSS/macro boilerplate filtered out cleanly');
     assert(cardIdx.arcs[0].characters.includes('白塔') && cardIdx.arcs[0].characters.includes('学院'), 'Secondary keys merged');
 
+    // --uids-file: explicit selection wins over enabled state (user hands a disabled entry to retrieval)
+    const uidsPath = path.join(tmpDir, 'card_uids.json');
+    fs.writeFileSync(uidsPath, JSON.stringify(['2']), 'utf8');
+    execFileSync(
+      PYTHON_BIN,
+      [
+        path.join(ROOT, 'builders', 'build_lore.py'),
+        '--input',
+        cardPath,
+        '--corpus-id',
+        'card-v2-picked',
+        '--out-dir',
+        outDir,
+        '--uids-file',
+        uidsPath,
+        '--no-llm',
+      ],
+      { stdio: 'inherit' }
+    );
+    const pickedTxtStr = fs.readFileSync(path.join(outDir, 'card-v2-picked', 'tree_texts.json'), 'utf8');
+    assert(pickedTxtStr.includes('V2 废案条目'), '--uids-file must import the selected disabled entry');
+    assert(!pickedTxtStr.includes('北方眺望之高塔学院'), '--uids-file must skip unselected entries');
+
     // Mock OpenAI endpoint to verify in-place --upgrade, single-scene skip, ckpt caching, and series_meta extraction
     const mockCounts = { leaf: 0, arc: 0, seriesMeta: 0 };
     let expectedMaxTokens = undefined;
@@ -819,6 +842,28 @@ async function testMcpAndBrowserEngine() {
   assert(localGrep.total >= 2, 'In-Browser engine must expand Zero-7 alias and hit Ch.1 & Ch.4');
   const localCameo = localAgent.grepScenes('卡伦');
   assert.strictEqual(localCameo.hits[0]?.cameo, true, 'In-Browser engine must detect cameo');
+
+  // Worldbook entry picker: list states, default import = enabled only, explicit selection wins
+  {
+    const wb = {
+      entries: {
+        0: { uid: 0, comment: '核心人设', constant: true, key: ['苏璃'], content: '苏璃是灰烬星港的首席雷达观测员，性格冷静克制。' },
+        1: { uid: 1, comment: '北境地理', key: ['北境'], content: '北境地理：雪山、冰原和古老的要塞，绵延千里不见人烟。' },
+        2: { uid: 2, comment: '帝国势力史', disable: true, key: ['帝国'], content: '帝国势力史：三百年前建国，历经七代皇帝的统治与动荡。' },
+        3: { uid: 3, comment: 'HUD', content: '<style>.hud{color:#fff}</style>{{setvar::hp::100}}' },
+      },
+    };
+    const listed = browserMod.listWorldbookEntriesInBrowser(wb);
+    assert.deepStrictEqual(listed.map((e) => e.state), ['constant', 'keyword', 'disabled', 'keyword']);
+    assert.strictEqual(listed[3].noise, '样式/变量脚本', 'macro-only entry flagged as noise');
+    const titlesOf = (pk) => pk.indexData.arcs.flatMap((a) => a.scenes.map((sc) => sc.title));
+    assert.deepStrictEqual(titlesOf(browserMod.buildLoreCorpusInBrowser({ rawJson: wb, corpusId: 'wb1' })), ['核心人设', '北境地理']);
+    assert.deepStrictEqual(
+      titlesOf(browserMod.buildLoreCorpusInBrowser({ rawJson: wb, corpusId: 'wb2', selectedUids: ['1', '2'], filterGameStats: true })),
+      ['北境地理', '帝国势力史'],
+      'explicit selection must include disabled entries and skip unselected constant ones'
+    );
+  }
 
   const builtNovelPack = browserMod.buildNovelCorpusInBrowser({
     rawText: '第一卷 星港篇\n第1章 黎明信号\n苏璃说道：“灰烬星港的雷达刚刚捕获了Zero-7频段。”\n第2章 暗潮\n林夜推门走入观测室，记录下第二段脉冲。',
