@@ -89,13 +89,29 @@ async function loadCorpusIndex(cid) {
   state.index = idx;
   state.arcMap.clear();
   state.sceneMap.clear();
+  let sumScenes = 0;
+  let sumArcs = 0;
   for (const a of idx.arcs || []) {
     state.arcMap.set(a.arc_id, a);
-    for (const s of a.scenes || []) {
+    const aScenes = a.scenes || [];
+    let allDone = aScenes.length > 0;
+    for (const s of aScenes) {
       state.sceneMap.set(s.node_id, { ...s, arc_id: a.arc_id, arc_title: a.title });
+      const sDone = s._llm_done === true || (s._llm_done !== false && Boolean(String(s.summary || '').trim()));
+      if (sDone) sumScenes += 1;
+      else allDone = false;
+    }
+    if (a._llm_done === true || (a._llm_done !== false && allDone && aScenes.length > 0)) {
+      sumArcs += 1;
     }
   }
-  const st = idx.stats || {};
+  const st = idx.stats || (idx.stats = {});
+  if (typeof st.llm_scenes !== 'number') {
+    st.llm_scenes = st.llm_arcs === 0 ? 0 : sumScenes;
+  }
+  if (typeof st.llm_arcs !== 'number') {
+    st.llm_arcs = st.llm_scenes === 0 ? 0 : sumArcs;
+  }
   $('#brandTitle').querySelector('span').textContent = `LoreCodex · ${corpusName()}`;
   document.title = `${corpusName()} — LoreCodex 工作台`;
   $('#statMeta').textContent = `全录 ${st.arcs || 0} 卷 · ${st.scenes || 0} 幕 · ${fmtChars(st.total_chars || 0)} · 模型 ${state.modelName}`;

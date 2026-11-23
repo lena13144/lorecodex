@@ -485,10 +485,37 @@ async function fetchCorporaAndHealth(cfg) {
     }
     for (const p of localPacksCache) {
         if (!corporaMap.has(p.id)) {
-            const st = p.indexData?.stats || {
-                arcs: (p.indexData?.arcs || []).length,
-                scenes: Object.keys(p.textsData || {}).length,
-                total_chars: 0,
+            const arcs = p.indexData?.arcs || [];
+            const rawSt = p.indexData?.stats || {};
+            let totalScenes = 0;
+            let sumScenes = 0;
+            let sumArcs = 0;
+            for (const a of arcs) {
+                const aScenes = a.scenes || [];
+                totalScenes += aScenes.length;
+                let allDone = aScenes.length > 0;
+                for (const s of aScenes) {
+                    const sDone = s._llm_done === true || (s._llm_done !== false && Boolean(String(s.summary || '').trim()));
+                    if (sDone) sumScenes += 1;
+                    else allDone = false;
+                }
+                if (a._llm_done === true || (a._llm_done !== false && allDone && aScenes.length > 0)) {
+                    sumArcs += 1;
+                }
+            }
+            const resolvedLlmScenes = typeof rawSt.llm_scenes === 'number'
+                ? rawSt.llm_scenes
+                : (rawSt.llm_arcs === 0 ? 0 : sumScenes);
+            const resolvedLlmArcs = typeof rawSt.llm_arcs === 'number'
+                ? rawSt.llm_arcs
+                : (rawSt.llm_scenes === 0 ? 0 : sumArcs);
+            const st = {
+                ...rawSt,
+                arcs: rawSt.arcs || arcs.length,
+                scenes: rawSt.scenes || totalScenes || Object.keys(p.textsData || {}).length,
+                llm_arcs: resolvedLlmArcs,
+                llm_scenes: resolvedLlmScenes,
+                total_chars: rawSt.total_chars || 0,
             };
             corporaMap.set(p.id, {
                 id: p.id,

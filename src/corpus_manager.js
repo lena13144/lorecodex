@@ -31,23 +31,43 @@ function readCorpusDescriptor(corpusId, corpusDir) {
     let totalScenes = 0;
     let totalChars = 0;
     let maxOrd = 0;
+    let summarizedScenes = 0;
+    let summarizedArcs = 0;
     for (const a of arcs) {
       if (a.category) catSet.add(a.category);
       if (a.series) serSet.add(a.series);
-      totalScenes += (a.scenes || []).length;
+      const aScenes = a.scenes || [];
+      totalScenes += aScenes.length;
       totalChars += Number(a.total_chars) || 0;
       if (a.order !== null && a.order !== undefined && Number.isFinite(Number(a.order))) {
         maxOrd = Math.max(maxOrd, Number(a.order));
       }
-      for (const s of a.scenes || []) {
+      let arcHasDone = aScenes.length > 0;
+      for (const s of aScenes) {
         if (s.order !== null && s.order !== undefined && Number.isFinite(Number(s.order))) {
           maxOrd = Math.max(maxOrd, Number(s.order));
         }
+        const sDone = s._llm_done === true || (s._llm_done !== false && Boolean(String(s.summary || '').trim()));
+        if (sDone) summarizedScenes += 1;
+        else arcHasDone = false;
+      }
+      if (a._llm_done === true || (a._llm_done !== false && arcHasDone && aScenes.length > 0)) {
+        summarizedArcs += 1;
       }
     }
+    const explicitLlmScenes = typeof idx.stats?.llm_scenes === 'number' ? idx.stats.llm_scenes : null;
+    const explicitLlmArcs = typeof idx.stats?.llm_arcs === 'number' ? idx.stats.llm_arcs : null;
+    const resolvedLlmScenes = explicitLlmScenes !== null
+      ? explicitLlmScenes
+      : (explicitLlmArcs === 0 ? 0 : summarizedScenes);
+    const resolvedLlmArcs = explicitLlmArcs !== null
+      ? explicitLlmArcs
+      : (explicitLlmScenes === 0 ? 0 : summarizedArcs);
     stats = {
       arcs: idx.stats?.arcs || arcs.length,
       scenes: idx.stats?.scenes || totalScenes,
+      llm_arcs: resolvedLlmArcs,
+      llm_scenes: resolvedLlmScenes,
       total_chars: idx.stats?.total_chars || totalChars,
       max_order: maxOrd,
     };
