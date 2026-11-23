@@ -65,24 +65,23 @@ SillyTavern / TauriTavern 对话轮次 或 原生 Agent (MCP / DeepSeek Harness)
    ```text
    https://github.com/lena13144/lorecodex
    ```
-3. 刷新页面后展开右侧扩展面板中的 **「LoreCodex 树形典籍检索 (st-tree-lore)」**：
-   - 状态栏默认直接亮绿灯：**`内置书阁引擎就绪 (IndexedDB 免后台) · 已挂载 1 个典籍`**（首次打开已自动为您挂载《苍穹残响·灰烬星港编年史》示例书库）；
-   - 点击 **「打开书阁」**（或输入 `/loreui`），即可直接在酒馆内弹出完整的**内嵌书阁与轨迹工作台**（无需启动任何 Node.js 或 Python 后台！）。
+3. 刷新页面后展开右侧扩展面板中的 **「LoreCodex 典籍检索」**（v2.2 极简卡片，支持顶栏小太阳/小月亮一键切换 **墨灯深色 / 素笺浅色** 主题）：
+   - 顶栏默认绿灯就绪并预挂载《苍穹残响·灰烬星港编年史》示例书库；侧边栏仅保留开关、选书库/绑角色、**LLM 目录进度条**、上次检索摘要与 **「打开 LoreCodex 大面板」** 主入口；
+   - 点击 **「打开 LoreCodex 大面板」**（或输入 `/loreui`），即可直接在酒馆内弹出完整工作台（无需启动任何 Node.js 或 Python 后台！）。
 
 ### 第二步：配置旁路推理模型
-1. 在酒馆插件面板展开 **「旁路推理 Agent 模型配置」**（或在「打开书阁」弹窗右上角点击 **「模型」**）；
+1. 首次使用若未配置 API，侧边栏会自动浮现 **「尚未配置旁路模型 API · 去配置」** 引导，点击直达大面板的模型配置弹窗（也可在大面板右上角点击 **「模型」**）；
 2. 填入任意 OpenAI 兼容接口的 **API Base URL** 与 **API Key**（如 DeepSeek、Gemini OpenAI 兼容端点、OpenRouter、硅基流动等）；
 3. 点击 **「拉取模型」**，在弹出的模型下拉框中直接选择模型（`Max Tokens` 留空即可自动沿用模型原生上限），点击保存。
 
-### 第三步：导入你的小说 / 世界书并执行 LLM 智能目录构建
-你可以在**酒馆插件面板**或**书阁工作台顶栏的「导入建树」弹窗**中直接导入新书：
+### 第三步：两步安全导入小说 / 世界书并建立 LLM 目录
+在大面板顶栏点击 **「导入」**（或点击 **「书库管理」** 查看/切换/导出/删除全部书库）：
 1. 选择本地的小说文件（支持 `.txt` 自动识别 UTF-8/GB18030、`.epub` 电子书、`.md`）、SillyTavern 世界书 `.json`、V2 角色卡 `.json`，或别人分享的 `.lorepack.json` 单文件书库包；
-2. 填写书库 ID（如 `my-novel`）与显示名称；
-3. **保持勾选「启用 LLM 智能目录构建」**（核心必选）：
-   - **中短篇作品**：导入后会自动并发调用 LLM 生成分幕摘要、全卷总览、人物别名对照表与设定术语表；
-   - **数百万字超长篇网文**：可先切分章节入库，随后在面板的 **「当前书库 LLM 目录构建 / 原地补全」**（或书阁的「语料配置 -> LLM 目录补全」）中选择 **目标分卷（如：第一卷）** 逐卷构建；
-   - **实时断点续传**：每完成 4 章自动写入浏览器 `IndexedDB`，随时点击「暂停并保存进度」或切后台都不会丢失已完成章节，下次点击继续自动跳过已构建章节；
-   - **一键导出分享**：构建完成的满血书库可随时点击 **「导出 .lorepack」** 导出为单个 `.lorepack.json` 文件，跨设备秒级导入。
+2. 点击 **「开始导入」**，先免费完成离线切分并展示**结构预检报告**（卷数、章数、字数与章节抽样），防止异常切分或脏文本误烧 API；
+3. 确认切分无误后，手动点击 **「开始 LLM 建立目录」**（或随时在酒馆侧边栏的进度条控件 / 大面板「LLM 建目录」启动）：
+   - **实时断点续传**：构建进度实时同步显示在酒馆侧边栏进度条与大面板中，每完成若干章自动写入 `IndexedDB`，随时点击 **「暂停」** 都不会丢失进度，下次继续自动跳过已完成章节；
+   - **按卷增量构建**：数百万字超长篇可在大面板「书库设置 → LLM 目录补全」中选择 **目标分卷（如：第一卷）** 逐卷构建；
+   - **书库管理与分享**：在大面板顶栏点击 **「书库管理」**，可一目了然查看所有书库的 LLM 覆盖率，一键打开、补全目录、导出 `.lorepack.json` 或永久删除书库。
 
 ---
 
@@ -92,9 +91,9 @@ SillyTavern / TauriTavern 对话轮次 或 原生 Agent (MCP / DeepSeek Harness)
 
 | 发行包名称 | 适用人群 | 包含内容 |
 | :--- | :--- | :--- |
-| **`lorecodex-sillytavern-tauritavern-extension-v2.1.0.zip`** | **手机端 / TauriTavern / 纯酒馆前端玩家**（零后台，无需安装 Node.js 或 Python） | 仅含 `st-tree-lore` 酒馆扩展（内置 IndexedDB 免后台引擎、内嵌书阁 UI、纯前端 TXT/EPUB/JSON 建库与 LLM 目录升级器）+ `demo-chronicles.lorepack.json` |
-| **`lorecodex-agent-dsh-mcp-plugin-v2.1.0.zip`** | **AI Agent 开发者**（DeepSeek Harness `dsh` / Claude Code / Cursor / Antigravity） | 仅含 DeepSeek Harness (`@deepseek-ai/cordis`) 插件、零依赖 MCP Server、Agent Skill 与核心树引擎（剔除所有酒馆与 Web UI 资源） |
-| **`lorecodex-full-server-workbench-v2.1.0.zip`** | **独立桌面书阁 / 本地命令行建库玩家**（需要脱离酒馆独立运行 `127.0.0.1:5240` 服务或与 MCP 共享本地磁盘 `corpora/`） | 完整 Node 服务端 + 独立书阁 Web UI + Python 批量建树器 + 酒馆扩展 + Agent 插件 |
+| **`lorecodex-sillytavern-tauritavern-extension-v2.2.0.zip`** | **手机端 / TauriTavern / 纯酒馆前端玩家**（零后台，无需安装 Node.js 或 Python） | 仅含 `st-tree-lore` 酒馆扩展（v2.2 极简墨灯/素笺双模式侧边栏、IndexedDB 免后台引擎、内嵌大面板、纯前端 TXT/EPUB/JSON 建库与 LLM 目录升级器）+ `demo-chronicles.lorepack.json` |
+| **`lorecodex-agent-dsh-mcp-plugin-v2.2.0.zip`** | **AI Agent 开发者**（DeepSeek Harness `dsh` / Claude Code / Cursor / Antigravity） | 仅含 DeepSeek Harness (`@deepseek-ai/cordis`) 插件、零依赖 MCP Server、Agent Skill 与核心树引擎（剔除所有酒馆与 Web UI 资源） |
+| **`lorecodex-full-server-workbench-v2.2.0.zip`** | **独立桌面书阁 / 本地命令行建库玩家**（需要脱离酒馆独立运行 `127.0.0.1:5240` 服务、绕过中转站 CORS 限制或与 MCP 共享本地磁盘 `corpora/`） | 完整 Node 服务端 + 独立书阁 Web UI + Python 批量建树器 + 酒馆扩展 + Agent 插件 |
 
 ---
 
@@ -131,8 +130,9 @@ dsh plugin --profile web add "github:lena13144/lorecodex"
 
 ## 酒馆插件功能与斜杠命令
 
-- **角色卡自动绑定（`charBindings`）**：点击面板中的「绑定当前角色卡」，即可将该角色卡与指定书库、`maxOrder` 防剧透上限和 `POV` 视角绑定，切换同人卡时自动切换书库与进度。
-- **上次注入实时预览与轨迹直达**：每轮对话后实时展示命中幕数、耗时、注入字数与章节列表，点击 **「在酒馆内查看完整轨迹」** 直接在内置书阁中回放该轮 Agent 思考链与翻书瀑布流。
+- **角色卡一键绑定（`charBindings`）**：点击侧边栏书库旁的 **「绑角色」** 按钮，即可将当前书库、防剧透上限与视角绑定给当前角色卡；切换角色卡时自动切回专属书库与进度。
+- **可视化防剧透按卷选择 & 徽章直达**：在大面板顶栏 **「酒馆设置」** 中可通过下拉框按章节/分卷选择防剧透进度（点击侧边栏的 `防剧透≤N` / `视角` 徽章可一步直达调整）。
+- **上次注入摘要 & 轨迹直达**：侧边栏以极简单行胶囊显示最近一次检索命中幕数与耗时，点击展开命中的幕列表并可直达大面板回放完整翻书轨迹。
 - **斜杠命令**：
   - `/loreui` — 在酒馆内打开内嵌典籍与轨迹工作台全屏浮层
   - `/lorecodex [on|off]` — 开关树检索
@@ -144,13 +144,13 @@ dsh plugin --profile web add "github:lena13144/lorecodex"
 
 ## 进阶可选：独立 Node 服务端与 Python 命令行批量建树
 
-如果你希望脱离酒馆单独在浏览器使用书阁工作台（`http://127.0.0.1:5240`），或者将书库以文件形式保存在本地磁盘 `corpora/` 目录下供本地 MCP Server 与酒馆共同读写：
+如果你希望脱离酒馆单独在浏览器使用书阁工作台（`http://127.0.0.1:5240`）、绕过部分中转站的浏览器 CORS 跨域限制，或者将书库以文件形式保存在本地磁盘 `corpora/` 目录下供本地 MCP Server 与酒馆共同读写：
 
 ```bash
 # 启动独立书阁 HTTP 服务（支持局域网访问可加 --host 0.0.0.0）：
 node src/server.js
 
-# 命令行离线切树 + 按分卷并发升级 LLM 目录摘要、卷总览、人物别名与术语表（支持断点续传）：
+# 命令行离线切树（内置 MediaWiki/网页 JS/CSS 噪声清洗与结构体检；支持 --h1-is-volume / --strip-block / --allow-noisy）：
 python3 builders/build_novel.py --input path/to/novel.txt --corpus-id my-novel --name "我的小说" --no-llm
 python3 builders/build_novel.py --upgrade --corpus-id my-novel --series "第1卷" --workers 8
 

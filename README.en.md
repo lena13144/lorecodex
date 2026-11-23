@@ -43,11 +43,11 @@
    ```text
    https://github.com/lena13144/lorecodex
    ```
-2. **Open Embedded Codex**: Expand **LoreCodex 树形典籍检索 (st-tree-lore)**. The status bar immediately lights up green (`内置书阁引擎就绪 (IndexedDB 免后台)`) with the sample `demo-chronicles` corpus pre-mounted. Click **「打开书阁」** (or type `/loreui`) to open the embedded Workbench overlay without any external server.
-3. **Configure Sidecar Model & Build Your Corpus**:
-   - Fill in your OpenAI-compatible **API Base URL** and **API Key**, click **「拉取模型」** to pick a model (`Max Tokens` left blank uses the model's native limit).
-   - Select your `.txt` / `.epub` / `.md` novel or `.json` worldbook/card, keep **LLM 智能目录构建** checked, and import directly into browser IndexedDB (or build volume-by-volume with real-time checkpoint resume).
-   - Click **「导出 .lorepack」** anytime to export a single-file `.lorepack.json` bundle to share across devices.
+2. **Minimal Editorial Sidebar & Embedded Workbench**: Expand **LoreCodex 典籍检索** in the sidebar—a single clean card (supporting **Ink & Lamp** dark and **Paper** light themes) with enable switch, corpus selector + one-click character binding, live **LLM Index Progress Bar**, last-retrieval summary, and **「打开 LoreCodex 大面板」** (or `/loreui`).
+3. **Configure Model & Two-Step Safe Import**:
+   - Click **「去配置」** (or **「模型」** inside the workbench) to set your OpenAI-compatible **API Base URL**, **API Key**, and model (`Max Tokens` left blank uses the model's native limit).
+   - Click **「导入」** to upload `.txt` / `.epub` / `.md` novels or `.json` worldbooks/cards: LoreCodex runs a free offline split + structure preflight preview first, then lets you manually start LLM directory building with checkpoint resume.
+   - Use **「书库管理」** to inspect LLM coverage, open, export `.lorepack.json`, or permanently delete corpora, and **「酒馆设置」** for visual chapter/volume spoiler-gate selection and POV.
 
 ---
 
@@ -55,9 +55,9 @@
 
 [**GitHub Releases**](https://github.com/lena13144/lorecodex/releases) provides 3 targeted standalone packages so users only download what they need:
 
-1. **`lorecodex-sillytavern-tauritavern-extension-v2.1.0.zip`** — Pure frontend extension for SillyTavern & TauriTavern (mobile/desktop) with the built-in IndexedDB serverless engine, embedded Workbench UI, native TXT/GB18030/EPUB/JSON builders, in-browser LLM directory upgrader, and `demo-chronicles.lorepack.json`.
-2. **`lorecodex-agent-dsh-mcp-plugin-v2.1.0.zip`** — Lightweight package for AI Agents containing the **DeepSeek Harness (`@deepseek-ai/dsh` / Cordis)** plugin (`src/dsh_plugin.js` + `cordis.patch.yml`), zero-dependency **MCP stdio server** (`src/mcp_server.js`), and **Agent Skill** (`skills/lorecodex/SKILL.md`), exposing 9 tools (`lorecodex_list_corpora`, `lorecodex_list_series`, `lorecodex_list_arcs`, `lorecodex_expand_arc`, `lorecodex_grep_scenes`, `lorecodex_read_scenes`, `lorecodex_build_corpus`, `lorecodex_update_index_meta`, and `lorecodex_ask_agent`).
-3. **`lorecodex-full-server-workbench-v2.1.0.zip`** — Complete distribution including the optional standalone Node HTTP server (`src/server.js`), Python CLI builders (`builders/`), Workbench UI, SillyTavern extension, and Agent integrations.
+1. **`lorecodex-sillytavern-tauritavern-extension-v2.2.0.zip`** — Pure frontend extension for SillyTavern & TauriTavern (mobile/desktop) with the v2.2 minimal dual-theme sidebar, built-in IndexedDB serverless engine, embedded Workbench UI, native TXT/GB18030/EPUB/JSON builders, in-browser LLM directory upgrader, and `demo-chronicles.lorepack.json`.
+2. **`lorecodex-agent-dsh-mcp-plugin-v2.2.0.zip`** — Lightweight package for AI Agents containing the **DeepSeek Harness (`@deepseek-ai/dsh` / Cordis)** plugin (`src/dsh_plugin.js` + `cordis.patch.yml`), zero-dependency **MCP stdio server** (`src/mcp_server.js`), and **Agent Skill** (`skills/lorecodex/SKILL.md`), exposing 9 tools (`lorecodex_list_corpora`, `lorecodex_list_series`, `lorecodex_list_arcs`, `lorecodex_expand_arc`, `lorecodex_grep_scenes`, `lorecodex_read_scenes`, `lorecodex_build_corpus`, `lorecodex_update_index_meta`, and `lorecodex_ask_agent`).
+3. **`lorecodex-full-server-workbench-v2.2.0.zip`** — Complete distribution including the optional standalone Node HTTP server (`src/server.js`, also useful for bypassing browser CORS on custom API relays), Python CLI builders (`builders/`, with web/MediaWiki JS/CSS noise stripping and `--h1-is-volume` / `--strip-block` / `--allow-noisy`), Workbench UI, SillyTavern extension, and Agent integrations.
 
 ```bash
 # Install directly into DeepSeek Harness (dsh):
