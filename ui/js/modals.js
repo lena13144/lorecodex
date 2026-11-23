@@ -240,6 +240,14 @@ function renderSplitPreviewHtml(report, estimate, { autoUncheckedLlm = false } =
         .join('')}</div>`
     : '';
 
+  const cs = report.cleanedSummary;
+  const cleanedHtml = cs && cs.items.length
+    ? `<details class="split-clean">
+        <summary>清洗删除：${cs.items.map((it) => `${esc(it.label)} ${it.count.toLocaleString()} ${it.unit}`).join(' · ')}</summary>
+        ${cs.samples.length ? `<div class="split-clean-samples">${cs.samples.map((x) => `<div class="split-clean-row"><span class="split-chip">${esc(x.kind)}</span><code>${esc(x.text)}</code></div>`).join('')}</div>` : ''}
+      </details>`
+    : '';
+
   const seriesHtml = report.seriesBreakdown.length
     ? `<div class="split-series-row">${report.seriesBreakdown
         .slice(0, 16)
@@ -274,6 +282,7 @@ function renderSplitPreviewHtml(report, estimate, { autoUncheckedLlm = false } =
     <div class="split-stats">${statsText}</div>
     ${estHtml}
     ${blockNotice}
+    ${cleanedHtml}
     ${warnsHtml}
     <details ${shouldOpen ? 'open' : ''} style="margin-top:2px;">
       <summary style="cursor:pointer;font-size:11.5px;color:var(--ink-soft);user-select:none;">查看分卷分布与章节抽样（前 5 章 + 尾 2 章）</summary>
@@ -1032,6 +1041,18 @@ export function openImportModal() {
         </div>
       </div>
 
+      <div id="impNovelOpts" style="display:flex;flex-direction:column;gap:6px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;">
+          <input id="impCleanAds" type="checkbox" checked />
+          <span>清洗网页残留：脚本/样式代码、盗版站广告与网址行、文件头横幅、水印乱码（只删整行噪声，正文句子不动）</span>
+        </label>
+        <details id="impStripDetails">
+          <summary style="cursor:pointer;font-size:12px;color:var(--ink-soft);user-select:none;">自定义剥离规则（可选）</summary>
+          <textarea id="impStripBlocks" rows="3" spellcheck="false" style="width:100%;margin-top:6px;font-family:var(--font-mono, monospace);font-size:12px;" placeholder="每行一条：start=起始正则||end=结束正则；只写一个正则则只删匹配的那一行。# 开头为注释。&#10;例：start=^【作者有话说】||end=^【完】"></textarea>
+          <div class="pane-sub" style="margin:0;">区块遇到章节标题会自动停止，不会吞掉下一章；修改后会重新预检。</div>
+        </details>
+      </div>
+
       <div id="impSplitPreviewWrap" class="split-preview-wrap" style="display:none;"></div>
 
       <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;justify-content:space-between;font-size:12px;">
@@ -1069,6 +1090,8 @@ export function openImportModal() {
   const updateModeUi = () => {
     const isLore = $('#impKind').value === 'lore';
     $('#impLoreOpts').style.display = isLore ? 'grid' : 'none';
+    const novelOpts = $('#impNovelOpts');
+    if (novelOpts) novelOpts.style.display = isLore ? 'none' : 'flex';
     if (isLore && $('#impCategory').value === '正文') $('#impCategory').value = '档案设定';
     if (!isLore && $('#impCategory').value === '档案设定') $('#impCategory').value = '正文';
   };
@@ -1097,9 +1120,16 @@ export function openImportModal() {
         name: $('#impName').value.trim() || file.name,
         category: $('#impCategory').value.trim(),
         workers: Math.min(Math.max(Number($('#impWorkers')?.value) || 8, 1), 24),
+        cleanAds: $('#impCleanAds')?.checked !== false,
+        stripBlocks: $('#impStripBlocks')?.value || '',
       });
       if (seq !== previewSeq) return;
       if (!res?.ok || !res.report) {
+        if (res?.error) {
+          wrap.innerHTML = `<div class="split-warn-item err">${esc(res.error)}</div>`;
+          wrap.style.display = 'flex';
+          return;
+        }
         wrap.style.display = 'none';
         wrap.innerHTML = '';
         return;
@@ -1120,6 +1150,14 @@ export function openImportModal() {
   });
   $('#impWorkers')?.addEventListener('input', () => {
     if (selectedFile) runFileSplitPreview(selectedFile);
+  });
+  $('#impCleanAds')?.addEventListener('change', () => {
+    if (selectedFile) runFileSplitPreview(selectedFile);
+  });
+  let stripPreviewTimer = null;
+  $('#impStripBlocks')?.addEventListener('input', () => {
+    clearTimeout(stripPreviewTimer);
+    stripPreviewTimer = setTimeout(() => { if (selectedFile) runFileSplitPreview(selectedFile); }, 500);
   });
 
   let lastAutoSlug = '';
@@ -1218,6 +1256,8 @@ export function openImportModal() {
         workers: Math.min(Math.max(Number($('#impWorkers')?.value) || 8, 1), 24),
         allowLlmOnAnomaly: false,
         filterGameStats: $('#impFilterStats').checked,
+        cleanAds: $('#impCleanAds')?.checked !== false,
+        stripBlocks: $('#impStripBlocks')?.value || '',
       });
 
       const jobId = res.job.id;

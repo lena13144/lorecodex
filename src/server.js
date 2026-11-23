@@ -354,6 +354,8 @@ function startImportJob({
   useLlm,
   filterGameStats,
   overwriteConfig,
+  cleanAds = true,
+  stripBlocks = [],
 }) {
   const prepId = 'prep_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
   const safeName = path.basename(String(filename || 'upload.txt')).replace(/[^a-zA-Z0-9\u4e00-\u9fff._-]/g, '_') || 'upload.txt';
@@ -382,6 +384,8 @@ function startImportJob({
     if (category) args.push('--category', category);
     if (!useLlm) args.push('--no-llm');
     if (overwriteConfig) args.push('--overwrite-config');
+    if (!cleanAds) args.push('--no-clean-ads');
+    for (const spec of stripBlocks) args.push('--strip-block', spec);
   } else {
     const scriptPath = path.join(ROOT_DIR, 'builders', 'build_lore.py');
     args = [
@@ -603,6 +607,12 @@ const server = http.createServer(async (req, res) => {
         useLlm: Boolean(payload.useLlm),
         filterGameStats: Boolean(payload.filterGameStats),
         overwriteConfig: Boolean(payload.overwriteConfig),
+        cleanAds: payload.cleanAds !== false,
+        stripBlocks: String(payload.stripBlocks || '')
+          .split(/\r?\n/)
+          .map((x) => x.trim())
+          .filter((x) => x && !x.startsWith('#'))
+          .slice(0, 50),
       });
       return send({ ok: true, job }, 202);
     } catch (e) {

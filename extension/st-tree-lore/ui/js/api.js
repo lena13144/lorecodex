@@ -381,7 +381,7 @@ export function findRunningJobForCorpus(corpusId) {
   return null;
 }
 
-export async function previewLocalImportFile({ filename = 'upload.txt', buffer, kind = 'novel', corpusId = 'preview', name = '预览书库', category = '', workers = 8 }) {
+export async function previewLocalImportFile({ filename = 'upload.txt', buffer, kind = 'novel', corpusId = 'preview', name = '预览书库', category = '', workers = 8, cleanAds = true, stripBlocks = '' }) {
   try {
     const be = await getBrowserEngine();
     const rawBytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
@@ -405,6 +405,8 @@ export async function previewLocalImportFile({ filename = 'upload.txt', buffer, 
           corpusId: corpusId || 'preview',
           name: name || corpusId || '预览书库',
           category: category || '正文',
+          cleanAds: cleanAds !== false,
+          stripBlocks,
         });
     const report = be.inspectCorpusStructure(pack);
     const safeWorkers = Math.min(Math.max(Number(workers) || 8, 1), 24);
@@ -503,12 +505,18 @@ export async function importCorpus(payload) {
             corpusId: payload.corpusId,
             name: payload.name || payload.corpusId,
             category: payload.category || '正文',
+            cleanAds: payload.cleanAds !== false,
+            stripBlocks: payload.stripBlocks || '',
           });
       await be.idbSaveCorpus(pack);
       localAgentsCache.clear();
       const st = pack.indexData?.stats || {};
       const report = be.inspectCorpusStructure(pack);
       job.structureReport = report;
+      const cs = report.cleanedSummary;
+      if (cs && cs.items.length) {
+        job.logs.push(`[browser-idb] 清洗：${cs.items.map((it) => `${it.label} ${it.count} ${it.unit}`).join('，')}`);
+      }
       const volStr = report.hasNamedSeries ? `${report.seriesCount} 卷 / ` : '';
       job.logs.push(
         `[browser-idb] 切分完成：${volStr}${st.arcs || 0} 章 / ${st.scenes || 0} 幕 (${(st.total_chars || 0).toLocaleString()} 字，均章 ${report.avgArcChars.toLocaleString()} 字)`

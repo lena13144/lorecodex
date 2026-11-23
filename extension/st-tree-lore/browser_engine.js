@@ -6,15 +6,6 @@ const DEFAULT_STAGE_PATTERNS = [
     '(?:世界|城市|模拟器|舞台|总览|合集|世界书|沙盒|sandbox|world|city|simulator)',
 ];
 
-const AD_PATTERNS = [
-    /https?:\/\/\S+/i,
-    /(?:爱下电子书|爱阅小说|笔趣阁|起点中文网|晋江文学城|飞卢小说|全本小说网)/i,
-    /网页版章节内容慢.*下载.*app/i,
-    /请记住本站域名/i,
-    /最新章节.*阅读/i,
-    /^[-=]{3,}\s*章节内容开始\s*[-=]{3,}$/i,
-];
-
 function stripMarkup(text) {
     return String(text || '')
         .replace(/<\/?(?:color|size|b|i|u|s|ruby|rt)(?:=[^>]*)?>/gi, '')
@@ -495,10 +486,333 @@ function makeHeuristicSummary(text) {
     return first === last ? first : `${first} … ${last}`;
 }
 
-export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = '正文' }) {
-    const lines = String(rawText || '').replace(/\r\n/g, '\n').split('\n');
-    const volRe = /^\s*(?:#\s*)?(第[一二三四五六七八九十百千0-9]+(?:卷|部|篇|集)|Volume\s+\d+|Book\s+\d+)(?:[\s：:·、，,-]+(.{0,36}))?\s*$/i;
-    const chapRe = /^\s*(?:##+\s*)?(?:第([零〇一二三四五六七八九十百千万两0-9]+)(?:章|节|回|幕|话)(?:[\s　：:·•、，,-]*([^\n]{0,45}))?|(?:Chapter|Episode)\s+(\d+)(?:[\s：:·、，,-]+([^\n]{0,45}))?|(?:序章|楔子|引子|尾声|终章|后记|番外|外传|间章|幕间)[零〇一二三四五六七八九十两0-9]*(?:$|[\s　：:·•、\-—]+[^\n]{0,45}))\s*$/i;
+// ── 正文清洗（与 builders/build_novel.py 对齐） ─────────────────────────────
+// 原则：只删高置信度的噪声（网页代码、站点广告、水印），宁可漏删也不误伤原文；
+// 每一类删除都计数并抽样，供导入预检展示。
+
+// 盗版站页脚/提示语：这类句子本身就是广告，整行删除。
+const AD_FOOTER_RE = /网页版章节内容慢|请退出转码页面|为你提供最快的.{0,40}更新|更多电子书请访问|请记住本[书站].{0,4}域名|手机版网址|免费阅读[。.]?\s*https?:\/\/|^[-=]{3,}\s*章节内容开始\s*[-=]{3,}$|^『还在连载中/i;
+// 站名：常被粘在正文句尾当水印。只有带网址的行、或不含对白也不成句的短行（≤40 字）才整行删除；其余先去掉句尾/行内水印再保留原句。
+const AD_SITE_RE = /爱下电子书|ixdzs|笔趣阁|妙笔坊|爱阅小说|恋上你看书|起点中文网|晋江文学城|飞卢小说|全本小说网/i;
+// 行内水印：「巘戅站名巘戅」「攫欝」、连续 HTML 实体、粘在句末的站名。
+const INLINE_WATERMARK_RES = [
+    /巘戅[^巘戅\n]{0,40}?(?:巘戅|戅)[。.]?/g,
+    /攫欝/g,
+    /^攫(?=[。.\s“「])[。.]?|攫$/g, // 「攫欝」被截断后残留的单字
+    /(?:&#\d{2,5};?){3,}/g,
+    /(?<=[。！？!?…”」』）)\]])\s*(?:新笔趣阁|笔趣阁|妙笔坊|爱下电子书|恋上你看书网?)$/,
+];
+const URL_RE = /https?:\/\/\S+|www\.[a-z0-9-]+\.[a-z]{2,}\S*/gi;
+
+const NOVEL_VOL_RE = /^\s*(?:#\s*)?(第[零〇一二三四五六七八九十百千0-9]+(?:卷|部|篇|集)|Volume\s+\d+|Book\s+\d+)(?:[\s：:·、，,-]+(.{0,36}))?\s*$/i;
+const NOVEL_CHAP_RE = /^\s*(?:##+\s*)?(?:第([零〇一二三四五六七八九十百千万两0-9]+)(?:章|节|回|幕|话)(?:[\s　：:·•、，,-]*([^\n]{0,45}))?|(?:Chapter|Episode)\s+(\d+)(?:[\s：:·、，,-]+([^\n]{0,45}))?|(?:序章|楔子|引子|尾声|终章|后记|番外|外传|间章|幕间)[零〇一二三四五六七八九十两0-9]*(?:$|[\s　：:·•、\-—]+[^\n]{0,45}))\s*$/i;
+const VOL_TEASER_RE = /敬请期待|求月票|求收藏|求订阅|求推荐|完结感言|新书/;
+
+const WEB_TAG_START_RE = /^<(script|style)(?:\s[^>]*)?>/i;
+const WEB_CODE_START_RE = /^(?:\(\s*window\.[A-Za-z_$][\w$]*\s*(?:\|\|=|\|\|)\s*\[\s*\]\s*\)\.push\s*\(|window\.[A-Za-z_$][\w$]*\s*=\s*window\.[A-Za-z_$][\w$]*|mw\.(?:hook|loader|config)\s*\(|RLQ\.push\s*\(|@(?:keyframes|media|supports|import|charset)\b|html\s*>\s*body\s*>|\.mw-[a-zA-Z0-9_-]+|\$\(\s*(?:function\b|document\b|\(\s*\)\s*=>)|document\.(?:addEventListener|querySelector|getElementById)\s*\()/;
+const GENERIC_CODE_LINE_RE = /^\s*(?:const|let|var|function|async\s+function|return|import|export)\s+[A-Za-z_$]|^\s*(?:if|else\s+if|for|while|switch|catch)\s*\([^)]*\)\s*\{|^\s*[}\])]+;?\s*$|^\s*[.#][A-Za-z_-][\w-]*(?:[\s>+~.:#[\]=*"'\w-])*\{\s*$|^\s*[a-z-]{2,24}\s*:\s*[^:\n]{1,120};\s*$|=>\s*\{|\.\w+\([^)]*\);\s*$/;
+const CJK_RE_G = /[一-鿿]/g;
+
+function countCjk(s) {
+    const m = String(s || '').match(CJK_RE_G);
+    return m ? m.length : 0;
+}
+
+function isNovelHeadingLine(s) {
+    if (!s) return false;
+    if (/^#{1,6}\s+\S/.test(s)) return true;
+    if (s.length <= 42 && NOVEL_VOL_RE.test(s) && !VOL_TEASER_RE.test(s)) return true;
+    const isProse = /[“”]/.test(s) || s.endsWith('。');
+    return !isProse && s.length <= 55 && NOVEL_CHAP_RE.test(s);
+}
+
+function braceDelta(line) {
+    let delta = 0;
+    let quote = null;
+    let escaped = false;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (escaped) { escaped = false; continue; }
+        if (quote) {
+            if (ch === '\\') escaped = true;
+            else if (ch === quote) quote = null;
+            continue;
+        }
+        if (ch === '/' && line[i + 1] === '/' && (i === 0 || line[i - 1] !== ':')) break;
+        if (ch === "'" || ch === '"' || ch === '`') quote = ch;
+        else if ('{[('.includes(ch)) delta += 1;
+        else if ('}])'.includes(ch)) delta -= 1;
+    }
+    return delta;
+}
+
+function looksLikeChineseProse(s) {
+    if (!s || s.length < 15) return false;
+    const cjk = countCjk(s);
+    if (cjk < 12) return false;
+    const nonWs = s.replace(/\s+/g, '').length;
+    if (!nonWs || cjk / nonWs < 0.45) return false;
+    return !/[{};]|=>|function\s*\(|const\s+\w+|var\s+\w+|let\s+\w+/.test(s);
+}
+
+/** 解析自定义剥离规则：每条为 `start=<正则>||end=<正则>`、`start=<正则>,end=<正则>` 或单个 `<正则>`；`#` 开头为注释。 */
+export function parseStripBlockSpecs(specs) {
+    const list = Array.isArray(specs) ? specs : String(specs || '').split('\n');
+    const out = [];
+    for (const raw of list) {
+        const spec = String(raw || '').trim();
+        if (!spec || spec.startsWith('#')) continue;
+        let startPat = spec;
+        let endPat = '';
+        const sep = spec.indexOf('||end=');
+        if (sep >= 0) {
+            startPat = spec.slice(0, sep);
+            endPat = spec.slice(sep + 6);
+        } else {
+            const m = spec.match(/[,，]\s*end=/);
+            if (m) {
+                startPat = spec.slice(0, m.index);
+                endPat = spec.slice(m.index + m[0].length);
+            }
+        }
+        if (startPat.startsWith('start=')) startPat = startPat.slice(6);
+        startPat = startPat.trim();
+        endPat = endPat.trim();
+        if (!startPat) throw new Error(`自定义剥离规则缺少起始正则：${spec}`);
+        try {
+            out.push({ startRe: new RegExp(startPat), endRe: endPat ? new RegExp(endPat) : null });
+        } catch (e) {
+            throw new Error(`自定义剥离规则正则无效：${spec}（${e.message}）`);
+        }
+    }
+    return out;
+}
+
+function isUrlOnlyLine(s) {
+    if (!/https?:\/\/|www\./i.test(s)) return false;
+    URL_RE.lastIndex = 0;
+    const rest = s.replace(URL_RE, '').replace(/[\s:：,，。.、|·\-—_()（）【】[\]<>《》]/g, '');
+    // 去掉网址后只剩“下载/阅读/地址”这类引导词，才算网址行；正文里提到网址的句子保留原样。
+    return rest.length <= 12;
+}
+
+/**
+ * 在切章之前清洗正文行。返回清洗后的行与统计（含抽样），不修改入参。
+ * cleanAds=false 时只执行自定义剥离规则。
+ */
+export function cleanNovelLinesInBrowser(lines, { bookName = '', cleanAds = true, stripBlocks = [] } = {}) {
+    const custom = parseStripBlockSpecs(stripBlocks);
+    const stats = {
+        web_blocks: 0, web_lines: 0,
+        custom_blocks: 0, custom_lines: 0,
+        ad_lines: 0, banner_lines: 0, book_name_lines: 0,
+        inline_fixes: 0, front_matter_lines: 0, glued_prefixes: 0,
+        samples: [],
+    };
+    const sample = (kind, text) => {
+        if (stats.samples.length < 12) stats.samples.push({ kind, text: String(text || '').trim().slice(0, 80) });
+    };
+    if (!cleanAds && !custom.length) return { lines: lines.slice(), stats };
+
+    // 1) 网页 script/style 块、带明确起始特征的 JS/CSS 块、自定义区块。遇到章节标题立刻停止，防止吞章。
+    const pass1 = [];
+    let mode = null;
+    let endRe = null;
+    let depth = 0;
+    let opened = false;
+    let codeLines = 0;
+    let sawBlank = false;
+    let customLines = 0;
+    for (const raw of lines) {
+        const s = String(raw || '').trim();
+        if (mode) {
+            if (isNovelHeadingLine(s)) {
+                mode = null;
+            } else if (mode === 'custom') {
+                stats.custom_lines += 1;
+                customLines += 1;
+                if ((endRe && endRe.test(s)) || customLines >= 2000) mode = null;
+                continue;
+            } else if (mode === 'tag') {
+                stats.web_lines += 1;
+                if (endRe.test(s)) mode = null;
+                continue;
+            } else if (!s) {
+                sawBlank = true;
+                stats.web_lines += 1;
+                codeLines += 1;
+                if (codeLines >= 400) mode = null;
+                continue;
+            } else if (sawBlank && looksLikeChineseProse(s)) {
+                mode = null;
+            } else {
+                stats.web_lines += 1;
+                codeLines += 1;
+                sawBlank = false;
+                depth += braceDelta(s);
+                if (depth > 0) opened = true;
+                if ((opened && depth <= 0) || codeLines >= 400) mode = null;
+                continue;
+            }
+        }
+
+        const hit = custom.find((r) => r.startRe.test(s));
+        if (hit) {
+            stats.custom_blocks += 1;
+            stats.custom_lines += 1;
+            sample('自定义规则', s);
+            if (!(hit.endRe && hit.endRe.test(s))) {
+                mode = 'custom';
+                endRe = hit.endRe;
+                customLines = 1;
+            }
+            continue;
+        }
+
+        if (cleanAds && s) {
+            const tm = s.match(WEB_TAG_START_RE);
+            if (tm) {
+                stats.web_blocks += 1;
+                stats.web_lines += 1;
+                sample('网页代码', s);
+                const tagEnd = new RegExp(`</${tm[1]}\\s*>`, 'i');
+                if (!tagEnd.test(s)) {
+                    mode = 'tag';
+                    endRe = tagEnd;
+                }
+                continue;
+            }
+            if (countCjk(s) <= 4 && WEB_CODE_START_RE.test(s)) {
+                stats.web_blocks += 1;
+                stats.web_lines += 1;
+                sample('网页代码', s);
+                const d = braceDelta(s);
+                if (d > 0 || /(?:[{([,]|=>|\/\*)$/.test(s)) {
+                    mode = 'code';
+                    depth = Math.max(d, 0);
+                    opened = d > 0;
+                    codeLines = 1;
+                    sawBlank = false;
+                }
+                continue;
+            }
+        }
+        pass1.push(raw);
+    }
+    if (!cleanAds) return { lines: pass1, stats };
+
+    // 2) 没有起始特征的连续 JS/CSS（≥3 行代码语法、中文占比 <25%）。
+    const pass2 = [];
+    let run = [];
+    const flushRun = () => {
+        if (!run.length) return;
+        const nonEmpty = run.map((r) => String(r).trim()).filter(Boolean);
+        const joined = nonEmpty.join('');
+        const nonWs = joined.replace(/\s+/g, '').length;
+        if (nonEmpty.length >= 3 && (nonWs ? countCjk(joined) / nonWs : 0) < 0.25) {
+            stats.web_blocks += 1;
+            stats.web_lines += run.length;
+            sample('网页代码', nonEmpty[0]);
+        } else {
+            pass2.push(...run);
+        }
+        run = [];
+    };
+    for (const raw of pass1) {
+        const s = String(raw || '').trim();
+        if (s && !isNovelHeadingLine(s) && s.length <= 300 && GENERIC_CODE_LINE_RE.test(s)) {
+            run.push(raw);
+            continue;
+        }
+        flushRun();
+        pass2.push(raw);
+    }
+    flushRun();
+
+    // 3) 文件头横幅、广告/网址行、单独的书名行、行内水印乱码。
+    const out = [];
+    const book = String(bookName || '').trim();
+    const bookRe = book.length >= 2
+        ? new RegExp(`^[，,、\\s]*《?${escapeRegExp(book)}》?[，,。:：\\s]*$`)
+        : null;
+    let inBanner = false;
+    let passedContent = false;
+    for (const raw of pass2) {
+        const s = String(raw || '').trim();
+        if (!passedContent) {
+            if (inBanner) {
+                stats.banner_lines += 1;
+                if (s.endsWith('』')) inBanner = false;
+                continue;
+            }
+            if (s.startsWith('『') && !s.endsWith('』')) {
+                inBanner = true;
+                stats.banner_lines += 1;
+                sample('文件头', s);
+                continue;
+            }
+            if (s.startsWith('『') && s.endsWith('』') && /作者[:：]|状态[:：]|内容简介|连载中/.test(s)) {
+                stats.banner_lines += 1;
+                sample('文件头', s);
+                continue;
+            }
+        }
+        let cleaned = s;
+        for (const re of INLINE_WATERMARK_RES) cleaned = cleaned.replace(re, '');
+        cleaned = cleaned.trim();
+        if (cleaned && (AD_FOOTER_RE.test(cleaned) || isUrlOnlyLine(cleaned) || (AD_SITE_RE.test(cleaned) && (/https?:\/\//i.test(cleaned) || (cleaned.length <= 40 && !/[“”「」。！？]/.test(cleaned)))))) {
+            stats.ad_lines += 1;
+            sample('广告/网址', s);
+            continue;
+        }
+        if (cleaned && bookRe && bookRe.test(cleaned)) {
+            stats.book_name_lines += 1;
+            sample('书名行', s);
+            continue;
+        }
+        if (cleaned !== s) {
+            stats.inline_fixes += 1;
+            sample('水印乱码', s);
+        }
+        if (cleaned) {
+            passedContent = true;
+            out.push(cleaned);
+        } else if (!s) {
+            out.push('');
+        }
+    }
+    return { lines: out, stats };
+}
+
+/** 章标题被粘在正文首行（如「书名正文卷第1章启程清晨……」）时，切掉重复的前缀。 */
+function stripGluedChapterPrefix(bodyLines, bookName, title) {
+    if (!bodyLines.length) return false;
+    const normTitle = String(title || '').replace(/\s+/g, '');
+    if (!normTitle) return false;
+    const first = bodyLines[0];
+    const book = String(bookName || '').trim();
+    const m = first.match(new RegExp(`^(?:${book ? escapeRegExp(book) : '(?!)'})?(?:正文卷|正文|VIP卷)?\\s*`));
+    const rest = m ? first.slice(m[0].length) : first;
+    if (!rest.slice(0, normTitle.length + 8).replace(/\s+/g, '').startsWith(normTitle)) return false;
+    let idx = 0;
+    let matched = 0;
+    while (idx < rest.length && matched < normTitle.length) {
+        if (!/\s/.test(rest[idx])) matched += 1;
+        idx += 1;
+    }
+    const trimmed = rest.slice(idx).replace(/^[\s：:.\-—]+/, '');
+    if (trimmed) bodyLines[0] = trimmed;
+    else bodyLines.shift();
+    return true;
+}
+
+export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = '正文', cleanAds = true, stripBlocks = [] }) {
+    const rawLines = String(rawText || '').replace(/\r\n?/g, '\n').split('\n');
+    const cleanedRes = cleanNovelLinesInBrowser(rawLines, { bookName: name, cleanAds, stripBlocks });
+    const cleanStats = cleanedRes.stats;
+    const lines = cleanedRes.lines;
+    const volRe = NOVEL_VOL_RE;
+    const chapRe = NOVEL_CHAP_RE;
 
     let currentSeries = '';
     let autoVolIdx = 1;
@@ -509,10 +823,9 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
     for (const rawLine of lines) {
         const line = rawLine.trim();
         if (!line) continue;
-        if (AD_PATTERNS.some((re) => re.test(line))) continue;
 
         const vm = line.match(volRe);
-        if (vm && line.length <= 42 && !/敬请期待|求月票|求收藏/.test(line)) {
+        if (vm && line.length <= 42 && !VOL_TEASER_RE.test(line)) {
             currentSeries = `${vm[1]}${vm[2] ? ' ' + vm[2].trim() : ''}`.trim();
             continue;
         }
@@ -549,6 +862,20 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
         curChap.lines.push(line);
     }
 
+    // 第一个章标题之前的「作者/简介」页或极短文本属于书籍信息，不当作序幕入库。比 build_novel.py（<400 字）保守，避免误删无标题的短开篇。
+    if (cleanAds && rawChapters.length > 1 && rawChapters[0].title === '序幕') {
+        const head = rawChapters[0].lines.join('\n');
+        if (head.length < 80 || /推荐一本书|作者[:：]|状态[:：]|内容简介/.test(head.slice(0, 300))) {
+            cleanStats.front_matter_lines += rawChapters[0].lines.length;
+            if (head.trim() && cleanStats.samples.length < 12) cleanStats.samples.push({ kind: '书前信息', text: head.replace(/\s+/g, ' ').trim().slice(0, 80) });
+            rawChapters.shift();
+        }
+    }
+    if (cleanAds) {
+        for (const c of rawChapters) {
+            if (c.title !== '序幕' && stripGluedChapterPrefix(c.lines, name, c.title)) cleanStats.glued_prefixes += 1;
+        }
+    }
     const validChaps = rawChapters.filter((c) => c.lines.join('\n').trim().length > 0);
     const arcs = [];
     const textsData = {};
@@ -696,7 +1023,7 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
     };
 
     const config = normalizeCorpusConfig({ id: corpusId, name: name || corpusId }, corpusId);
-    return { id: corpusId, config, indexData, textsData, graphData: [] };
+    return { id: corpusId, config, indexData, textsData, graphData: [], cleanStats };
 }
 
 // Pure-JS Worldbook / Character Card V2 Builder (.json) for In-Browser Mode
@@ -827,6 +1154,22 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
 /**
  * Inspect corpus split structure, extract series/chapter samples, and flag anomalies.
  */
+/** 把清洗统计整理成预检用的条目列表（只列非零项）与抽样。 */
+export function summarizeCleanStats(stats) {
+    if (!stats) return null;
+    const items = [];
+    if (stats.web_lines) items.push({ label: '网页代码', count: stats.web_lines, unit: '行' });
+    if (stats.custom_lines) items.push({ label: '自定义规则', count: stats.custom_lines, unit: '行' });
+    if (stats.ad_lines) items.push({ label: '广告/网址', count: stats.ad_lines, unit: '行' });
+    if (stats.banner_lines) items.push({ label: '文件头', count: stats.banner_lines, unit: '行' });
+    if (stats.front_matter_lines) items.push({ label: '书前信息', count: stats.front_matter_lines, unit: '行' });
+    if (stats.book_name_lines) items.push({ label: '书名行', count: stats.book_name_lines, unit: '行' });
+    if (stats.inline_fixes) items.push({ label: '水印乱码', count: stats.inline_fixes, unit: '处' });
+    if (stats.glued_prefixes) items.push({ label: '粘连标题', count: stats.glued_prefixes, unit: '处' });
+    const totalLines = (stats.web_lines || 0) + (stats.custom_lines || 0) + (stats.ad_lines || 0) + (stats.banner_lines || 0) + (stats.front_matter_lines || 0) + (stats.book_name_lines || 0);
+    return { items, totalLines, samples: Array.isArray(stats.samples) ? stats.samples.slice(0, 12) : [] };
+}
+
 export function inspectCorpusStructure(pack) {
     const arcs = Array.isArray(pack?.indexData?.arcs) ? pack.indexData.arcs : [];
     const textsData = pack?.textsData || {};
@@ -843,6 +1186,12 @@ export function inspectCorpusStructure(pack) {
     let over25SceneArcs = 0;
     let tinyArcCount = 0;
     let replacementCharCount = 0;
+    // 残留噪声：中文语料里中文占比 <20% 的幕、纯 ASCII 行占比（与 build_novel.py 预检一致）。
+    let corpusNonWs = 0;
+    let corpusCjk = 0;
+    let asciiLines = 0;
+    let totalLines = 0;
+    const sceneCjkRatios = [];
     let hasNamedSeries = false;
 
     const seriesMap = new Map();
@@ -879,6 +1228,19 @@ export function inspectCorpusStructure(pack) {
             const rawTxt = String(textsData[sc.node_id]?.text || '');
             for (let i = 0; i < rawTxt.length; i++) {
                 if (rawTxt.charCodeAt(i) === 0xfffd) replacementCharCount += 1;
+            }
+            if (!isLorePack) {
+                const nonWs = rawTxt.replace(/\s+/g, '').length;
+                const cjk = countCjk(rawTxt);
+                corpusNonWs += nonWs;
+                corpusCjk += cjk;
+                if (nonWs > 0) sceneCjkRatios.push(cjk / nonWs);
+                for (const ln of rawTxt.split('\n')) {
+                    const t = ln.trim();
+                    if (!t) continue;
+                    totalLines += 1;
+                    if (/^[\x00-\x7f]+$/.test(t)) asciiLines += 1;
+                }
             }
         }
 
@@ -996,6 +1358,19 @@ export function inspectCorpusStructure(pack) {
         }
     }
 
+    const isCjkCorpus = !isLorePack && ((corpusNonWs ? corpusCjk / corpusNonWs : 0) >= 0.3 || sceneCjkRatios.some((r) => r >= 0.3));
+    const lowCjkScenes = isCjkCorpus ? sceneCjkRatios.filter((r) => r < 0.2).length : 0;
+    const asciiLinePct = totalLines ? Math.round((asciiLines * 1000) / totalLines) / 10 : 0;
+    if (isCjkCorpus && (lowCjkScenes > 0 || asciiLinePct >= 15)) {
+        warnings.push({
+            level: lowCjkScenes > 0 || asciiLinePct >= 20 ? 'error' : 'warn',
+            code: 'residual_noise',
+            message: `清洗后仍疑似残留网页代码或非正文内容（${lowCjkScenes} 幕中文占比低于 20%，纯英文/符号行占 ${asciiLinePct}%），建议在「自定义剥离规则」里补充起止正则后重新预检。`,
+        });
+    }
+    const cleanStats = pack?.cleanStats || null;
+    const cleanedSummary = cleanStats ? summarizeCleanStats(cleanStats) : null;
+
     const hasError = warnings.some((w) => w.level === 'error');
     const hasWarn = warnings.some((w) => w.level === 'warn');
     const severity = hasError ? 'error' : hasWarn ? 'warn' : 'ok';
@@ -1016,6 +1391,9 @@ export function inspectCorpusStructure(pack) {
         over25SceneArcs,
         tinyArcCount,
         replacementCharCount,
+        lowCjkScenes,
+        asciiLinePct,
+        cleanedSummary,
         seriesBreakdown,
         sampleArcs,
         warnings,

@@ -828,6 +828,76 @@ async function testMcpAndBrowserEngine() {
   assert.strictEqual(builtNovelPack.indexData.arcs.length, 2, 'In-Browser novel builder should parse 2 chapters');
   assert.strictEqual(builtNovelPack.indexData.arcs[0].series, '第一卷 星港篇');
 
+  // Browser-side cleaning parity with build_novel.py (web code, ads/URL lines, banner, watermark, glued title, custom strip rules)
+  {
+    const js = [];
+    for (let i = 0; i < 20; i++) js.push(`  const ele${i} = container.find(".v-${i}"); ele${i}.height(ele${i}.width() * 9 / 16);`);
+    const raw = [
+        '『测试小说/作者:夜雨』',
+        '爱下电子书Txt版阅读 https://ixdzs8.com',
+        '------章节内容开始-------',
+        '第一卷 星港篇',
+        '第1章 启程',
+        '测试小说正文卷第1章 启程清晨雾气慢慢散开，林墨站在码头边。',
+        '林墨说道：“地址是 https://example.com/x ，你记下来了吗？”',
+        'https://www.biquge.com/book/123',
+        '测试小说',
+        '他回头看了一眼，攫欝攫欝雾里什么也没有。',
+        '(window.RLQ ||= []).push([[ "mediawiki.base" ], async () => {',
+        ...js,
+        '}]);',
+        '.player-shell::before {',
+        '  position: relative;',
+        '  display: inline-block;',
+        '}',
+        'AUTHOR_NOTE_BEGIN',
+        '作者有话说：求月票求收藏',
+        'AUTHOR_NOTE_END',
+        '第2章 暗潮',
+        '苏夏问道：“情报确认好了吗？”他在起点中文网上写了十年小说，从没断更。',
+        '起点中文网',
+    ].join('\n');
+
+    const pack = browserMod.buildNovelCorpusInBrowser({
+        rawText: raw, corpusId: 't', name: '测试小说',
+        stripBlocks: 'start=^AUTHOR_NOTE_BEGIN||end=^AUTHOR_NOTE_END\n# comment',
+    });
+    const arcs = pack.indexData.arcs;
+    const texts = Object.values(pack.textsData).map((t) => t.text);
+    const all = texts.join('\n');
+    assert.strictEqual(arcs.length, 2);
+    assert.strictEqual(arcs[0].series, '第一卷 星港篇');
+    assert(texts[0].startsWith('清晨雾气慢慢散开'), 'glued prefix stripped');
+    assert(all.includes('https://example.com/x'), 'prose line with URL must survive');
+    assert(!all.includes('biquge') && !all.includes('ixdzs') && !all.includes('作者:夜雨'));
+    assert(!all.includes('window.RLQ') && !all.includes('player-shell') && !all.includes('ele3'));
+    assert(!all.includes('AUTHOR_NOTE') && !all.includes('求月票'));
+    assert(all.includes('他回头看了一眼，雾里什么也没有。'));
+    assert(all.includes('他在起点中文网上写了十年小说'), 'long prose mentioning site kept');
+    assert(!/\n起点中文网$/.test(all), 'short site-name line dropped');
+    assert(!all.split('\n').includes('测试小说'), 'book name line dropped');
+
+    const rep = browserMod.inspectCorpusStructure(pack);
+    assert(rep.cleanedSummary.items.length >= 5);
+    assert(!rep.warnings.some((w) => w.code === 'residual_noise'));
+
+    // cleanAds=false keeps everything except custom blocks
+    const raw2 = browserMod.buildNovelCorpusInBrowser({ rawText: raw, corpusId: 't2', name: '测试小说', cleanAds: false });
+    const all2 = Object.values(raw2.textsData).map((t) => t.text).join('\n');
+    assert(all2.includes('window.RLQ') && all2.includes('biquge'));
+    const rep2 = browserMod.inspectCorpusStructure(raw2);
+    assert(rep2.warnings.some((w) => w.code === 'residual_noise'));
+
+    // heading safety: unterminated script must not swallow next chapter
+    const raw3 = ['第1章 甲', '正文甲'.repeat(10), '<script>', 'var a = 1;', '第2章 乙', '正文乙'.repeat(10)].join('\n');
+    const p3 = browserMod.buildNovelCorpusInBrowser({ rawText: raw3, corpusId: 't3', name: 'x' });
+    assert.strictEqual(p3.indexData.arcs.length, 2);
+
+    // invalid regex surfaces as error
+    assert.throws(() => browserMod.buildNovelCorpusInBrowser({ rawText: raw3, corpusId: 't4', name: 'x', stripBlocks: 'start=(' }), /正则无效/);
+  }
+
+
   // Test In-Browser GB18030 decoding & pure-JS EPUB extraction (extractEpubTextInBrowser)
   const gbkHex = 'b5da31d5c220c0e8c3f7d0c5bac5'; // GBK for "第1章 黎明信号"
   const gbkDecoded = browserMod.decodeTextBufferAuto(Buffer.from(gbkHex, 'hex'));
