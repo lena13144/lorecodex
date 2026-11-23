@@ -48,8 +48,9 @@ export const formatDurationZh = (ms) => ms + 'ms';
 export function createBrowserTreeAgent(pack) {
   return {
     id: pack.id,
-    async search(payload) {
+    async search(payload, _cfg, opts = {}) {
       globalThis.__lc.payloads.push(payload);
+      if (globalThis.__lc.onSearch) globalThis.__lc.onSearch(opts);
       if (globalThis.__lc.searchGate) await globalThis.__lc.searchGate;
       return globalThis.__lc.searchResult(payload);
     },
@@ -81,6 +82,7 @@ function installGlobals() {
     context: { chat: [], name1: 'lena', name2: '特市' },
     packs: [{ id: 'demo', config: { name: 'Demo', prompt_framing: {} }, indexData: { arcs: [] }, textsData: {} }],
     searchGate: null,
+    onSearch: null,
     searchResult: () => ({
       corpus_id: 'demo',
       scenes: [{ node_id: '0001', arc_title: '第一章', title: '雷达室', text: '苏璃：信号又来了。' }],
@@ -237,7 +239,49 @@ export async function testStExtension() {
     assert.strictEqual(lc.prompts.filter((x) => x.text).pop()?.depth, 0, 'depth 0 must be preserved');
     settings.depth = 1;
 
-    console.log('  PASS: interceptor retrieval uses literal user text only; stale injections cleared; quiet/depth handled');
+    // 8) Progress chip above the chat input: shown during the search, updated from onProgress, removed afterwards.
+    {
+      const mkEl = (tag) => ({
+        tag,
+        className: '',
+        textContent: '',
+        attrs: {},
+        children: [],
+        parentNode: null,
+        setAttribute(k, v) { this.attrs[k] = v; },
+        set innerHTML(html) {
+          this.children = [...html.matchAll(/class="([^"]+)"/g)].map((m) => Object.assign(mkEl('span'), { className: m[1] }));
+        },
+        querySelector(sel) { return this.children.find((c) => '.' + c.className === sel) || null; },
+      });
+      const formSheld = {
+        id: 'form_sheld',
+        kids: [],
+        cls: new Set(),
+        classList: { add(c) { formSheld.cls.add(c); }, remove(c) { formSheld.cls.delete(c); } },
+        appendChild(el) { el.parentNode = this; this.kids.push(el); },
+        removeChild(el) { this.kids = this.kids.filter((k) => k !== el); el.parentNode = null; },
+      };
+      globalThis.document = { getElementById: (id) => (id === 'form_sheld' ? formSheld : null), createElement: mkEl };
+      let seenDuring = null;
+      lc.onSearch = (opts) => {
+        const chip = formSheld.kids.find((k) => k.className === 'lorecodex-progress');
+        assert(chip, 'progress chip must be mounted inside #form_sheld while searching');
+        assert.strictEqual(typeof opts.onProgress, 'function', 'local search must receive onProgress');
+        opts.onProgress({ turn: 2, kind: 'tool', toolNames: ['read_scene'] });
+        seenDuring = chip.querySelector('.lorecodex-progress-text').textContent;
+      };
+      try {
+        await run([userMsg('雷达室那晚')]);
+      } finally {
+        lc.onSearch = null;
+        delete globalThis.document;
+      }
+      assert.strictEqual(seenDuring, 'LoreCodex 翻书中 · 第 2 轮 · 精读原文', 'progress text reflects streamed tool calls');
+      assert(!formSheld.kids.length && !formSheld.cls.size, 'progress chip and host class must be removed after the search');
+    }
+
+    console.log('  PASS: interceptor retrieval uses literal user text only; stale injections cleared; quiet/depth handled; progress chip shown/removed');
   } finally {
     fs.rmSync(stRoot, { recursive: true, force: true });
     delete globalThis.__lc;

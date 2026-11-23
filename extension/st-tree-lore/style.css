@@ -730,3 +730,86 @@
 .lorecodex-wb-backdrop[data-lc-theme="paper"] .lorecodex-wb-frame {
     background: #faf7f0;
 }
+
+/* Retrieval progress chip above the chat input (shown only while LoreCodex is searching).
+   Lives inside #form_sheld and floats above it, so it never shifts the chat layout. */
+#form_sheld.lorecodex-progress-host {
+    position: relative;
+}
+
+.lorecodex-progress {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 6px);
+    transform: translateX(-50%);
+    z-index: 31;
+    --lc-p-bg: rgba(25, 22, 20, 0.92);
+    --lc-p-ink: #e8e0d2;
+    --lc-p-muted: #9a8f80;
+    --lc-p-border: rgba(226, 215, 197, 0.16);
+    --lc-p-dot: #be4f47;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: fit-content;
+    max-width: calc(100% - 16px);
+    box-sizing: border-box;
+    margin: 0;
+    padding: 3px 12px;
+    border: 1px solid var(--lc-p-border);
+    border-radius: 999px;
+    background: var(--lc-p-bg);
+    color: var(--lc-p-ink);
+    font-size: 12px;
+    line-height: 1.6;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    pointer-events: none;
+    animation: lorecodex-progress-in 0.18s ease-out;
+}
+
+.lorecodex-progress[data-lc-theme="paper"] {
+    --lc-p-bg: rgba(252, 250, 245, 0.94);
+    --lc-p-ink: #221e19;
+    --lc-p-muted: #847b6e;
+    --lc-p-border: rgba(110, 92, 68, 0.22);
+    --lc-p-dot: #99342e;
+}
+
+.lorecodex-progress-text {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.lorecodex-progress-time {
+    flex-shrink: 0;
+    color: var(--lc-p-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.lorecodex-progress-dot {
+    flex-shrink: 0;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--lc-p-dot);
+    animation: lorecodex-progress-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes lorecodex-progress-pulse {
+    0%, 100% { opacity: 0.35; transform: scale(0.85); }
+    50% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes lorecodex-progress-in {
+    from { opacity: 0; transform: translate(-50%, 4px); }
+    to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .lorecodex-progress,
+    .lorecodex-progress-dot { animation: none; }
+}

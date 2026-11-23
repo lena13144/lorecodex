@@ -80,6 +80,73 @@ let serverDefaultCorpus = '';
 let lastHealthInfo = null;
 let lastInjectionSnapshot = null;
 
+// ---- 聊天输入框上方的检索进度条：检索期间显示，结束即消失 ----
+const TOOL_LABELS = {
+    list_series: '查看分卷',
+    list_story_arcs: '查看目录',
+    get_arc_scenes: '展开篇章',
+    read_scene: '精读原文',
+    grep_scenes: '全文搜索',
+    fallback_search: '补充检索',
+};
+const retrievalProgress = { el: null, timer: null, t0: 0, detail: '' };
+
+function progressHost() {
+    if (typeof document === 'undefined' || !document.getElementById) return null;
+    return document.getElementById('form_sheld');
+}
+
+function renderRetrievalProgress() {
+    const p = retrievalProgress;
+    if (!p.el) return;
+    const sec = Math.floor((Date.now() - p.t0) / 1000);
+    p.el.querySelector('.lorecodex-progress-text').textContent = `LoreCodex 翻书中${p.detail ? ' · ' + p.detail : ''}`;
+    p.el.querySelector('.lorecodex-progress-time').textContent = `${sec}s`;
+}
+
+function startRetrievalProgress(cfg) {
+    const host = progressHost();
+    if (!host) return;
+    stopRetrievalProgress();
+    const el = document.createElement('div');
+    el.className = 'lorecodex-progress';
+    el.setAttribute('data-lc-theme', cfg?.uiTheme === 'paper' ? 'paper' : 'lamp');
+    el.setAttribute('role', 'status');
+    el.innerHTML = '<span class="lorecodex-progress-dot"></span><span class="lorecodex-progress-text"></span><span class="lorecodex-progress-time"></span>';
+    // 挂在输入区内部、绝对定位浮在其上方：不占布局，聊天区不会因此跳动。
+    host.classList?.add('lorecodex-progress-host');
+    host.appendChild(el);
+    Object.assign(retrievalProgress, { el, t0: Date.now(), detail: '' });
+    renderRetrievalProgress();
+    retrievalProgress.timer = setInterval(renderRetrievalProgress, 1000);
+}
+
+function updateRetrievalProgress(d) {
+    if (!retrievalProgress.el || !d) return;
+    const parts = [];
+    if (d.turn) parts.push(`第 ${d.turn} 轮`);
+    const tools = Array.isArray(d.toolNames) ? d.toolNames : [];
+    if (tools.length) parts.push([...new Set(tools.map((n) => TOOL_LABELS[n] || n))].join('、'));
+    else if (d.kind === 'content') parts.push('整理结果');
+    else if (d.kind === 'reasoning') parts.push('思考');
+    const next = parts.join(' · ');
+    if (next !== retrievalProgress.detail) {
+        retrievalProgress.detail = next;
+        renderRetrievalProgress();
+    }
+}
+
+function stopRetrievalProgress() {
+    const p = retrievalProgress;
+    if (p.timer) clearInterval(p.timer);
+    if (p.el && p.el.parentNode) {
+        p.el.parentNode.classList?.remove('lorecodex-progress-host');
+        p.el.parentNode.removeChild(p.el);
+    }
+    p.el = null;
+    p.timer = null;
+}
+
 function escHtml(s) {
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({
         '&': '&amp;',
@@ -539,14 +606,14 @@ function renderLastPreview(cfg) {
     );
 }
 
-async function executeTreeSearchRequest(cfg, payload) {
+async function executeTreeSearchRequest(cfg, payload, { onProgress = null } = {}) {
     const cid = payload.corpus || cfg.corpus || serverDefaultCorpus || '';
     if (isUsingLocalEngine(cfg) || (cid && localPacksMap.has(cid) && !corporaCache.some(c => c.id === cid))) {
         const localAgent = getLocalAgent(cid);
         if (!localAgent) {
             throw new Error(`内置免服务端引擎中尚未导入书库 "${cid || '空'}"，请在下方「免服务端内置书库管理」导入小说或世界书`);
         }
-        const out = await localAgent.search(payload, buildApiConfig(cfg));
+        const out = await localAgent.search(payload, buildApiConfig(cfg), { onProgress });
         const run = await idbRecordRun(payload, out).catch(() => null);
         return run ? { ...out, run_id: run.id } : out;
     }
@@ -587,7 +654,7 @@ async function runTreeRetrieval(cfg, ctx, chat, { query, onDemand, sessionRecall
             maxOrder: maxOrder || undefined,
             pov: cfg.pov || '',
             apiConfig: buildApiConfig(cfg),
-        });
+        }, { onProgress: updateRetrievalProgress });
     } catch (err) {
         const errMsg = err?.message || String(err);
         console.warn('[LoreCodex] tree-search failed:', errMsg);
@@ -730,6 +797,7 @@ async function runLoreRetrieval(chat) {
         const msgs = Array.isArray(ctx?.chat) && ctx.chat.length ? ctx.chat : (Array.isArray(chat) ? chat : []);
         const { query, onDemand, sessionRecall } = buildRetrievalInput(msgs);
         if (!query) { clear(); return; }
+        startRetrievalProgress(cfg);
         await runTreeRetrieval(cfg, ctx, msgs, { query, onDemand, sessionRecall, clear });
     } catch (err) {
         console.warn('[LoreCodex] retrieval failed:', err);
@@ -749,6 +817,7 @@ async function runLoreRetrieval(chat) {
         };
         renderLastPreview(cfg);
     } finally {
+        stopRetrievalProgress();
         loreRagRunning = false;
     }
 }
