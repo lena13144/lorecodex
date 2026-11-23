@@ -252,10 +252,21 @@ function renderCoverSheet(sheet) {
     state.index.corpus?.description ||
     '左侧浏览目录与全文检索，中央阅读原著与检索选段，右侧可测试 Agent 翻书过程。';
 
+  const firstArc = (state.index.arcs || [])[0];
+  const totalScenes = st.scenes || 0;
+  const llmScenes = st.llm_scenes || 0;
+  const pendingLlm = Math.max(0, totalScenes - llmScenes);
+  const llmBtnLabel =
+    totalScenes === 0
+      ? 'LLM 建立目录'
+      : pendingLlm > 0
+      ? `LLM 建立目录 (${llmScenes}/${totalScenes} 幕)`
+      : `LLM 目录已就绪 (${llmScenes}/${totalScenes} 幕)`;
+
   sheet.innerHTML = `
     <div class="running-head">
       <span>${esc(corpusName())} · 典籍档案总目</span>
-      <span>LoreCodex v${esc(state.index.version || 2)} · 模型 ${esc(state.modelName)}</span>
+      <span>LoreCodex v2.2 · 模型 ${esc(state.modelName)}</span>
     </div>
     <div class="cover-hero">
       <h1 class="book-h1" style="font-size:28px;">${esc(corpusName())}</h1>
@@ -264,16 +275,15 @@ function renderCoverSheet(sheet) {
 
       <div class="kpi-grid">
         <div class="kpi-card"><div class="kpi-val">${st.arcs || 0}</div><div class="kpi-lbl">收录篇章卷宗</div></div>
-        <div class="kpi-card"><div class="kpi-val">${st.scenes || 0}</div><div class="kpi-lbl">无截断原场景幕</div></div>
+        <div class="kpi-card"><div class="kpi-val">${totalScenes}</div><div class="kpi-lbl">无截断原场景幕</div></div>
         <div class="kpi-card"><div class="kpi-val">${fmtChars(st.total_chars || 0)}</div><div class="kpi-lbl">典籍总字数</div></div>
-        <div class="kpi-card"><div class="kpi-val">${state.maxOrder > 0 ? `<= ${state.maxOrder}` : st.max_order ? `全 ${st.max_order} 序` : '无序限制'}</div><div class="kpi-lbl">${state.maxOrder > 0 ? '防剧透门控开启' : '进度序上限'}</div></div>
+        <div class="kpi-card"><div class="kpi-val">${llmScenes}/${totalScenes}</div><div class="kpi-lbl">LLM 智能目录覆盖</div></div>
       </div>
 
       <div class="quick-actions">
-        <button id="covImportBtn" class="btn-seal">导入典籍包 / 小说</button>
-        <button id="covSettingsBtn">配置模型 API</button>
-        <button id="covCmdBtn">快速搜索 (Ctrl+K)</button>
-        <button id="covCorpusBtn" class="btn-ghost" title="编辑当前书库别名、词汇表与规则">书库别名与规则</button>
+        ${firstArc ? `<button id="covReadBtn" class="btn-seal">开始阅读</button>` : ''}
+        <button id="covUpgradeBtn" class="${pendingLlm > 0 && !firstArc ? 'btn-seal' : ''}">${esc(llmBtnLabel)}</button>
+        <button id="covManageBtn" class="btn-ghost" title="管理全部书库、导出或删除">管理 / 删除书库</button>
       </div>
 
       <div class="vol-grid">${cards}</div>
@@ -288,10 +298,11 @@ function renderCoverSheet(sheet) {
       openArc(el.dataset.first);
     });
   });
-  $('#covImportBtn')?.addEventListener('click', () => actions.openImportModal?.());
-  $('#covCorpusBtn')?.addEventListener('click', () => actions.openCorpusModal?.());
-  $('#covSettingsBtn')?.addEventListener('click', () => actions.openSettingsModal?.());
-  $('#covCmdBtn')?.addEventListener('click', () => actions.openCommandPalette?.());
+  $('#covReadBtn')?.addEventListener('click', () => {
+    if (firstArc) openArc(firstArc.arc_id);
+  });
+  $('#covUpgradeBtn')?.addEventListener('click', () => actions.openCorpusModal?.('upgrade'));
+  $('#covManageBtn')?.addEventListener('click', () => actions.openLibraryModal?.());
 }
 
 function renderArcOverviewSheet(sheet, arc) {

@@ -802,3 +802,18 @@ export async function exportCorpusLorepack(id) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
+
+export async function deleteCorpus(id) {
+  const cid = String(id || '').trim();
+  if (!cid) throw new Error('书库 ID 不能为空');
+  if (!forceLocalMode) {
+    return reqJson(`/corpora/${encodeURIComponent(cid)}`, { method: 'DELETE' });
+  }
+  const be = await getBrowserEngine();
+  await be.idbDeleteCorpus(cid);
+  for (const key of Array.from(localAgentsCache.keys())) {
+    if (key.startsWith(`${cid}:`)) localAgentsCache.delete(key);
+  }
+  const listRes = await fetchCorpora();
+  return { ok: true, deleted: cid, ...listRes };
+}

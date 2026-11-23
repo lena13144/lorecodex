@@ -15,22 +15,34 @@ export const fmtChars = (n) => {
   return num >= 10000 ? `${(num / 10000).toFixed(1)} 万字` : `${num.toLocaleString()} 字`;
 };
 
-const PREFS_KEY = 'lorecodex_prefs_v2';
+const PREFS_KEY = 'lorecodex_prefs_v22';
+const embedParams = (() => {
+  try {
+    const p = new URLSearchParams(window.location.search);
+    return { isEmbed: p.get('embed') === '1', reqTheme: p.get('theme') || '' };
+  } catch (_) {
+    return { isEmbed: false, reqTheme: '' };
+  }
+})();
 const defaultPrefs = {
-  theme: 'paper',
+  theme: embedParams.isEmbed ? (embedParams.reqTheme === 'paper' ? 'paper' : 'lamp') : 'paper',
   fontSize: '16.5',
   fontFamily: 'serif',
   sheetWidth: '780',
   tocWidth: 328,
   traceWidth: 430,
   tocCollapsed: false,
-  traceCollapsed: false,
+  traceCollapsed: true,
 };
 
 export const prefs = (() => {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
-    return raw ? { ...defaultPrefs, ...JSON.parse(raw) } : { ...defaultPrefs };
+    const merged = raw ? { ...defaultPrefs, ...JSON.parse(raw) } : { ...defaultPrefs };
+    if (embedParams.isEmbed && (embedParams.reqTheme === 'paper' || embedParams.reqTheme === 'lamp')) {
+      merged.theme = embedParams.reqTheme;
+    }
+    return merged;
   } catch (_) {
     return { ...defaultPrefs };
   }

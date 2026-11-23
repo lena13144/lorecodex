@@ -15,6 +15,7 @@
         <span>LoreCodex</span>
       </span>
       <select id="corpusSelect" class="corpus-sel" title="切换语料书库"></select>
+      <button id="libraryBtn" class="btn-sm" title="管理全部书库：查看目录进度、导出或删除">书库管理</button>
       <span id="statMeta" class="brand-meta">正在载入书库总目...</span>
     </div>
 
@@ -23,14 +24,14 @@
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
         导入
       </button>
+      <button id="llmBuildQuickBtn" class="btn-sm desktop-only" style="display:none;" title="为当前书库执行或补全 LLM 智能目录">
+        LLM 建目录
+      </button>
       <button id="settingsBtn" class="btn-sm desktop-only" title="旁路模型与 API 配置">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.78 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
         模型
       </button>
-      <button id="cmdPaletteBtn" class="btn-sm" title="全局快速搜索与跳转 (Ctrl+K)">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-        <span class="desktop-only">搜索</span> <span class="kbd desktop-only">Ctrl+K</span>
-      </button>
+      <button id="stSettingsBtn" class="btn-sm" style="display:none;" title="酒馆防剧透、视角与高级检索设置">酒馆设置</button>
 
       <div class="prefs-wrap">
         <button id="prefsToggleBtn" class="btn-sm" title="主题与阅读排版设置">Aa</button>
@@ -69,15 +70,15 @@
         </div>
       </div>
 
-      <button id="toggleTocBtn" class="active-toggle btn-sm desktop-only">目录</button>
-      <button id="toggleTraceBtn" class="active-toggle btn-sm desktop-only">检索台</button>
-
       <div class="mobile-menu-wrap">
-        <button id="mobileMoreBtn" class="btn-sm" title="更多功能与管理">⋯</button>
+        <button id="mobileMoreBtn" class="btn-sm" title="更多功能与调试选项">⋯</button>
         <div id="mobileMenuPopover" class="mobile-menu-popover">
           <button type="button" data-mobile-action="import" class="mobile-only-inline">导入典籍（小说/世界书/.lorepack）</button>
           <button type="button" data-mobile-action="settings" class="mobile-only-inline">模型与 API 配置</button>
-          <button type="button" id="corpusCfgBtn">编辑当前语料配置</button>
+          <button type="button" id="cmdPaletteBtn">快速搜索 (Ctrl+K)</button>
+          <button type="button" id="corpusCfgBtn">当前书库设置与别名</button>
+          <button type="button" id="toggleTocBtn">显示 / 隐藏目录栏</button>
+          <button type="button" id="toggleTraceBtn">检索调试台（开发者）</button>
           <button type="button" id="reloadCorporaBtn">重新扫描书库目录</button>
         </div>
       </div>
@@ -113,7 +114,7 @@
             </div>
             <div id="catBar" class="filter-strip"></div>
             <div id="toneBar" class="filter-strip"></div>
-            <div class="legend-inline">
+            <div id="tocTraceLegend" class="legend-inline" style="display:none;">
               <span class="sw"><i style="background:var(--seal)"></i>入选</span>
               <span class="sw"><i style="background:var(--read-ink)"></i>已阅</span>
               <span class="sw"><i style="background:var(--ochre)"></i>翻幕</span>

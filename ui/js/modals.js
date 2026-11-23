@@ -1,10 +1,12 @@
-import { $, esc, prefs, savePrefs, applyPrefs, showToast, state, actions } from './state.js';
+import { $, esc, fmtChars, prefs, savePrefs, applyPrefs, showToast, state, actions } from './state.js';
 import {
   fetchConfig,
   saveConfig,
   fetchModels,
   fetchCorpusDetail,
   saveCorpusConfig,
+  deleteCorpus,
+  reloadCorpora,
   importCorpus,
   upgradeCorpus,
   cancelJob,
@@ -519,7 +521,144 @@ export async function openSettingsModal() {
   }
 }
 
-export async function openCorpusModal() {
+async function confirmAndDeleteCorpus(corpus, { onDeleted } = {}) {
+  const cid = String(corpus?.id || '').trim();
+  const cname = String(corpus?.name || cid).trim();
+  if (!cid) return false;
+  const ok = window.confirm(
+    `确定要永久删除书库「${cname}」(${cid}) 吗？\n\n此操作会移除该书库的索引、原文切片与配置，且无法撤销。`
+  );
+  if (!ok) return false;
+  try {
+    const res = await deleteCorpus(cid);
+    state.corpora = res.corpora || [];
+    showToast(`已删除书库「${cname}」`, 'ok');
+    if (state.corpusId === cid) {
+      const nextId = res.defaultCorpus || state.corpora[0]?.id || '';
+      if (nextId && state.corpora.some((x) => x.id === nextId)) {
+        await actions.switchCorpus?.(nextId);
+      } else {
+        actions.renderEmptyLibraryState?.();
+      }
+    }
+    if (typeof onDeleted === 'function') await onDeleted(res);
+    return true;
+  } catch (e) {
+    showToast(`删除失败: ${e.message}`, 'err');
+    return false;
+  }
+}
+
+export async function openLibraryModal() {
+  openDialog(`
+    <div class="modal-head">
+      <span class="modal-title">书库管理</span>
+      <button class="btn-ghost" data-close-modal>✕</button>
+    </div>
+    <div class="modal-body" id="libModalBody"><div style="color:var(--ink-muted);">正在载入书库列表...</div></div>
+  `, 'wide');
+
+  const renderList = async (forceReload = false) => {
+    try {
+      const listRes = forceReload ? await reloadCorpora() : await fetchCorpora();
+      state.corpora = listRes.corpora || [];
+      const rows = state.corpora;
+
+      const cardsHtml = rows.length
+        ? rows
+            .map((c) => {
+              const st = c.stats || {};
+              const arcs = st.arcs || 0;
+              const scenes = st.scenes || 0;
+              const llmScenes = st.llm_scenes || 0;
+              const isCur = c.id === state.corpusId;
+              const llmBadge =
+                scenes === 0
+                  ? '<span class="lib-badge">空书库</span>'
+                  : llmScenes >= scenes
+                  ? `<span class="lib-badge ok">LLM 目录已就绪 (${llmScenes}/${scenes})</span>`
+                  : `<span class="lib-badge warn">待建 LLM 目录 (${llmScenes}/${scenes} 幕)</span>`;
+              return `
+                <div class="lib-card ${isCur ? 'current' : ''}" data-lib-id="${esc(c.id)}">
+                  <div class="lib-card-main">
+                    <div class="lib-card-title">
+                      <b>${esc(c.name || c.id)}</b>
+                      <span class="lib-card-id">${esc(c.id)}</span>
+                      ${isCur ? '<span class="lib-badge cur">当前打开</span>' : ''}
+                    </div>
+                    <div class="lib-card-meta">
+                      <span>${arcs} 卷 · ${scenes} 幕 · ${fmtChars(st.total_chars || 0)}</span>
+                      ${llmBadge}
+                    </div>
+                  </div>
+                  <div class="lib-card-actions">
+                    <button type="button" class="btn-sm" data-lib-open="${esc(c.id)}" ${isCur ? 'disabled' : ''}>${isCur ? '当前' : '打开'}</button>
+                    <button type="button" class="btn-sm ${llmScenes < scenes ? 'btn-seal' : ''}" data-lib-upgrade="${esc(c.id)}">LLM 建目录</button>
+                    <button type="button" class="btn-sm" data-lib-export="${esc(c.id)}">导出</button>
+                    <button type="button" class="btn-sm btn-danger" data-lib-delete="${esc(c.id)}">删除</button>
+                  </div>
+                </div>`;
+            })
+            .join('')
+        : '<div style="text-align:center;padding:28px 12px;color:var(--ink-muted);font-size:13px;">当前没有任何书库，点击下方「导入新书」开始。</div>';
+
+      $('#modalDialog').innerHTML = `
+        <div class="modal-head">
+          <span class="modal-title">书库管理（共 ${rows.length} 本）</span>
+          <button class="btn-ghost" data-close-modal>✕</button>
+        </div>
+        <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;">
+          <div class="lib-list">${cardsHtml}</div>
+        </div>
+        <div class="modal-foot">
+          <button id="libImportBtn" type="button" class="btn-seal" style="margin-right:auto;">+ 导入新书</button>
+          <button id="libReloadBtn" type="button" class="btn-sm">重新扫描</button>
+          <button data-close-modal>关闭</button>
+        </div>
+      `;
+
+      $('#modalDialog').querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', closeModal));
+      $('#libImportBtn')?.addEventListener('click', () => openImportModal());
+      $('#libReloadBtn')?.addEventListener('click', () => renderList(true));
+
+      $('#modalDialog').querySelectorAll('[data-lib-open]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          await actions.switchCorpus?.(btn.dataset.libOpen);
+          closeModal();
+        });
+      });
+      $('#modalDialog').querySelectorAll('[data-lib-upgrade]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const cid = btn.dataset.libUpgrade;
+          if (state.corpusId !== cid) {
+            await actions.switchCorpus?.(cid);
+          }
+          openCorpusModal('upgrade');
+        });
+      });
+      $('#modalDialog').querySelectorAll('[data-lib-export]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          exportCorpusLorepack(btn.dataset.libExport).catch((e) => showToast('导出失败: ' + e.message, 'err'));
+        });
+      });
+      $('#modalDialog').querySelectorAll('[data-lib-delete]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const target = rows.find((x) => x.id === btn.dataset.libDelete);
+          if (!target) return;
+          const deleted = await confirmAndDeleteCorpus(target);
+          if (deleted) await renderList(false);
+        });
+      });
+    } catch (e) {
+      const body = $('#libModalBody');
+      if (body) body.textContent = '加载书库列表失败: ' + e.message;
+    }
+  };
+
+  await renderList(false);
+}
+
+export async function openCorpusModal(initialTab = 'basic') {
   if (!state.corpusId) return showToast('请先选择一个书库', 'err');
   openDialog(`
     <div class="modal-head">
@@ -561,14 +700,8 @@ export async function openCorpusModal() {
       </div>
       <div class="modal-body">
         <div id="ctab-basic" class="ctab-pane" style="display:flex;flex-direction:column;gap:10px;">
-          <div class="fld-row-2">
-            <div class="fld-group"><label class="fld">显示名称</label><input id="ccName" type="text" value="${esc(c.name)}" /></div>
-            <div class="fld-group"><label class="fld">3层自动折叠阈值 (卷)</label><input id="ccThreshold" type="number" min="20" value="${c.hierarchy?.auto_series_threshold || 250}" /></div>
-          </div>
+          <div class="fld-group"><label class="fld">显示名称</label><input id="ccName" type="text" value="${esc(c.name)}" /></div>
           <div class="fld-group"><label class="fld">书库简介</label><textarea id="ccDesc" rows="2">${esc(c.description || '')}</textarea></div>
-          <div class="fld-group"><label class="fld">世界观前提 (world_premise)</label><textarea id="ccPremise" rows="3">${esc(c.world_premise || '')}</textarea></div>
-          <div class="fld-group"><label class="fld">主动触发召回条件</label><textarea id="ccTriggers" rows="2">${esc(c.active_recall_triggers || '')}</textarea></div>
-          <div class="fld-group"><label class="fld">日常跳过判据</label><textarea id="ccSkip" rows="2">${esc(c.skip_criteria || '')}</textarea></div>
           <div class="fld-row-2">
             <div class="fld-group"><label class="fld">防剧透进度标签</label><input id="ccOrderLabel" type="text" value="${esc(c.spoiler_gate?.order_label || '章节进度')}" /></div>
             <div class="fld-group" style="justify-content:flex-end;">
@@ -578,6 +711,15 @@ export async function openCorpusModal() {
               </label>
             </div>
           </div>
+          <details class="adv-details">
+            <summary>高级检索与世界观调优（开发者）</summary>
+            <div class="adv-details-body">
+              <div class="fld-group"><label class="fld">3层自动折叠阈值 (卷)</label><input id="ccThreshold" type="number" min="20" value="${c.hierarchy?.auto_series_threshold || 250}" /></div>
+              <div class="fld-group"><label class="fld">世界观前提 (world_premise)</label><textarea id="ccPremise" rows="3">${esc(c.world_premise || '')}</textarea></div>
+              <div class="fld-group"><label class="fld">主动触发召回条件</label><textarea id="ccTriggers" rows="2">${esc(c.active_recall_triggers || '')}</textarea></div>
+              <div class="fld-group"><label class="fld">日常跳过判据</label><textarea id="ccSkip" rows="2">${esc(c.skip_criteria || '')}</textarea></div>
+            </div>
+          </details>
         </div>
 
         <div id="ctab-aliases" class="ctab-pane" style="display:none;flex-direction:column;gap:10px;">
@@ -652,26 +794,37 @@ export async function openCorpusModal() {
         </div>
       </div>
       <div class="modal-foot">
-        <button id="ccExportPackBtn" type="button" class="btn-sm" style="margin-right:auto;" title="导出为单个 .lorepack.json 文件，可直接导入 TauriTavern / 手机内置免服务端引擎">导出 .lorepack.json</button>
+        <div style="display:flex;gap:6px;margin-right:auto;">
+          <button id="ccDeleteBtn" type="button" class="btn-sm btn-danger" title="永久删除当前书库">删除此书库</button>
+          <button id="ccExportPackBtn" type="button" class="btn-sm" title="导出为单个 .lorepack.json 文件，可直接导入 TauriTavern / 手机内置免服务端引擎">导出 .lorepack</button>
+        </div>
         <button data-close-modal>取消</button>
         <button id="ccSaveBtn" class="btn-seal">保存并热重载语料</button>
       </div>
     `;
 
     $('#modalDialog').querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', closeModal));
+    $('#ccDeleteBtn')?.addEventListener('click', async () => {
+      const deleted = await confirmAndDeleteCorpus(c);
+      if (deleted) closeModal();
+    });
     $('#ccExportPackBtn')?.addEventListener('click', () => {
       exportCorpusLorepack(c.id).catch((e) => showToast('导出失败: ' + e.message, 'err'));
     });
+    const activateCorpusTab = (targetTab) => {
+      $('#modalDialog').querySelectorAll('[data-ctab]').forEach((t) => t.classList.toggle('active', t.dataset.ctab === targetTab));
+      $('#modalDialog').querySelectorAll('.ctab-pane').forEach((p) => (p.style.display = 'none'));
+      const pane = $(`#ctab-${targetTab}`);
+      if (pane) pane.style.display = 'flex';
+    };
     $('#modalDialog')
       .querySelectorAll('[data-ctab]')
       .forEach((tab) => {
-        tab.addEventListener('click', () => {
-          $('#modalDialog').querySelectorAll('[data-ctab]').forEach((t) => t.classList.remove('active'));
-          tab.classList.add('active');
-          $('#modalDialog').querySelectorAll('.ctab-pane').forEach((p) => (p.style.display = 'none'));
-          $(`#ctab-${tab.dataset.ctab}`).style.display = 'flex';
-        });
+        tab.addEventListener('click', () => activateCorpusTab(tab.dataset.ctab));
       });
+    if (initialTab && initialTab !== 'basic') {
+      activateCorpusTab(initialTab);
+    }
 
     const updateUpgEstimate = () => {
       const estEl = $('#ccUpgEstimate');
@@ -1305,4 +1458,151 @@ export function openCommandPalette() {
       item.run();
     }
   });
+}
+
+function requestStParent(type, extra = {}, expectedReplyType = '', timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    if (window.parent === window) {
+      reject(new Error('当前未在酒馆内嵌模式下运行'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      window.removeEventListener('message', onMsg);
+      reject(new Error('与酒馆扩展通信超时'));
+    }, timeoutMs);
+    const onMsg = (ev) => {
+      if (ev.source !== window.parent) return;
+      const d = ev.data;
+      if (!d || typeof d !== 'object') return;
+      if (expectedReplyType && d.type !== expectedReplyType) return;
+      clearTimeout(timer);
+      window.removeEventListener('message', onMsg);
+      resolve(d);
+    };
+    window.addEventListener('message', onMsg);
+    window.parent.postMessage({ type, ...extra }, '*');
+  });
+}
+
+export async function openStSettingsModal() {
+  openDialog(`
+    <div class="modal-head">
+      <span class="modal-title">酒馆联动设置</span>
+      <button class="btn-ghost" data-close-modal>✕</button>
+    </div>
+    <div class="modal-body"><div style="color:var(--ink-muted);">正在读取酒馆扩展配置...</div></div>
+  `);
+
+  try {
+    const reply = await requestStParent('lorecodex:st-get-settings', {}, 'lorecodex:st-settings');
+    const st = reply.settings || {};
+    const maxAvail = state.index?.stats?.max_order || state.corpusMeta?.stats?.max_order || 0;
+
+    $('#modalDialog').innerHTML = `
+      <div class="modal-head">
+        <span class="modal-title">酒馆联动设置</span>
+        <button class="btn-ghost" data-close-modal>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="fld-group">
+          <label class="fld">防剧透章节序上限（0 = 全库开放${maxAvail ? `，当前书库共 ${maxAvail} 序` : ''}）</label>
+          <input id="stMaxOrder" type="number" min="0" value="${Number(st.maxOrder) || 0}" />
+        </div>
+        <div class="fld-group">
+          <label class="fld">检索视角角色 POV（可选，留空为全景视角）</label>
+          <input id="stPov" type="text" value="${esc(st.pov || '')}" placeholder="例如：主角名，缺席场景自动标注转述" />
+        </div>
+
+        <details class="adv-details">
+          <summary>高级 / 开发者选项（检索深度、外部服务端与注入正则）</summary>
+          <div class="adv-details-body">
+            <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;">
+              <div class="fld-group">
+                <label class="fld">对话轮数</label>
+                <input id="stRecentTurns" type="number" min="1" max="15" value="${Number(st.recentTurns) || 5}" />
+              </div>
+              <div class="fld-group">
+                <label class="fld">最大幕数 (0=自决)</label>
+                <input id="stMaxScenes" type="number" min="0" max="12" value="${Number(st.maxScenes) || 0}" />
+              </div>
+              <div class="fld-group">
+                <label class="fld">注入深度</label>
+                <input id="stDepth" type="number" min="0" max="10" value="${Number(st.depth) ?? 1}" />
+              </div>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;">
+              <input id="stLocalMode" type="checkbox" ${st.localMode !== false ? 'checked' : ''} style="width:auto;" />
+              <span><b>使用纯前端免后台引擎</b>（取消勾选则连接下方外部 Node 服务端）</span>
+            </label>
+            <div class="fld-group">
+              <label class="fld">外部 Node 服务端地址</label>
+              <input id="stRagServer" type="text" value="${esc(st.ragServer || 'http://127.0.0.1:5240')}" />
+            </div>
+            <div class="fld-group">
+              <label class="fld">自定义 XML 标签名（留空随语料）</label>
+              <input id="stXmlTag" type="text" value="${esc(st.customXmlTag || '')}" placeholder="默认随当前语料 corpus.json" />
+            </div>
+            <div class="fld-group">
+              <label class="fld">注入导语 Header</label>
+              <textarea id="stHeader" rows="2" placeholder="留空使用当前语料默认">${esc(st.customHeader || '')}</textarea>
+            </div>
+            <div class="fld-group">
+              <label class="fld">事实优先级规则</label>
+              <textarea id="stPriorityRule" rows="2" placeholder="留空使用当前语料默认">${esc(st.customPriorityRule || '')}</textarea>
+            </div>
+            <div class="fld-group">
+              <label class="fld">追查指令尾注</label>
+              <input id="stFollowupHint" type="text" value="${esc(st.customFollowUpHint || '')}" placeholder="留空使用当前语料默认" />
+            </div>
+            <div class="fld-group">
+              <label class="fld">跳过样板条目正则（每行一条）</label>
+              <textarea id="stBoilerRe" rows="2" placeholder="留空使用默认">${esc(st.customBoilerplateRegex || '')}</textarea>
+            </div>
+            <div class="fld-group">
+              <label class="fld">优先保留摘要正则（每行一条）</label>
+              <textarea id="stSummaryRe" rows="2" placeholder="留空使用默认">${esc(st.customSummaryPriorityRegex || '')}</textarea>
+            </div>
+          </div>
+        </details>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-sm" data-close-modal>取消</button>
+        <button id="saveStSettingsBtn" class="btn-seal">保存并同步到酒馆</button>
+      </div>`;
+
+    $('#modalDialog').querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', closeModal));
+    $('#saveStSettingsBtn').addEventListener('click', async () => {
+      const btn = $('#saveStSettingsBtn');
+      btn.disabled = true;
+      try {
+        const patch = {
+          maxOrder: Math.max(0, Math.floor(Number($('#stMaxOrder').value) || 0)),
+          pov: $('#stPov').value.trim(),
+          recentTurns: Math.max(1, Math.floor(Number($('#stRecentTurns').value) || 5)),
+          maxScenes: Math.max(0, Math.floor(Number($('#stMaxScenes').value) || 0)),
+          depth: Math.max(0, Math.floor(Number($('#stDepth').value) || 0)),
+          localMode: $('#stLocalMode').checked,
+          ragServer: $('#stRagServer').value.trim() || 'http://127.0.0.1:5240',
+          customXmlTag: $('#stXmlTag').value.trim(),
+          customHeader: $('#stHeader').value,
+          customPriorityRule: $('#stPriorityRule').value,
+          customFollowUpHint: $('#stFollowupHint').value,
+          customBoilerplateRegex: $('#stBoilerRe').value,
+          customSummaryPriorityRegex: $('#stSummaryRe').value,
+        };
+        await requestStParent('lorecodex:st-save-settings', { patch }, 'lorecodex:st-settings-saved');
+        showToast('已同步保存到酒馆扩展', 'ok');
+        closeModal();
+      } catch (e) {
+        showToast('同步失败: ' + e.message, 'err');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  } catch (e) {
+    $('#modalDialog').innerHTML = `
+      <div class="modal-head"><span class="modal-title">酒馆联动设置</span><button class="btn-ghost" data-close-modal>✕</button></div>
+      <div class="modal-body" style="color:var(--seal);">${esc(e.message)}</div>`;
+    $('#modalDialog').querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', closeModal));
+  }
 }

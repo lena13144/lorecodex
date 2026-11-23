@@ -116,6 +116,10 @@ function renderArcCard(a, { listed, expanded, read, selected, selectedArcs, read
 
 export function renderToc() {
   if (!state.index) return;
+  const traceLegend = $('#tocTraceLegend');
+  if (traceLegend) {
+    traceLegend.style.display = state.activeRunData ? 'flex' : 'none';
+  }
   if (state.searchMode === 'grep') {
     renderGrepToc();
     return;

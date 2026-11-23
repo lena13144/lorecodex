@@ -70,6 +70,7 @@ const defaultSettings = {
     customBoilerplateRegex: '',
     customSummaryPriorityRegex: '',
     charBindings: {},
+    uiTheme: 'lamp',
 };
 
 let corporaCache = [];
@@ -289,16 +290,20 @@ function getLanFallbackBase(rawBase) {
 
 let onWorkbenchClosedHook = null;
 
-function buildWorkbenchUrls(cfg, { runId = '', corpusId = '' } = {}) {
+function buildWorkbenchUrls(cfg, { runId = '', corpusId = '', action = '' } = {}) {
     const cid = String(corpusId || cfg.corpus || serverDefaultCorpus || '').trim();
     const useLocalUi = Boolean(cfg.localMode) || !lastHealthInfo?.ok || (cid && localPacksMap.has(cid) && !corporaCache.some(c => c.id === cid));
     const qEmbed = new URLSearchParams();
     qEmbed.set('embed', '1');
     if (useLocalUi) qEmbed.set('local', '1');
     if (cid) qEmbed.set('corpus', cid);
+    if (action) qEmbed.set('action', action);
+    if (cfg.uiTheme === 'paper' || cfg.uiTheme === 'lamp') qEmbed.set('theme', cfg.uiTheme);
     const qStandalone = new URLSearchParams();
     if (useLocalUi) qStandalone.set('local', '1');
     if (cid) qStandalone.set('corpus', cid);
+    if (action) qStandalone.set('action', action);
+    if (cfg.uiTheme === 'paper' || cfg.uiTheme === 'lamp') qStandalone.set('theme', cfg.uiTheme);
     const hash = runId ? `#run=${encodeURIComponent(runId)}` : '';
     const qsStandalone = qStandalone.toString();
 
@@ -320,7 +325,7 @@ function buildWorkbenchUrls(cfg, { runId = '', corpusId = '' } = {}) {
     };
 }
 
-function openWorkbenchModal(cfg, { runId = '', corpusId = '' } = {}) {
+function openWorkbenchModal(cfg, { runId = '', corpusId = '', action = '' } = {}) {
     if (cfg.chatBase || cfg.chatKey || cfg.chatModel) {
         idbSetMeta('local_api_config', {
             defaultCorpus: cfg.corpus || '',
@@ -332,7 +337,7 @@ function openWorkbenchModal(cfg, { runId = '', corpusId = '' } = {}) {
             reasoningEffort: optionalReasoningOrNull(cfg.reasoningEffort),
         }).catch(() => {});
     }
-    const { embedUrl, standaloneUrl } = buildWorkbenchUrls(cfg, { runId, corpusId });
+    const { embedUrl, standaloneUrl } = buildWorkbenchUrls(cfg, { runId, corpusId, action });
     const cid = String(corpusId || cfg.corpus || serverDefaultCorpus || '').trim();
     const cName = corporaMap.get(cid)?.name || cid || 'LoreCodex';
 
@@ -343,11 +348,11 @@ function openWorkbenchModal(cfg, { runId = '', corpusId = '' } = {}) {
             <div class="lorecodex-wb-modal">
                 <div class="lorecodex-wb-head">
                     <div class="lorecodex-wb-title">
-                        <span>LoreCodex 典籍与追踪工作台</span>
+                        <span>LoreCodex 典籍工作台</span>
                         <span id="lorecodex_wb_corpus_pill" class="lorecodex-pill accent"></span>
                     </div>
                     <div class="lorecodex-wb-actions">
-                        <a id="lorecodex_wb_extlink" class="menu_button" target="_blank" rel="noopener" style="text-decoration:none;width:auto;padding:4px 10px;">新窗口打开</a>
+                        <a id="lorecodex_wb_extlink" class="menu_button" target="_blank" rel="noopener" style="text-decoration:none;width:auto;padding:4px 10px;">新窗口</a>
                         <button type="button" id="lorecodex_wb_close" class="menu_button" style="width:auto;padding:4px 10px;">关闭</button>
                     </div>
                 </div>
@@ -378,6 +383,7 @@ function openWorkbenchModal(cfg, { runId = '', corpusId = '' } = {}) {
     $('#lorecodex_wb_corpus_pill').text(cName);
     $('#lorecodex_wb_extlink').attr('href', standaloneUrl);
     $('#lorecodex_wb_iframe').attr('src', embedUrl);
+    backdrop.attr('data-lc-theme', cfg.uiTheme === 'paper' ? 'paper' : 'lamp');
     backdrop.addClass('open');
 }
 
@@ -518,42 +524,39 @@ function renderLastPreview(cfg) {
     const box = $('#lorecodex_last_preview');
     if (!box.length) return;
     if (!lastInjectionSnapshot) {
-        box.html('<div class="lorecodex-muted">本会话尚未执行检索。生成对话或使用下方测试检索后，将在此显示实际注入预览。</div>');
+        box.html('<div class="lorecodex-last-empty">尚未触发检索 · 发送对话后将在此显示命中状态</div>');
         return;
     }
     const snap = lastInjectionSnapshot;
     const statusPill = snap.skip
         ? `<span class="lorecodex-pill skip">跳过注入</span>`
-        : `<span class="lorecodex-pill ok">注入 ${snap.scenes.length} 幕${snap.outlines?.length ? ` · ${snap.outlines.length}大纲` : ''}</span>`;
-    const orderPill = snap.max_order ? `<span class="lorecodex-pill accent">序 &lt;= ${snap.max_order}</span>` : '';
+        : `<span class="lorecodex-pill ok">命中 ${snap.scenes.length} 幕${snap.outlines?.length ? ` · ${snap.outlines.length}大纲` : ''}</span>`;
+    const orderPill = snap.max_order ? `<span class="lorecodex-pill accent">序≤${snap.max_order}</span>` : '';
     const scenesHtml = (snap.scenes || []).map(s => `
         <div class="lorecodex-scene-item">
             <span><code>${escHtml(s.node_id)}</code> ${escHtml(s.arc_title)} · ${escHtml(s.title)}</span>
             <span class="lorecodex-muted">${s.chars}字</span>
         </div>
     `).join('');
-    const { standaloneUrl } = buildWorkbenchUrls(cfg, {
-        runId: snap.run_id || '',
-        corpusId: snap.corpus_id || cfg.corpus,
-    });
 
     box.html(`
-        <div class="lorecodex-row" style="justify-content:space-between;">
-            <div class="lorecodex-row" style="gap:5px;">
-                ${statusPill}
-                <span class="lorecodex-pill">${escHtml(snap.corpus_name || snap.corpus_id || '-')}</span>
-                ${orderPill}
+        <details class="lorecodex-last-details">
+            <summary class="lorecodex-last-summary">
+                <span class="lorecodex-row" style="gap:5px;flex-wrap:nowrap;min-width:0;">
+                    <span class="lorecodex-muted" style="flex-shrink:0;">上次检索</span>
+                    ${statusPill}
+                    ${orderPill}
+                </span>
+                <span class="lorecodex-muted" style="flex-shrink:0;">${snap.took_ms ?? 0}ms · ${snap.turns ?? 0}轮</span>
+            </summary>
+            <div class="lorecodex-last-body">
+                ${snap.skip
+                    ? `<div class="lorecodex-muted">原因：${escHtml(snap.reason || '无命中')}</div>`
+                    : `${snap.guide ? `<div class="lorecodex-muted" style="line-height:1.45;white-space:pre-line;">${escHtml(snap.guide)}</div>` : ''}${scenesHtml ? `<div class="lorecodex-preview-scenes">${scenesHtml}</div>` : ''}`
+                }
+                <button type="button" id="lorecodex_preview_open_wb" class="menu_button" style="width:100%;padding:4px 8px;font-size:0.84em;">在大面板查看完整轨迹</button>
             </div>
-            <span class="lorecodex-muted">${snap.took_ms ?? 0}ms · ${snap.turns ?? 0}轮</span>
-        </div>
-        ${snap.skip ? `<div class="lorecodex-muted">原因：${escHtml(snap.reason || '无命中')}</div>` : `
-            ${snap.guide ? `<details style="font-size:0.84em;"><summary style="cursor:pointer;">记忆导读（${snap.prompt_chars || 0} 字符）</summary><div style="margin-top:5px;line-height:1.5;white-space:pre-line;">${escHtml(snap.guide)}</div></details>` : ''}
-            ${scenesHtml ? `<div class="lorecodex-preview-scenes">${scenesHtml}</div>` : ''}
-        `}
-        <div class="lorecodex-row">
-            <button type="button" id="lorecodex_preview_open_wb" class="menu_button" style="flex:1;">在酒馆内查看完整轨迹</button>
-            <a href="${escHtml(standaloneUrl)}" target="_blank" rel="noopener" class="menu_button" style="text-decoration:none;width:auto;padding:4px 9px;">新窗口</a>
-        </div>
+        </details>
     `);
     $('#lorecodex_preview_open_wb').on('click', () =>
         openWorkbenchModal(cfg, { runId: snap.run_id || '', corpusId: snap.corpus_id || cfg.corpus })
@@ -783,28 +786,46 @@ jQuery(async () => {
     const cfg = getSettings();
     const initialOk = await fetchCorporaAndHealth(cfg);
 
+    let localUpgAbortCtrl = null;
+    let llmBuildRunning = false;
+
+    const getStSettingsPayload = () => {
+        const charKey = getActiveCharKey();
+        return {
+            enabled: Boolean(cfg.enabled),
+            localMode: Boolean(cfg.localMode),
+            ragServer: cfg.ragServer || 'http://127.0.0.1:5240',
+            corpus: cfg.corpus || '',
+            maxOrder: normalizeMaxOrder(cfg.maxOrder),
+            maxScenes: normalizeMaxScenes(cfg.maxScenes),
+            recentTurns: Math.max(1, Number(cfg.recentTurns) || 5),
+            depth: Math.max(0, Number(cfg.depth) || 1),
+            pov: cfg.pov || '',
+            customXmlTag: cfg.customXmlTag || '',
+            customHeader: cfg.customHeader || '',
+            customPriorityRule: cfg.customPriorityRule || '',
+            customFollowUpHint: cfg.customFollowUpHint || '',
+            customBoilerplateRegex: cfg.customBoilerplateRegex || '',
+            customSummaryPriorityRegex: cfg.customSummaryPriorityRegex || '',
+            charKey,
+            charBinding: charKey ? (cfg.charBindings?.[charKey] || null) : null,
+        };
+    };
+
     const syncUiFromCfg = () => {
         $('#lorecodex_enabled').prop('checked', Boolean(cfg.enabled));
-        $('#lorecodex_local_mode').prop('checked', Boolean(cfg.localMode));
-        $('#lorecodex_server').val(cfg.ragServer || '');
         $('#lorecodex_corpus').val(cfg.corpus || '');
-        $('#lorecodex_max_order').val(cfg.maxOrder ?? 0);
-        $('#lorecodex_recent_turns').val(cfg.recentTurns ?? 5);
-        $('#lorecodex_max_scenes').val(cfg.maxScenes ?? 0);
-        $('#lorecodex_pov').val(cfg.pov || '');
-        $('#lorecodex_depth').val(cfg.depth ?? 1);
-        $('#lorecodex_chat_base').val(cfg.chatBase || '');
-        $('#lorecodex_chat_key').val(cfg.chatKey || '');
-        $('#lorecodex_chat_model').val(cfg.chatModel || '');
-        $('#lorecodex_max_tokens').val(Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : '');
-        $('#lorecodex_temperature').val(normalizeTemperature(cfg.temperature));
-        $('#lorecodex_reasoning_effort').val(normalizeReasoningEffort(cfg.reasoningEffort));
-        $('#lorecodex_xml_tag').val(cfg.customXmlTag || '');
-        $('#lorecodex_header').val(cfg.customHeader || '');
-        $('#lorecodex_priority_rule').val(cfg.customPriorityRule || '');
-        $('#lorecodex_followup_hint').val(cfg.customFollowUpHint || '');
-        $('#lorecodex_boiler_re').val(cfg.customBoilerplateRegex || '');
-        $('#lorecodex_summary_re').val(cfg.customSummaryPriorityRegex || '');
+        const needsApi = !String(cfg.chatBase || '').trim() || !String(cfg.chatModel || '').trim();
+        $('#lorecodex_api_banner').toggle(needsApi);
+        const badges = [];
+        if (Number(cfg.maxOrder) > 0) badges.push(`防剧透≤${cfg.maxOrder}`);
+        if (String(cfg.pov || '').trim()) badges.push(`视角:${String(cfg.pov).trim()}`);
+        const badgeWrap = $('#lorecodex_active_badges');
+        if (badges.length) {
+            badgeWrap.html(badges.map((b) => `<span class="lorecodex-pill accent">${escHtml(b)}</span>`).join('')).show();
+        } else {
+            badgeWrap.empty().hide();
+        }
     };
 
     const renderConnStatus = (ok) => {
@@ -812,174 +833,149 @@ jQuery(async () => {
         const txt = $('#lorecodex_conn_text');
         if (!dot.length) return;
         dot.removeClass('ok err wait');
-        const isTauri = typeof window !== 'undefined' && (Boolean(window.__TAURITAVERN__) || Boolean(window.__TAURI_INTERNALS__));
-        const tauriTag = isTauri ? ' · TauriTavern' : '';
+        const count = corporaMap.size;
         if (!cfg.localMode && ok && lastHealthInfo?.ok) {
             dot.addClass('ok');
-            txt.text(`已连接外部服务端${tauriTag} · ${corporaCache.length} 个服务端书库 · ${lastHealthInfo.boot_ms ?? '-'}ms`);
+            txt.text(`外部服务就绪 · ${count} 本书`);
         } else if (cfg.localMode || localPacksCache.length > 0) {
             dot.addClass('ok');
-            txt.text(`内置书阁引擎就绪 (IndexedDB 免后台)${tauriTag} · 已挂载 ${localPacksCache.length} 个典籍`);
+            txt.text(`就绪 · ${count} 本书`);
         } else {
             dot.addClass('err');
-            txt.text(`未连接到外部服务端 ${getServerBase(cfg)}（建议勾选纯前端免后台模式）`);
+            txt.text('外部服务未连接');
         }
     };
 
-    const renderLocalUpgradeEstimate = () => {
-        const el = $('#lorecodex_local_upg_estimate');
-        if (!el.length) return;
-        const pack = localPacksMap.get(cfg.corpus);
-        if (!pack) {
-            el.text('');
+    const renderStaticLlmWidget = () => {
+        if (llmBuildRunning) return;
+        const box = $('#lorecodex_llm_box');
+        if (!box.length) return;
+        const meta = corporaMap.get(cfg.corpus);
+        const titleEl = $('#lorecodex_llm_title');
+        const btn = $('#lorecodex_llm_btn');
+        const fill = $('#lorecodex_llm_fill');
+        const sub = $('#lorecodex_llm_sub');
+
+        if (!meta) {
+            titleEl.text('LLM 目录 · 未选择书库');
+            fill.removeClass('running done paused err').css('width', '0%');
+            btn.text('导入书库').prop('disabled', false).data('mode', 'import');
+            sub.text('').hide();
             return;
         }
-        const series = String($('#lorecodex_local_upg_series').val() || '').trim();
-        const workers = Math.min(Math.max(Number($('#lorecodex_local_upg_workers').val()) || 8, 1), 24);
-        const limitArcs = Math.max(0, Number($('#lorecodex_local_upg_limit').val()) || 0);
-        const plan = estimateBrowserLlmUpgradePlan(pack, { series, workers, limitArcs });
-        if (!plan.totalArcs) {
-            el.text('当前所选范围均已完成 LLM 目录构建（支持自动跳过已完成章节）');
-            return;
+        const st = meta.stats || {};
+        const totalScenes = Number(st.scenes || 0);
+        const doneScenes = Math.min(totalScenes, Number(st.llm_scenes || 0));
+        const pct = totalScenes > 0 ? Math.min(100, (doneScenes / totalScenes) * 100) : 0;
+
+        fill.removeClass('running done paused err');
+        if (totalScenes === 0) {
+            titleEl.text('LLM 目录 · 空书库');
+            fill.css('width', '0%');
+            btn.text('去管理').prop('disabled', false).data('mode', 'open');
+            sub.text('').hide();
+        } else if (doneScenes >= totalScenes) {
+            titleEl.text(`LLM 目录 · ✓ 已就绪 (${doneScenes}/${totalScenes} 幕)`);
+            fill.addClass('done').css('width', '100%');
+            btn.text('已就绪').prop('disabled', false).data('mode', 'upgrade');
+            sub.text('').hide();
+        } else {
+            titleEl.text(`LLM 目录 · ${doneScenes}/${totalScenes} 幕 (${pct.toFixed(0)}%)`);
+            fill.css('width', `${pct.toFixed(1)}%`);
+            btn.text(doneScenes > 0 ? '继续构建' : '建立目录').prop('disabled', false).data('mode', 'build');
+            sub.text('').hide();
         }
-        el.text(
-            `待构建 ${plan.totalArcs} 章 / ${plan.totalScenes} 幕 · 预计 ${plan.totalCalls} 次请求（并发 ${plan.effectiveWorkers}）· 启动前参考耗时约 ${formatDurationZh(plan.estMinMs)} ~ ${formatDurationZh(plan.estMaxMs)}`
-        );
     };
 
-    const renderLocalSeriesOptions = () => {
-        const sel = $('#lorecodex_local_upg_series').empty();
-        const pack = localPacksMap.get(cfg.corpus);
-        if (!pack) {
-            sel.append('<option value="">（请先选择或导入一个内置书库）</option>');
-            renderLocalUpgradeEstimate();
-            return;
+    const renderRunningLlmWidget = (prog, stateMode = 'running', customSub = '') => {
+        const titleEl = $('#lorecodex_llm_title');
+        const btn = $('#lorecodex_llm_btn');
+        const fill = $('#lorecodex_llm_fill');
+        const sub = $('#lorecodex_llm_sub');
+
+        const pct = stateMode === 'done'
+            ? 100
+            : Math.min(100, Math.max(0, Number(prog?.percent) || 0));
+        fill.removeClass('running done paused err').addClass(stateMode);
+        fill.css('width', `${pct.toFixed(1)}%`);
+
+        const now = Date.now();
+        const startedAtMs = prog?.startedAtMs || now;
+        const elapsedMs = stateMode === 'running'
+            ? Math.max(0, now - startedAtMs)
+            : Math.max(0, Number(prog?.elapsedMs ?? (now - startedAtMs)));
+
+        let etaStr = '';
+        if (stateMode === 'done') etaStr = '已完成';
+        else if (stateMode === 'paused') etaStr = '已暂停';
+        else if (stateMode === 'err') etaStr = '已中断';
+        else if (prog?.etaMs !== null && prog?.etaMs !== undefined) {
+            const sinceUpdate = prog?.updatedAtMs ? Math.max(0, now - prog.updatedAtMs) : 0;
+            etaStr = `剩 ${formatDurationZh(Math.max(0, Number(prog.etaMs) - sinceUpdate))}`;
+        } else if (prog?.estMaxMs > 0) {
+            etaStr = `约 ${formatDurationZh(prog.estMinMs)}~${formatDurationZh(prog.estMaxMs)}`;
+        } else {
+            etaStr = '测速中...';
         }
-        const arcs = pack.indexData?.arcs || [];
-        const totalDone = arcs.filter((a) => isArcLlmDone(a, pack.indexData)).length;
-        sel.append(`<option value="">全部章节 (${totalDone}/${arcs.length} 章已构建 LLM 目录)</option>`);
-        const seriesMap = new Map();
-        for (const a of arcs) {
-            const sk = String(a.series || a.category || '默认分卷').trim();
-            if (!seriesMap.has(sk)) seriesMap.set(sk, { total: 0, done: 0 });
-            const st = seriesMap.get(sk);
-            st.total += 1;
-            if (isArcLlmDone(a, pack.indexData)) st.done += 1;
+
+        const totalArcs = Number(prog?.totalArcs) || 0;
+        const doneArcs = Number(prog?.doneArcs) || 0;
+        const arcSpan = totalArcs > 0 ? ` (${doneArcs}/${totalArcs}章)` : '';
+
+        if (stateMode === 'running') {
+            titleEl.text(
+                prog?.phase === 'series_meta'
+                    ? `提炼全卷总览 · ${pct.toFixed(1)}%`
+                    : `构建 LLM 目录 · ${pct.toFixed(1)}%${arcSpan}`
+            );
+            btn.text('暂停').prop('disabled', false).data('mode', 'stop');
+        } else if (stateMode === 'done') {
+            titleEl.text(`LLM 目录 · ✓ 构建完成 (100%)`);
+            btn.text('已就绪').prop('disabled', false).data('mode', 'upgrade');
+        } else if (stateMode === 'paused') {
+            titleEl.text(`LLM 目录 · 已暂停 ${pct.toFixed(1)}%${arcSpan}`);
+            btn.text('继续构建').prop('disabled', false).data('mode', 'build');
+        } else {
+            titleEl.text(`LLM 目录 · 已中断 ${pct.toFixed(1)}%${arcSpan}`);
+            btn.text('重试构建').prop('disabled', false).data('mode', 'build');
         }
-        for (const [sk, st] of seriesMap.entries()) {
-            sel.append(`<option value="${escHtml(sk)}">${escHtml(sk)} (${st.done}/${st.total} 章已构建)</option>`);
-        }
-        renderLocalUpgradeEstimate();
+
+        const curText = customSub
+            || (prog?.phase === 'series_meta'
+                ? `提炼「${prog.series || '默认分卷'}」总览 · ${etaStr}`
+                : `${prog?.arcTitle ? prog.arcTitle + ' · ' : ''}已用 ${formatDurationZh(elapsedMs)} · ${etaStr}`);
+        sub.text(curText).show();
     };
 
-    const renderLocalSplitPreview = (pack, { openDetails = false, blockedAutoLlm = false } = {}) => {
-        const wrap = $('#lorecodex_local_split_wrap');
-        if (!wrap.length) return;
-        if (!pack || !pack.indexData) {
-            wrap.hide().empty();
-            return;
+    const updateBindingButton = () => {
+        const charKey = getActiveCharKey();
+        const btn = $('#lorecodex_bind_toggle');
+        if (!btn.length) return;
+        const b = charKey ? cfg.charBindings?.[charKey] : null;
+        if (!charKey) {
+            btn.removeClass('active').prop('disabled', true).text('绑角色').attr('title', '进入角色对话后可一键绑定专属书库');
+        } else if (b && b.corpus === cfg.corpus) {
+            btn.addClass('active').prop('disabled', false).text('已绑角色').attr('title', `角色「${charKey}」已绑定此书库，点击解绑`);
+        } else if (b) {
+            btn.removeClass('active').prop('disabled', false).text('改绑角色').attr('title', `角色「${charKey}」当前绑定为 ${b.corpus}，点击改为当前书库`);
+        } else {
+            btn.removeClass('active').prop('disabled', false).text('绑角色').attr('title', `将当前书库绑定给角色「${charKey}」`);
         }
-        const report = inspectCorpusStructure(pack);
-        const badgeCls = report.severity === 'error' ? 'err' : report.severity === 'warn' ? 'warn' : 'ok';
-        const badgeText = report.severity === 'error' ? '高危异常' : report.severity === 'warn' ? '建议检查' : '切分正常';
-        const volLabel = report.hasNamedSeries ? `${report.seriesCount} 卷` : (report.isLorePack ? '设定集' : '未分卷');
-        const statsLine = `${volLabel} · ${report.arcCount} 章 · ${report.sceneCount} 幕 · ${report.totalChars.toLocaleString()} 字 · 均章 ${report.avgArcChars.toLocaleString()} 字`;
-
-        const warnsHtml = report.warnings.length
-            ? `<div class="lorecodex-split-warns">${report.warnings
-                  .map((w) => `<div class="lorecodex-split-warn-item ${w.level === 'error' ? 'err' : 'warn'}">${escHtml(w.message)}</div>`)
-                  .join('')}</div>`
-            : '';
-
-        const blockedHtml = blockedAutoLlm
-            ? `<div class="lorecodex-split-warn-item err"><b>已暂停自动 LLM 构建</b>：检测到高危切分异常，为避免浪费 API，请先确认下方切分结构无误后再手动启动。</div>`
-            : '';
-
-        const seriesHtml = report.seriesBreakdown.length
-            ? `<div class="lorecodex-split-series">${report.seriesBreakdown
-                  .slice(0, 18)
-                  .map((s) => `<span class="lorecodex-split-chip">${escHtml(s.name)} (${s.arcs}章/${s.scenes}幕)</span>`)
-                  .join('')}${report.seriesBreakdown.length > 18 ? `<span class="lorecodex-split-chip">…共 ${report.seriesBreakdown.length} 卷</span>` : ''}</div>`
-            : '';
-
-        const samplesHtml = report.sampleArcs.length
-            ? `<div class="lorecodex-split-samples">${report.sampleArcs
-                  .map((item) => {
-                      if (item.separator) {
-                          return `<div class="lorecodex-split-sep">··· 省略中间 ${item.omittedCount} 章 ···</div>`;
-                      }
-                      const meta = `${item.series ? escHtml(item.series) + ' · ' : ''}${item.sceneCount}幕 / ${item.chars.toLocaleString()}字`;
-                      return `<div class="lorecodex-split-arc">
-                          <div class="lorecodex-split-arc-head">
-                              <span>[${escHtml(item.arc_id)}] ${escHtml(item.title)}</span>
-                              <span class="lorecodex-muted">${meta}</span>
-                          </div>
-                          ${item.snippet ? `<div class="lorecodex-split-snippet">${escHtml(item.snippet)}</div>` : ''}
-                      </div>`;
-                  })
-                  .join('')}</div>`
-            : '';
-
-        const autoOpen = Boolean(openDetails || report.severity === 'error');
-        const actionsHtml = `<div class="lorecodex-row" style="margin-top:4px;">
-            <button type="button" id="lorecodex_split_open_wb" class="menu_button" style="flex:1;padding:4px 8px;">打开书阁查看完整目录</button>
-            ${blockedAutoLlm ? `<button type="button" id="lorecodex_split_force_llm" class="menu_button" style="flex:1;padding:4px 8px;">确认无误，仍然启动 LLM 构建</button>` : ''}
-        </div>`;
-
-        wrap.html(`
-            <div class="lorecodex-split-head">
-                <span><b>切分结构体检 · ${escHtml(pack.config?.name || pack.id)}</b></span>
-                <span class="lorecodex-split-badge ${badgeCls}">${badgeText}</span>
-            </div>
-            <div class="lorecodex-split-stats">${statsLine}</div>
-            ${blockedHtml}
-            ${warnsHtml}
-            <details class="lorecodex-split-details" ${autoOpen ? 'open' : ''}>
-                <summary>查看分卷分布与章节抽样预览（前 5 章 + 尾 2 章）</summary>
-                ${!report.hasNamedSeries && !report.isLorePack ? '<div class="lorecodex-muted" style="margin-top:4px;">提示：文本中未匹配到“第X卷/部/篇”标记，所有章节暂归为同一卷。</div>' : ''}
-                ${seriesHtml}
-                ${samplesHtml}
-            </details>
-            ${actionsHtml}
-        `).show();
-
-        $('#lorecodex_split_open_wb').on('click', () => {
-            openWorkbenchModal(cfg, { corpusId: pack.id });
-        });
-        $('#lorecodex_split_force_llm').on('click', () => {
-            runLocalLlmUpgrade(pack.id);
-        });
     };
 
     const renderCorpusDropdown = () => {
         const sel = $('#lorecodex_corpus').empty();
         const entries = [...corporaMap.values()];
         if (!entries.length) {
-            sel.append(`<option value="${escHtml(cfg.corpus || '')}">${escHtml(cfg.corpus || '（请连接服务端或在下方导入内置书库）')}</option>`);
-            renderLocalSeriesOptions();
-            return;
-        }
-        for (const c of entries) {
-            const llmTag = c.stats?.llm_arcs ? ` · LLM:${c.stats.llm_arcs}章` : '';
-            sel.append(`<option value="${escHtml(c.id)}">${escHtml(c.name)} (${c.stats?.arcs || 0}卷 / ${c.stats?.scenes || 0}幕${llmTag})</option>`);
-        }
-        if (cfg.corpus && corporaMap.has(cfg.corpus)) sel.val(cfg.corpus);
-        renderLocalSeriesOptions();
-        renderLocalSplitPreview(localPacksMap.get(cfg.corpus));
-    };
-
-    const updateBindingLabel = () => {
-        const charKey = getActiveCharKey();
-        const b = charKey ? cfg.charBindings?.[charKey] : null;
-        const el = $('#lorecodex_binding_info');
-        if (!el.length) return;
-        if (!charKey) {
-            el.text('当前未进入角色对话（可切换角色后绑定专属书库与进度）');
-        } else if (b) {
-            el.text(`当前角色卡「${charKey}」已绑定：书库=${b.corpus || '默认'} | 防剧透序=${b.maxOrder || 0} | 视角=${b.pov || '无'}`);
+            sel.append(`<option value="${escHtml(cfg.corpus || '')}">${escHtml(cfg.corpus || '（暂无书库，点下方打开大面板导入）')}</option>`);
         } else {
-            el.text(`当前角色卡「${charKey}」未单独绑定（沿用当前全局书库）`);
+            for (const c of entries) {
+                sel.append(`<option value="${escHtml(c.id)}">${escHtml(c.name)} (${c.stats?.arcs || 0}卷)</option>`);
+            }
+            if (cfg.corpus && corporaMap.has(cfg.corpus)) sel.val(cfg.corpus);
         }
+        renderStaticLlmWidget();
+        updateBindingButton();
     };
 
     eventSource.on(event_types.CHAT_CHANGED, () => {
@@ -992,8 +988,9 @@ jQuery(async () => {
             if (b.pov !== undefined) cfg.pov = b.pov;
             saveSettingsDebounced();
             syncUiFromCfg();
+            renderStaticLlmWidget();
         }
-        updateBindingLabel();
+        updateBindingButton();
     });
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
@@ -1021,6 +1018,8 @@ jQuery(async () => {
             cfg.corpus = id;
             saveSettingsDebounced();
             $('#lorecodex_corpus').val(id);
+            renderStaticLlmWidget();
+            updateBindingButton();
             toastr.info(`LoreCodex 已切换书库：${corporaMap.get(id)?.name || id}`);
             return id;
         },
@@ -1034,7 +1033,7 @@ jQuery(async () => {
             const raw = String(value || '').trim().toLowerCase();
             cfg.maxOrder = raw === 'off' || raw === 'none' || raw === '0' ? 0 : normalizeMaxOrder(raw);
             saveSettingsDebounced();
-            $('#lorecodex_max_order').val(cfg.maxOrder);
+            syncUiFromCfg();
             toastr.info(`LoreCodex 防剧透上限：${cfg.maxOrder > 0 ? '序 <= ' + cfg.maxOrder : '已关闭（全库开放）'}`);
             return String(cfg.maxOrder);
         },
@@ -1047,7 +1046,7 @@ jQuery(async () => {
         callback: (_args, value) => {
             cfg.pov = String(value || '').trim();
             saveSettingsDebounced();
-            $('#lorecodex_pov').val(cfg.pov);
+            syncUiFromCfg();
             toastr.info(`LoreCodex 检索视角：${cfg.pov || '（无）'}`);
             return cfg.pov;
         },
@@ -1114,294 +1113,64 @@ jQuery(async () => {
         } catch (_) {}
     };
 
-    const syncConfigToServer = async ({ silent = false } = {}) => {
-        const st = $('#lorecodex_model_status');
-        await idbSetMeta('local_api_config', {
-            defaultCorpus: cfg.corpus || '',
-            chatBase: cfg.chatBase || '',
-            chatKey: cfg.chatKey || '',
-            chatModel: cfg.chatModel || 'deepseek-chat',
-            maxTokens: Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null,
-            temperature: optionalTempOrNull(cfg.temperature),
-            reasoningEffort: optionalReasoningOrNull(cfg.reasoningEffort),
-        }).catch(() => {});
-
-        if (cfg.localMode || !lastHealthInfo?.ok) {
-            if (!silent) {
-                st.text('已保存模型配置到浏览器内置书阁 (IndexedDB)');
-                if (typeof toastr !== 'undefined') toastr.success('已保存模型配置');
-            }
-            return true;
-        }
-        try {
-            const body = buildApiConfig(cfg);
-            body.maxTokens = Number(cfg.maxTokens) > 0 ? Math.floor(Number(cfg.maxTokens)) : null;
-            body.temperature = optionalTempOrNull(cfg.temperature);
-            body.reasoningEffort = optionalReasoningOrNull(cfg.reasoningEffort);
-            if (cfg.corpus) body.defaultCorpus = cfg.corpus;
-            const r = await fetch(`${getServerBase(cfg)}/config`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            const j = await r.json();
-            if (!silent) {
-                st.text(j.ok ? '已保存配置到内置书阁与外部服务端 config.json' : ('保存失败: ' + j.error));
-                if (j.ok && typeof toastr !== 'undefined') toastr.success('已保存模型配置到服务端');
-            }
-            return Boolean(j.ok);
-        } catch (e) {
-            if (!silent) st.text('已保存到本地内置书阁（外部服务端未连接）');
-            return false;
-        }
-    };
-
     await syncConfigFromServer();
 
-    const needsApiSetup = !String(cfg.chatBase || '').trim() || !String(cfg.chatModel || '').trim();
+    const SUN_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>';
+    const MOON_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>';
+    const curTheme = cfg.uiTheme === 'paper' ? 'paper' : 'lamp';
 
     const html = `
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>LoreCodex 树形典籍检索 (st-tree-lore)</b>
+            <b>LoreCodex 典籍检索</b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
-        <div class="inline-drawer-content lorecodex-drawer">
+        <div id="lorecodex_drawer_root" class="inline-drawer-content lorecodex-drawer" data-lc-theme="${curTheme}">
             <div class="lorecodex-card">
-                <div class="lorecodex-conn-bar">
-                    <div class="lorecodex-conn-left">
-                        <span id="lorecodex_conn_dot" class="lorecodex-dot wait"></span>
-                        <span id="lorecodex_conn_text" class="lorecodex-conn-text">正在初始化内置书阁...</span>
+                <div class="lorecodex-sec">
+                    <div class="lorecodex-conn-bar">
+                        <div class="lorecodex-conn-left">
+                            <span id="lorecodex_conn_dot" class="lorecodex-dot wait"></span>
+                            <span id="lorecodex_conn_text" class="lorecodex-conn-text">初始化中...</span>
+                        </div>
+                        <button type="button" id="lorecodex_theme_toggle" class="lorecodex-icon-btn" title="${curTheme === 'paper' ? '切换到墨灯深色模式' : '切换到素笺浅色模式'}">${curTheme === 'paper' ? MOON_SVG : SUN_SVG}</button>
+                        <label class="lorecodex-switch" title="对话生成前自动检索并注入相关原著记忆">
+                            <input id="lorecodex_enabled" type="checkbox" ${cfg.enabled ? 'checked' : ''} />
+                            <span class="lorecodex-switch-track"></span>
+                            <span class="lorecodex-switch-label">启用</span>
+                        </label>
                     </div>
-                    <button id="lorecodex_open_ui" class="menu_button" style="width:auto;padding:4px 11px;">打开书阁</button>
+
+                    <div class="lorecodex-row" style="flex-wrap:nowrap;">
+                        <select id="lorecodex_corpus" class="text_pole" style="flex:1;min-width:0;"></select>
+                        <button type="button" id="lorecodex_bind_toggle" class="lorecodex-ghost-btn lorecodex-bind-btn">绑角色</button>
+                    </div>
+
+                    <div id="lorecodex_active_badges" class="lorecodex-row" style="gap:5px;display:none;"></div>
                 </div>
-                <label class="checkbox_label">
-                    <input id="lorecodex_enabled" type="checkbox" ${cfg.enabled ? 'checked' : ''} />
-                    <span><b>启用生成前记忆检索注入</b></span>
-                </label>
-                <div class="lorecodex-row">
-                    <div style="flex:1;min-width:160px;">
-                        <small>当前挂载书库：</small>
-                        <select id="lorecodex_corpus" class="text_pole"></select>
+
+                <div id="lorecodex_llm_box" class="lorecodex-sec">
+                    <div class="lorecodex-prog-head">
+                        <span id="lorecodex_llm_title" class="lorecodex-prog-title">LLM 目录</span>
+                        <button type="button" id="lorecodex_llm_btn" class="lorecodex-ghost-btn sm">建立目录</button>
                     </div>
-                    <button id="lorecodex_refresh_corpora" class="menu_button" style="width:auto;margin-top:16px;padding:4px 10px;">刷新</button>
+                    <div class="lorecodex-prog-track">
+                        <div id="lorecodex_llm_fill" class="lorecodex-prog-fill"></div>
+                    </div>
+                    <div id="lorecodex_llm_sub" class="lorecodex-prog-sub" style="display:none;"></div>
+                </div>
+
+                <div id="lorecodex_api_banner" class="lorecodex-api-banner" style="display:none;">
+                    <span>尚未配置旁路模型 API</span>
+                    <button type="button" id="lorecodex_go_api" class="lorecodex-ghost-btn sm">去配置</button>
+                </div>
+
+                <div id="lorecodex_last_preview" class="lorecodex-sec"></div>
+
+                <div class="lorecodex-cta-wrap">
+                    <button type="button" id="lorecodex_open_ui" class="lorecodex-btn-primary">打开 LoreCodex 大面板</button>
                 </div>
             </div>
-
-            <details class="lorecodex-card" ${needsApiSetup ? 'open' : ''}>
-                <summary>旁路模型 API 配置${needsApiSetup ? '（请先填写）' : ''}</summary>
-                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                    <div>
-                        <small>API Base URL (OpenAI 兼容)：</small>
-                        <input id="lorecodex_chat_base" class="text_pole" type="text" value="${escHtml(cfg.chatBase || '')}" placeholder="https://api.openai.com/v1" />
-                    </div>
-                    <div>
-                        <small>API Key：</small>
-                        <input id="lorecodex_chat_key" class="text_pole" type="password" value="${escHtml(cfg.chatKey || '')}" placeholder="填入用于旁路翻树与建库的 API Key" />
-                    </div>
-                    <div class="lorecodex-row">
-                        <div style="flex:1;">
-                            <small>模型名称：</small>
-                            <input id="lorecodex_chat_model" class="text_pole" type="text" value="${escHtml(cfg.chatModel || '')}" placeholder="可手动输入或点击右侧拉取后在下拉框选择" />
-                        </div>
-                        <button id="lorecodex_fetch_models" class="menu_button" style="width:auto;margin-top:16px;padding:4px 8px;">拉取模型</button>
-                    </div>
-                    <select id="lorecodex_model_select" class="text_pole" style="display:none;"></select>
-                    <details class="lorecodex-subdetails">
-                        <summary>高级模型参数（默认留空即可）</summary>
-                        <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                            <div style="display:flex;gap:8px;">
-                                <div style="flex:1;">
-                                    <small>Max Tokens（留空 = 默认）：</small>
-                                    <input id="lorecodex_max_tokens" class="text_pole" type="number" min="0" step="256" value="${Number(cfg.maxTokens) > 0 ? Number(cfg.maxTokens) : ''}" placeholder="沿用模型默认" />
-                                </div>
-                                <div style="flex:1;">
-                                    <small>Temperature（留空 = 不传）：</small>
-                                    <input id="lorecodex_temperature" class="text_pole" type="number" min="0" max="2" step="0.1" value="${normalizeTemperature(cfg.temperature)}" placeholder="沿用模型默认（留空不传）" />
-                                </div>
-                            </div>
-                            <div>
-                                <small>思考强度 Reasoning Effort（默认不传）：</small>
-                                <select id="lorecodex_reasoning_effort" class="text_pole">
-                                    <option value="" ${!normalizeReasoningEffort(cfg.reasoningEffort) ? 'selected' : ''}>沿用模型默认（不传）</option>
-                                    ${['minimal', 'low', 'medium', 'high'].map(v => `<option value="${v}" ${normalizeReasoningEffort(cfg.reasoningEffort) === v ? 'selected' : ''}>${v}</option>`).join('')}
-                                </select>
-                            </div>
-                        </div>
-                    </details>
-                    <button id="lorecodex_save_srv" class="menu_button" style="width:100%;">保存模型与默认书库配置</button>
-                    <div id="lorecodex_model_status" class="lorecodex-status"></div>
-                </div>
-            </details>
-
-            <details class="lorecodex-card">
-                <summary>导入书库（.lorepack.json / 小说 / 世界书）</summary>
-                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                    <div class="lorecodex-muted">选择 <code>.lorepack.json</code>、<code>.txt</code>/<code>.epub</code> 或世界书/角色卡 <code>.json</code> 直接存入浏览器。</div>
-                    <input id="lorecodex_local_file" type="file" accept=".txt,.md,.epub,.json,.jsonl" style="display:none;" />
-                    <button id="lorecodex_local_import_btn" type="button" class="menu_button" style="width:100%;">选择文件并导入（.lorepack.json / 小说 / 世界书）</button>
-                    <details class="lorecodex-subdetails">
-                        <summary>自定义书库信息 / 导出与删除</summary>
-                        <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                            <div class="lorecodex-row">
-                                <div style="flex:1;">
-                                    <small>书库 ID（英文/数字/连字符）：</small>
-                                    <input id="lorecodex_local_id" class="text_pole" type="text" placeholder="my-book" />
-                                </div>
-                                <div style="flex:1;">
-                                    <small>书库显示名称：</small>
-                                    <input id="lorecodex_local_name" class="text_pole" type="text" placeholder="例如：原著书名" />
-                                </div>
-                            </div>
-                            <label class="checkbox_label">
-                                <input id="lorecodex_local_auto_llm" type="checkbox" checked />
-                                <span>导入原始小说后自动启动 LLM 智能目录构建</span>
-                            </label>
-                            <div class="lorecodex-row">
-                                <button id="lorecodex_local_export_btn" type="button" class="menu_button" style="flex:1;">导出 .lorepack</button>
-                                <button id="lorecodex_local_delete_btn" type="button" class="menu_button" style="flex:1;">删除当前书库</button>
-                            </div>
-                        </div>
-                    </details>
-                    <details class="lorecodex-subdetails">
-                        <summary>小说 LLM 目录构建 / 断点续传</summary>
-                        <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                            <div class="lorecodex-row">
-                                <div style="flex:2;min-width:140px;">
-                                    <small>目标分卷（推荐按卷逐卷构建）：</small>
-                                    <select id="lorecodex_local_upg_series" class="text_pole">
-                                        <option value="">全部未完成章节</option>
-                                    </select>
-                                </div>
-                                <div style="flex:1;min-width:70px;">
-                                    <small>并发数：</small>
-                                    <input id="lorecodex_local_upg_workers" class="text_pole" type="number" min="1" max="24" value="8" />
-                                </div>
-                                <div style="flex:1;min-width:80px;" title="0 = 所选分卷全部章节">
-                                    <small>本批章数(0全卷)：</small>
-                                    <input id="lorecodex_local_upg_limit" class="text_pole" type="number" min="0" value="0" />
-                                </div>
-                            </div>
-                            <div id="lorecodex_local_upg_estimate" class="lorecodex-muted"></div>
-                            <div class="lorecodex-row">
-                                <button id="lorecodex_local_upg_btn" type="button" class="menu_button" style="flex:2;">开始 / 继续 LLM 目录构建</button>
-                                <button id="lorecodex_local_upg_stop_btn" type="button" class="menu_button" style="flex:1;display:none;">暂停并保存进度</button>
-                            </div>
-                        </div>
-                    </details>
-                    <div id="lorecodex_local_split_wrap" class="lorecodex-split-wrap" style="display:none;"></div>
-                    <div id="lorecodex_local_prog_wrap" class="lorecodex-prog-wrap" style="display:none;">
-                        <div class="lorecodex-prog-head">
-                            <span id="lorecodex_local_prog_title" class="lorecodex-prog-title">准备构建...</span>
-                            <div class="lorecodex-prog-head-right">
-                                <span id="lorecodex_local_prog_time" class="lorecodex-prog-time"></span>
-                                <button id="lorecodex_local_prog_stop_btn" type="button" class="menu_button" style="width:auto;padding:2px 8px;font-size:0.86em;display:none;">暂停</button>
-                            </div>
-                        </div>
-                        <div class="lorecodex-prog-track">
-                            <div id="lorecodex_local_prog_fill" class="lorecodex-prog-fill"></div>
-                        </div>
-                        <div class="lorecodex-prog-sub">
-                            <span id="lorecodex_local_prog_cur" class="lorecodex-prog-current"></span>
-                            <span id="lorecodex_local_prog_meta"></span>
-                        </div>
-                    </div>
-                    <div id="lorecodex_local_status" class="lorecodex-status"></div>
-                </div>
-            </details>
-
-            <details class="lorecodex-card">
-                <summary>检索与防剧透设置</summary>
-                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                    <div class="lorecodex-grid-4">
-                        <div title="0 = 全库开放不拦截；>0 时拦截所有 order 大于该值的后续章节">
-                            <small>防剧透序</small>
-                            <input id="lorecodex_max_order" class="text_pole" type="number" min="0" value="${cfg.maxOrder ?? 0}" />
-                        </div>
-                        <div title="0 = 由 Agent 按场景与字数预算自决">
-                            <small>幕数(0自决)</small>
-                            <input id="lorecodex_max_scenes" class="text_pole" type="number" min="0" max="12" value="${cfg.maxScenes ?? 0}" />
-                        </div>
-                        <div>
-                            <small>对话轮数</small>
-                            <input id="lorecodex_recent_turns" class="text_pole" type="number" min="1" max="15" value="${cfg.recentTurns ?? 5}" />
-                        </div>
-                        <div>
-                            <small>注入深度</small>
-                            <input id="lorecodex_depth" class="text_pole" type="number" min="0" max="10" value="${cfg.depth ?? 1}" />
-                        </div>
-                    </div>
-                    <div>
-                        <small>检索视角 POV（可选，缺席场景标注转述）：</small>
-                        <input id="lorecodex_pov" class="text_pole" type="text" value="${escHtml(cfg.pov || '')}" placeholder="留空表示全景视角" />
-                    </div>
-                </div>
-            </details>
-
-            <details class="lorecodex-card">
-                <summary>角色卡自动绑定</summary>
-                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                    <div id="lorecodex_binding_info" class="lorecodex-muted"></div>
-                    <div class="lorecodex-row">
-                        <button id="lorecodex_bind_char" class="menu_button" style="flex:1;">绑定当前角色卡</button>
-                        <button id="lorecodex_unbind_char" class="menu_button" style="flex:1;">解除当前绑定</button>
-                    </div>
-                </div>
-            </details>
-
-            <details class="lorecodex-card">
-                <summary>上次注入实时预览</summary>
-                <div id="lorecodex_last_preview" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;"></div>
-            </details>
-
-            <details class="lorecodex-card">
-                <summary>内嵌测试检索（无需弹窗）</summary>
-                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                    <div class="lorecodex-row">
-                        <input id="lorecodex_test_query" class="text_pole" type="text" style="flex:1;" placeholder="输入测试检索问题" />
-                        <button id="lorecodex_test_btn" class="menu_button" style="width:auto;padding:4px 10px;">执行测试</button>
-                    </div>
-                    <div id="lorecodex_status" class="lorecodex-status"></div>
-                </div>
-            </details>
-
-            <details class="lorecodex-card">
-                <summary>高级可选：连接外部独立 Node 服务端 &amp; 注入包装正则</summary>
-                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                    <label class="checkbox_label">
-                        <input id="lorecodex_local_mode" type="checkbox" ${cfg.localMode ? 'checked' : ''} />
-                        <span><b>使用纯前端免后台引擎（默认推荐；取消勾选则连接下方外部 Node 服务端）</b></span>
-                    </label>
-                    <div>
-                        <small>外部 Node 服务端地址（仅在取消上方勾选、需与电脑本地磁盘 corpora/ 或 MCP 共享时使用）：</small>
-                        <input id="lorecodex_server" class="text_pole" type="text" value="${escHtml(cfg.ragServer)}" />
-                    </div>
-                    <div>
-                        <small>XML 标签名：</small>
-                        <input id="lorecodex_xml_tag" class="text_pole" type="text" value="${escHtml(cfg.customXmlTag || '')}" placeholder="默认随当前语料 corpus.json" />
-                    </div>
-                    <div>
-                        <small>注入导语 Header：</small>
-                        <textarea id="lorecodex_header" class="text_pole" rows="2" placeholder="留空使用当前语料 prompt_framing.header"></textarea>
-                    </div>
-                    <div>
-                        <small>事实优先级规则：</small>
-                        <textarea id="lorecodex_priority_rule" class="text_pole" rows="2" placeholder="留空使用当前语料 prompt_framing.priority_rule"></textarea>
-                    </div>
-                    <div>
-                        <small>追查指令尾注：</small>
-                        <input id="lorecodex_followup_hint" class="text_pole" type="text" value="${escHtml(cfg.customFollowUpHint || '')}" placeholder="留空使用当前语料 follow_up_hint" />
-                    </div>
-                    <div>
-                        <small>跳过样板条目正则（每行一条）：</small>
-                        <textarea id="lorecodex_boiler_re" class="text_pole" rows="2" placeholder="留空使用当前语料 db_scrubber.boilerplate_patterns"></textarea>
-                    </div>
-                    <div>
-                        <small>优先保留数据库摘要正则（每行一条）：</small>
-                        <textarea id="lorecodex_summary_re" class="text_pole" rows="2" placeholder="留空使用当前语料 db_scrubber.summary_priority_patterns"></textarea>
-                    </div>
-                </div>
-            </details>
         </div>
     </div>`;
 
@@ -1409,158 +1178,39 @@ jQuery(async () => {
     renderConnStatus(initialOk);
     renderCorpusDropdown();
     syncUiFromCfg();
-    updateBindingLabel();
     renderLastPreview(cfg);
 
-    const bind = (sel, key, fn) => {
-        $(sel).on('change input', function () {
-            cfg[key] = fn ? fn($(this)) : $(this).val();
-            saveSettingsDebounced();
-        });
-    };
-
-    bind('#lorecodex_enabled', 'enabled', el => el.prop('checked'));
-    $('#lorecodex_local_mode').on('change', async function () {
-        cfg.localMode = $(this).prop('checked');
-        saveSettingsDebounced();
-        const ok = await fetchCorporaAndHealth(cfg);
-        renderConnStatus(ok);
-        renderCorpusDropdown();
-    });
-
-    let localUpgAbortCtrl = null;
-
-    const renderLocalProgUi = (prog, stateMode = 'running', customCurText = '') => {
-        const wrap = $('#lorecodex_local_prog_wrap');
-        if (!wrap.length) return;
-        wrap.show();
-        const fill = $('#lorecodex_local_prog_fill');
-        const titleEl = $('#lorecodex_local_prog_title');
-        const timeEl = $('#lorecodex_local_prog_time');
-        const curEl = $('#lorecodex_local_prog_cur');
-        const metaEl = $('#lorecodex_local_prog_meta');
-        const stopMiniBtn = $('#lorecodex_local_prog_stop_btn');
-
-        const pct = stateMode === 'done'
-            ? 100
-            : Math.min(100, Math.max(0, Number(prog?.percent) || 0));
-        fill.removeClass('running done paused err').addClass(stateMode);
-        fill.css('width', `${pct.toFixed(1)}%`);
-
-        const now = Date.now();
-        const startedAtMs = prog?.startedAtMs || now;
-        const elapsedMs = stateMode === 'running'
-            ? Math.max(0, now - startedAtMs)
-            : Math.max(0, Number(prog?.elapsedMs ?? (now - startedAtMs)));
-
-        let etaStr = '';
-        if (stateMode === 'done') {
-            etaStr = '已完成';
-        } else if (stateMode === 'paused') {
-            etaStr = '已暂停';
-        } else if (stateMode === 'err') {
-            etaStr = '已中断';
-        } else if (prog?.etaMs !== null && prog?.etaMs !== undefined) {
-            const sinceUpdate = prog?.updatedAtMs ? Math.max(0, now - prog.updatedAtMs) : 0;
-            const liveEta = Math.max(0, Number(prog.etaMs) - sinceUpdate);
-            etaStr = `剩余约 ${formatDurationZh(liveEta)}`;
-        } else if (prog?.estMaxMs > 0) {
-            etaStr = `参考 ${formatDurationZh(prog.estMinMs)}~${formatDurationZh(prog.estMaxMs)}`;
-        } else {
-            etaStr = '测速中...';
-        }
-
-        const totalArcs = Number(prog?.totalArcs) || 0;
-        const doneArcs = Number(prog?.doneArcs) || 0;
-        const totalCalls = Number(prog?.totalCalls) || 0;
-        const doneCalls = Number(prog?.doneCalls) || 0;
-        const pctLabel = `${pct.toFixed(1)}%`;
-
-        if (stateMode === 'done') {
-            titleEl.text(`LLM 目录构建完成 · ${pctLabel} (${doneArcs}/${totalArcs} 章)`);
-            stopMiniBtn.hide();
-        } else if (stateMode === 'paused') {
-            titleEl.text(`已暂停并保存断点 · ${pctLabel} (${doneArcs}/${totalArcs} 章)`);
-            stopMiniBtn.hide();
-        } else if (stateMode === 'err') {
-            titleEl.text(`构建中断（已保存断点）· ${pctLabel} (${doneArcs}/${totalArcs} 章)`);
-            stopMiniBtn.hide();
-        } else if (prog?.phase === 'series_meta') {
-            titleEl.text(`提炼全卷总览 · ${pctLabel} (${prog.doneSeries || 0}/${prog.totalSeries || 0} 卷)`);
-            stopMiniBtn.show();
-        } else {
-            titleEl.text(`正在构建 LLM 目录 · ${pctLabel} (${doneArcs}/${totalArcs} 章)`);
-            stopMiniBtn.show();
-        }
-
-        timeEl.text(`已用 ${formatDurationZh(elapsedMs)} · ${etaStr}`);
-
-        if (customCurText) {
-            curEl.text(customCurText);
-        } else if (prog?.phase === 'series_meta') {
-            curEl.text(`当前分卷：${prog.series || '默认分卷'}`);
-        } else if (prog?.arcTitle) {
-            const scHint = prog.sceneTitle ? ` · ${prog.sceneTitle}` : '';
-            curEl.text(`当前：${prog.series ? prog.series + ' / ' : ''}${prog.arcTitle}${scHint}`);
-        } else {
-            curEl.text('正在调度首批并发请求...');
-        }
-
-        const reqPart = totalCalls > 0 ? `请求 ${doneCalls}/${totalCalls}` : '';
-        const avgPart = prog?.avgCallMs ? ` · 均速 ${(prog.avgCallMs / 1000).toFixed(1)}s/次` : '';
-        metaEl.text(`${reqPart}${avgPart}`);
-    };
-
     const runLocalLlmUpgrade = async (targetCorpusId) => {
-        const st = $('#lorecodex_local_status');
         const pack = localPacksMap.get(targetCorpusId);
         if (!pack) {
-            st.text(`内置书库 "${targetCorpusId}" 不存在（请先导入或选中一个内置书库）`);
+            openWorkbenchModal(cfg, { corpusId: targetCorpusId, action: 'upgrade' });
             return;
         }
         const apiCfg = buildApiConfig(cfg);
         if (!apiCfg.chatBase || !apiCfg.chatKey) {
-            st.text('请先在上方「旁路模型 API 配置」填写 API Base URL 与 API Key 后再启动 LLM 目录构建');
-            if (typeof toastr !== 'undefined') toastr.warning('请先填写旁路模型 API Base URL 与 API Key');
+            if (typeof toastr !== 'undefined') toastr.warning('请先配置旁路模型 API Base URL 与 API Key');
+            openWorkbenchModal(cfg, { corpusId: targetCorpusId, action: 'settings' });
             return;
         }
-        if (localUpgAbortCtrl) {
-            st.text('LLM 目录构建正在进行中...');
-            return;
-        }
-        const series = String($('#lorecodex_local_upg_series').val() || '').trim();
-        const workers = Math.min(Math.max(Number($('#lorecodex_local_upg_workers').val()) || 8, 1), 24);
-        const limitArcs = Math.max(0, Number($('#lorecodex_local_upg_limit').val()) || 0);
-        const plan = estimateBrowserLlmUpgradePlan(pack, { series, workers, limitArcs });
+        if (localUpgAbortCtrl) return;
 
+        const plan = estimateBrowserLlmUpgradePlan(pack, { series: '', workers: 8, limitArcs: 0 });
         if (!plan.totalArcs) {
-            const msg = '所选范围内的章节均已完成 LLM 目录构建（无需重复构建）';
-            st.text(msg);
-            renderLocalProgUi({
-                totalArcs: 0,
-                doneArcs: 0,
-                totalCalls: 0,
-                doneCalls: 0,
-                percent: 100,
-                elapsedMs: 0,
-                startedAtMs: Date.now(),
-            }, 'done', msg);
+            renderStaticLlmWidget();
+            if (typeof toastr !== 'undefined') toastr.info('当前书库已完成全部 LLM 目录构建');
             return;
         }
 
-        const buildLock = acquireCorpusBuildLock(pack.id, '酒馆扩展抽屉');
+        const buildLock = acquireCorpusBuildLock(pack.id, '酒馆扩展侧边栏');
         if (!buildLock.ok) {
             const holderOwner = buildLock.holder?.owner || '其他窗口';
-            const lockMsg = `书库「${pack.config.name}」正在「${holderOwner}」执行 LLM 构建，请勿重复启动`;
-            st.text(lockMsg);
-            if (typeof toastr !== 'undefined') toastr.warning(lockMsg);
+            if (typeof toastr !== 'undefined') toastr.warning(`书库「${pack.config.name}」正在「${holderOwner}」执行 LLM 构建`);
             return;
         }
 
         localUpgAbortCtrl = new AbortController();
+        llmBuildRunning = true;
         const ctrl = localUpgAbortCtrl;
-        $('#lorecodex_local_upg_btn').prop('disabled', true);
-        $('#lorecodex_local_upg_stop_btn').show();
 
         let latestProg = {
             phase: 'arcs',
@@ -1582,37 +1232,22 @@ jQuery(async () => {
             series: plan.targetArcs[0]?.series || '',
         };
         let progStateMode = 'running';
-
-        renderLocalProgUi(latestProg, 'running');
-        st.text(
-            `已启动「${pack.config.name}」LLM 目录构建：共 ${plan.totalArcs} 章 / ${plan.totalScenes} 幕 / ${plan.totalCalls} 次请求（并发 ${plan.effectiveWorkers}，启动前参考耗时约 ${formatDurationZh(plan.estMinMs)} ~ ${formatDurationZh(plan.estMaxMs)}）`
-        );
+        renderRunningLlmWidget(latestProg, 'running');
 
         const progTicker = setInterval(() => {
-            if (progStateMode === 'running') {
-                renderLocalProgUi(latestProg, 'running');
-            }
+            if (progStateMode === 'running') renderRunningLlmWidget(latestProg, 'running');
         }, 1000);
 
         try {
             const res = await upgradeBrowserCorpusWithLLM(pack, apiCfg, {
-                series,
-                workers,
-                limitArcs,
+                series: '',
+                workers: 8,
+                limitArcs: 0,
                 signal: ctrl.signal,
                 onProgress(prog) {
                     latestProg = { ...prog, updatedAtMs: Date.now() };
-                    const mode = prog.event === 'done' ? 'done' : 'running';
-                    progStateMode = mode;
-                    renderLocalProgUi(latestProg, mode);
-                    if (prog.phase === 'series_meta') {
-                        st.text(`正在提炼「${prog.series}」全卷大纲、人物别名对照表与专有术语...`);
-                    } else if (prog.event !== 'done') {
-                        const etaPart = prog.etaMs !== null && prog.etaMs !== undefined
-                            ? `，剩余约 ${formatDurationZh(prog.etaMs)}`
-                            : '';
-                        st.text(`LLM 目录构建中：${prog.doneArcs}/${prog.totalArcs} 章（请求 ${prog.doneCalls}/${prog.totalCalls}${etaPart}）· ${prog.arcTitle} [已自动写入断点]`);
-                    }
+                    progStateMode = prog.event === 'done' ? 'done' : 'running';
+                    renderRunningLlmWidget(latestProg, progStateMode);
                 },
                 async onSave(updatedPack) {
                     await idbSaveCorpus(updatedPack);
@@ -1622,209 +1257,107 @@ jQuery(async () => {
             await idbSaveCorpus(pack);
             localAgentsCache.delete(pack.id);
             const ok = await fetchCorporaAndHealth(cfg);
+            progStateMode = 'done';
+            llmBuildRunning = false;
             renderConnStatus(ok);
             renderCorpusDropdown();
-            progStateMode = 'done';
-            if (res.message) {
-                st.text(res.message);
-                renderLocalProgUi({ ...latestProg, percent: 100 }, 'done', res.message);
-            } else {
-                const durStr = formatDurationZh(res.elapsedMs);
-                const msg = `LLM 目录构建完成（总耗时 ${durStr}）：升级 ${res.upgradedArcs} 章 / ${res.upgradedScenes} 幕，合成 ${res.synthesizedSeries} 卷总览，累计 ${res.aliasesCount} 组人物别名、${res.glossaryCount} 条术语`;
-                renderLocalProgUi({ ...latestProg, percent: 100, elapsedMs: res.elapsedMs }, 'done', `全部完成，总耗时 ${durStr}`);
-                st.text(msg);
-                if (typeof toastr !== 'undefined') toastr.success(msg);
-            }
+            const durStr = formatDurationZh(res.elapsedMs);
+            renderRunningLlmWidget({ ...latestProg, percent: 100, elapsedMs: res.elapsedMs }, 'done', `完成，总耗时 ${durStr}`);
+            if (typeof toastr !== 'undefined') toastr.success(`LLM 目录构建完成（${durStr}）`);
         } catch (err) {
             await idbSaveCorpus(pack).catch(() => {});
             localAgentsCache.delete(pack.id);
             await fetchCorporaAndHealth(cfg);
-            renderCorpusDropdown();
             const isPaused = ctrl.signal.aborted;
             progStateMode = isPaused ? 'paused' : 'err';
+            llmBuildRunning = false;
             const errMsg = err?.message || String(err);
-            renderLocalProgUi(
+            renderRunningLlmWidget(
                 latestProg,
                 progStateMode,
-                isPaused ? '已手动暂停，进度已写入 IndexedDB，可随时续传' : `出错中断: ${errMsg}`
-            );
-            st.text(
-                isPaused
-                    ? `已暂停并保存断点（已完成 ${latestProg.doneArcs}/${latestProg.totalArcs} 章，可随时点击「开始 / 继续 LLM 目录构建」断点续传）`
-                    : `LLM 构建已中断（已完成章节均已保存在 IndexedDB，可随时点击继续）: ${errMsg}`
+                isPaused ? '已暂停并保存断点，随时可继续' : `中断: ${errMsg}`
             );
             if (typeof toastr !== 'undefined') {
-                toastr.info(isPaused ? '已暂停 LLM 构建并保存断点' : `LLM 构建已暂停/中断: ${errMsg}`);
+                toastr.info(isPaused ? '已暂停 LLM 构建并保存断点' : `LLM 构建中断: ${errMsg}`);
             }
         } finally {
             buildLock.release();
             clearInterval(progTicker);
             localUpgAbortCtrl = null;
-            $('#lorecodex_local_upg_btn').prop('disabled', false);
-            $('#lorecodex_local_upg_stop_btn').hide();
+            llmBuildRunning = false;
         }
     };
 
-    const stopLocalLlmUpgrade = () => {
-        if (localUpgAbortCtrl) localUpgAbortCtrl.abort();
-    };
-
-    $('#lorecodex_local_upg_btn').on('click', () => runLocalLlmUpgrade(cfg.corpus));
-    $('#lorecodex_local_upg_stop_btn').on('click', stopLocalLlmUpgrade);
-    $('#lorecodex_local_prog_stop_btn').on('click', stopLocalLlmUpgrade);
-    $('#lorecodex_local_upg_series, #lorecodex_local_upg_workers, #lorecodex_local_upg_limit').on('change input', renderLocalUpgradeEstimate);
-
-    const doLocalImport = async (file) => {
-        const st = $('#lorecodex_local_status');
-        if (!file) {
-            st.text('请先选择一个 .txt / .md / .epub / .json / .lorepack.json 文件');
-            return;
-        }
-        const cid = ($('#lorecodex_local_id').val().trim() || 'local-book').replace(/[^a-zA-Z0-9_-]/g, '-');
-        const cName = $('#lorecodex_local_name').val().trim() || cid;
-        const autoLlm = $('#lorecodex_local_auto_llm').prop('checked');
-        st.text(`正在浏览器内读取并导入「${cName}」...`);
-        try {
-            const ab = await file.arrayBuffer();
-            const fnameLower = file.name.toLowerCase();
-            const isEpub = fnameLower.endsWith('.epub');
-            const isJson = fnameLower.endsWith('.json') || fnameLower.endsWith('.jsonl');
-            const isLorepack = fnameLower.endsWith('.lorepack.json');
-            const text = isEpub ? await extractEpubTextInBrowser(ab) : decodeTextBufferAuto(ab);
-            const pack = isJson
-                ? buildLoreCorpusInBrowser({
-                      rawJson: text,
-                      corpusId: cid,
-                      name: cName,
-                      existingPack: isLorepack ? null : (localPacksMap.get(cid) || null),
-                  })
-                : buildNovelCorpusInBrowser({
-                      rawText: text,
-                      corpusId: cid,
-                      name: cName,
-                  });
-            await idbSaveCorpus(pack);
-            cfg.corpus = pack.id;
-            saveSettingsDebounced();
-            const ok = await fetchCorporaAndHealth(cfg);
-            renderConnStatus(ok);
-            renderCorpusDropdown();
-            const stats = pack.indexData?.stats || {};
-            const splitReport = inspectCorpusStructure(pack);
-            const volText = splitReport.hasNamedSeries ? `${splitReport.seriesCount}卷 / ` : '';
-            st.text(`已存入浏览器 IndexedDB：${pack.config.name} (${volText}${stats.arcs || 0}章 / ${stats.scenes || 0}幕 / ${(stats.total_chars || 0).toLocaleString()}字)`);
-            if (typeof toastr !== 'undefined') toastr.success(`本地书库「${pack.config.name}」导入完成`);
-
-            const blockAuto = autoLlm && !isLorepack && !isJson && splitReport.shouldBlockAutoLlm;
-            renderLocalSplitPreview(pack, {
-                openDetails: splitReport.severity !== 'ok',
-                blockedAutoLlm: blockAuto,
-            });
-
-            if (autoLlm && !isLorepack) {
-                if (blockAuto) {
-                    st.text(`已切分入库（${volText}${stats.arcs || 0}章 / ${stats.scenes || 0}幕），但检测到高危切分异常，已暂停自动启动 LLM 构建。请先核对上方切分预览后手动确认启动。`);
-                    if (typeof toastr !== 'undefined') {
-                        toastr.warning('检测到高危切分异常，已暂停自动启动 LLM 构建，请先查看切分结构预览');
-                    }
-                    return;
-                }
-                const apiCfg = buildApiConfig(cfg);
-                if (apiCfg.chatBase && apiCfg.chatKey) {
-                    await runLocalLlmUpgrade(pack.id);
-                } else {
-                    st.text(`已切分入库 (${volText}${stats.arcs || 0}章 / ${stats.scenes || 0}幕)。请先在上方「旁路模型 API 配置」填写 API Base URL 与 API Key，再点击「开始 / 继续 LLM 目录构建」补全目录摘要与别名表。`);
-                }
-            }
-        } catch (err) {
-            st.text('本地导入失败: ' + (err?.message || err));
-            if (typeof toastr !== 'undefined') toastr.error('本地导入失败: ' + (err?.message || err));
-        }
-    };
-
-    $('#lorecodex_local_file').on('change', async function (e) {
-        const f = e.target.files?.[0];
-        if (!f) return;
-        const stem = f.name.replace(/\.lorepack\.json$/i, '').replace(/\.[^.]+$/, '');
-        const slug = stem.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'local-book';
-        const customSub = $('#lorecodex_local_id').closest('details')[0];
-        const customOpen = Boolean(customSub?.open);
-        if (!customOpen || !$('#lorecodex_local_id').val().trim()) $('#lorecodex_local_id').val(slug);
-        if (!customOpen || !$('#lorecodex_local_name').val().trim()) $('#lorecodex_local_name').val(stem);
-        await doLocalImport(f);
-    });
-
-    $('#lorecodex_local_import_btn').on('click', () => {
-        const fileEl = $('#lorecodex_local_file')[0];
-        if (!fileEl) return;
-        fileEl.value = '';
-        fileEl.click();
-    });
-
-    $('#lorecodex_local_export_btn').on('click', () => {
-        const cid = cfg.corpus;
-        const pack = localPacksMap.get(cid);
-        const st = $('#lorecodex_local_status');
-        if (!pack) {
-            if (!isUsingLocalEngine(cfg) && cid) {
-                window.open(`${getServerBase(cfg)}/corpora/${encodeURIComponent(cid)}/export`, '_blank');
-                return;
-            }
-            st.text('当前选中的书库不在本地 IndexedDB 中');
-            return;
-        }
-        const blob = new Blob([JSON.stringify({ format: 'lorecodex-pack-v2', ...pack })], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${pack.id}.lorepack.json`;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 2000);
-        st.text(`已导出 ${pack.id}.lorepack.json`);
-    });
-
-    $('#lorecodex_local_delete_btn').on('click', async () => {
-        const cid = cfg.corpus;
-        const st = $('#lorecodex_local_status');
-        if (!localPacksMap.has(cid)) {
-            st.text(`书库 "${cid}" 不是本地 IndexedDB 书库`);
-            return;
-        }
-        await idbDeleteCorpus(cid);
-        cfg.corpus = '';
+    $('#lorecodex_enabled').on('change', function () {
+        cfg.enabled = $(this).prop('checked');
         saveSettingsDebounced();
-        const ok = await fetchCorporaAndHealth(cfg);
-        renderConnStatus(ok);
-        renderCorpusDropdown();
-        st.text(`已从浏览器 IndexedDB 删除本地书库 "${cid}"`);
     });
-    bind('#lorecodex_server', 'ragServer');
-    $('#lorecodex_corpus').on('change input', function () {
+
+    $('#lorecodex_theme_toggle').on('click', () => {
+        cfg.uiTheme = cfg.uiTheme === 'paper' ? 'lamp' : 'paper';
+        saveSettingsDebounced();
+        $('#lorecodex_drawer_root').attr('data-lc-theme', cfg.uiTheme);
+        $('#lorecodex_wb_modal').attr('data-lc-theme', cfg.uiTheme);
+        $('#lorecodex_theme_toggle')
+            .html(cfg.uiTheme === 'paper' ? MOON_SVG : SUN_SVG)
+            .attr('title', cfg.uiTheme === 'paper' ? '切换到墨灯深色模式' : '切换到素笺浅色模式');
+    });
+
+    $('#lorecodex_corpus').on('change', function () {
         cfg.corpus = $(this).val();
         saveSettingsDebounced();
-        renderLocalSeriesOptions();
-        renderLocalSplitPreview(localPacksMap.get(cfg.corpus));
+        renderStaticLlmWidget();
+        updateBindingButton();
     });
-    bind('#lorecodex_max_order', 'maxOrder', el => normalizeMaxOrder(el.val()));
-    bind('#lorecodex_max_scenes', 'maxScenes', el => normalizeMaxScenes(el.val()));
-    bind('#lorecodex_recent_turns', 'recentTurns', el => Math.max(1, Number(el.val()) || 5));
-    bind('#lorecodex_depth', 'depth', el => Math.max(0, Number(el.val()) || 0));
-    bind('#lorecodex_pov', 'pov');
-    bind('#lorecodex_chat_base', 'chatBase');
-    bind('#lorecodex_chat_key', 'chatKey');
-    bind('#lorecodex_chat_model', 'chatModel');
-    bind('#lorecodex_max_tokens', 'maxTokens', el => {
-        const n = Number(el.val());
-        return Number.isFinite(n) && n > 0 ? Math.floor(n) : '';
+
+    $('#lorecodex_bind_toggle').on('click', () => {
+        const charKey = getActiveCharKey();
+        if (!charKey) {
+            if (typeof toastr !== 'undefined') toastr.warning('当前没有打开的角色卡对话');
+            return;
+        }
+        const cur = cfg.charBindings?.[charKey];
+        if (cur && cur.corpus === cfg.corpus) {
+            delete cfg.charBindings[charKey];
+            saveSettingsDebounced();
+            updateBindingButton();
+            if (typeof toastr !== 'undefined') toastr.info(`已解除「${charKey}」的专属书库绑定`);
+        } else {
+            cfg.charBindings[charKey] = {
+                corpus: cfg.corpus || serverDefaultCorpus || '',
+                maxOrder: normalizeMaxOrder(cfg.maxOrder),
+                pov: cfg.pov || '',
+            };
+            saveSettingsDebounced();
+            updateBindingButton();
+            if (typeof toastr !== 'undefined') toastr.success(`已将当前书库绑定给「${charKey}」`);
+        }
     });
-    bind('#lorecodex_temperature', 'temperature', el => normalizeTemperature(el.val()));
-    bind('#lorecodex_reasoning_effort', 'reasoningEffort', el => normalizeReasoningEffort(el.val()));
-    bind('#lorecodex_xml_tag', 'customXmlTag');
-    bind('#lorecodex_header', 'customHeader');
-    bind('#lorecodex_priority_rule', 'customPriorityRule');
-    bind('#lorecodex_followup_hint', 'customFollowUpHint');
-    bind('#lorecodex_boiler_re', 'customBoilerplateRegex');
-    bind('#lorecodex_summary_re', 'customSummaryPriorityRegex');
+
+    $('#lorecodex_llm_btn').on('click', () => {
+        const mode = $('#lorecodex_llm_btn').data('mode');
+        if (mode === 'stop') {
+            if (localUpgAbortCtrl) localUpgAbortCtrl.abort();
+            return;
+        }
+        if (mode === 'import') {
+            openWorkbenchModal(cfg, { action: 'import' });
+            return;
+        }
+        if (mode === 'upgrade' || mode === 'open') {
+            openWorkbenchModal(cfg, { corpusId: cfg.corpus, action: 'upgrade' });
+            return;
+        }
+        runLocalLlmUpgrade(cfg.corpus);
+    });
+
+    $('#lorecodex_go_api').on('click', () => {
+        openWorkbenchModal(cfg, { action: 'settings' });
+    });
+
+    $('#lorecodex_open_ui').on('click', () => {
+        openWorkbenchModal(cfg);
+    });
 
     onWorkbenchClosedHook = async () => {
         const ok = await fetchCorporaAndHealth(cfg);
@@ -1846,219 +1379,52 @@ jQuery(async () => {
         renderConnStatus(ok);
         renderCorpusDropdown();
         syncUiFromCfg();
-        updateBindingLabel();
     };
 
-    $('#lorecodex_open_ui').on('click', () => {
-        openWorkbenchModal(cfg);
-    });
+    window.addEventListener('message', async (ev) => {
+        const iframe = document.getElementById('lorecodex_wb_iframe');
+        if (!iframe || ev.source !== iframe.contentWindow) return;
+        const msg = ev.data;
+        if (!msg || typeof msg !== 'object') return;
 
-    $('#lorecodex_server').on('change', async () => {
-        resolvedServerBase = '';
-        const ok = await fetchCorporaAndHealth(cfg);
-        renderConnStatus(ok);
-        renderCorpusDropdown();
-    });
-
-    $('#lorecodex_refresh_corpora').on('click', async () => {
-        const dot = $('#lorecodex_conn_dot');
-        dot.removeClass('ok err').addClass('wait');
-        $('#lorecodex_conn_text').text('正在刷新服务与书库...');
-        try {
-            resolvedServerBase = '';
-            await fetch(`${getServerBase(cfg)}/corpora/reload`, { method: 'POST' }).catch(() => null);
-            const ok = await fetchCorporaAndHealth(cfg);
-            await syncConfigFromServer();
-            renderConnStatus(ok);
-            renderCorpusDropdown();
-            syncUiFromCfg();
-            updateBindingLabel();
-        } catch (_) {
-            renderConnStatus(false);
-        }
-    });
-
-    $('#lorecodex_bind_char').on('click', () => {
-        const charKey = getActiveCharKey();
-        if (!charKey) {
-            toastr.warning('当前没有打开的角色卡对话');
-            return;
-        }
-        cfg.charBindings[charKey] = {
-            corpus: cfg.corpus || serverDefaultCorpus || '',
-            maxOrder: normalizeMaxOrder(cfg.maxOrder),
-            pov: cfg.pov || '',
-        };
-        saveSettingsDebounced();
-        updateBindingLabel();
-        toastr.success(`已为角色卡「${charKey}」绑定书库 ${cfg.charBindings[charKey].corpus}`);
-    });
-
-    $('#lorecodex_unbind_char').on('click', () => {
-        const charKey = getActiveCharKey();
-        if (charKey && cfg.charBindings[charKey]) {
-            delete cfg.charBindings[charKey];
+        if (msg.type === 'lorecodex:st-get-settings') {
+            ev.source.postMessage({ type: 'lorecodex:st-settings', settings: getStSettingsPayload() }, '*');
+        } else if (msg.type === 'lorecodex:st-save-settings' && msg.patch && typeof msg.patch === 'object') {
+            const p = msg.patch;
+            const prevLocalMode = cfg.localMode;
+            const prevServer = cfg.ragServer;
+            if (p.enabled !== undefined) cfg.enabled = Boolean(p.enabled);
+            if (p.localMode !== undefined) cfg.localMode = Boolean(p.localMode);
+            if (p.ragServer !== undefined) cfg.ragServer = String(p.ragServer || '').trim() || 'http://127.0.0.1:5240';
+            if (p.maxOrder !== undefined) cfg.maxOrder = normalizeMaxOrder(p.maxOrder);
+            if (p.maxScenes !== undefined) cfg.maxScenes = normalizeMaxScenes(p.maxScenes);
+            if (p.recentTurns !== undefined) cfg.recentTurns = Math.max(1, Number(p.recentTurns) || 5);
+            if (p.depth !== undefined) cfg.depth = Math.max(0, Number(p.depth) || 0);
+            if (p.pov !== undefined) cfg.pov = String(p.pov || '').trim();
+            if (p.customXmlTag !== undefined) cfg.customXmlTag = String(p.customXmlTag || '');
+            if (p.customHeader !== undefined) cfg.customHeader = String(p.customHeader || '');
+            if (p.customPriorityRule !== undefined) cfg.customPriorityRule = String(p.customPriorityRule || '');
+            if (p.customFollowUpHint !== undefined) cfg.customFollowUpHint = String(p.customFollowUpHint || '');
+            if (p.customBoilerplateRegex !== undefined) cfg.customBoilerplateRegex = String(p.customBoilerplateRegex || '');
+            if (p.customSummaryPriorityRegex !== undefined) cfg.customSummaryPriorityRegex = String(p.customSummaryPriorityRegex || '');
             saveSettingsDebounced();
-            updateBindingLabel();
-            toastr.info(`已解除「${charKey}」的专属绑定`);
-        }
-    });
-
-    $('#lorecodex_chat_model').on('input', function () {
-        const val = String($(this).val() || '').trim();
-        const sel = $('#lorecodex_model_select');
-        if (sel.is(':visible')) {
-            const hasOpt = sel.find('option').toArray().some(o => o.value === val);
-            sel.val(hasOpt ? val : '');
-        }
-    });
-
-    $('#lorecodex_model_select').on('change', async function () {
-        const picked = String($(this).val() || '').trim();
-        if (!picked) return;
-        cfg.chatModel = picked;
-        $('#lorecodex_chat_model').val(picked);
-        saveSettingsDebounced();
-        const synced = await syncConfigToServer({ silent: true });
-        $('#lorecodex_model_status').text(
-            synced
-                ? `已切换模型为：${picked}（已自动同步到服务端 config.json）`
-                : `已选择模型：${picked}（本地已生效）`
-        );
-    });
-
-    $('#lorecodex_fetch_models').on('click', async () => {
-        const btn = $('#lorecodex_fetch_models');
-        const st = $('#lorecodex_model_status');
-        btn.prop('disabled', true);
-        st.text('正在拉取模型列表...');
-        try {
-            let models = [];
-            if (!isUsingLocalEngine(cfg) && lastHealthInfo?.ok) {
-                const r = await fetch(`${getServerBase(cfg)}/models`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ baseUrl: cfg.chatBase, apiKey: cfg.chatKey }),
-                });
-                const j = await r.json();
-                if (!j.ok) throw new Error(j.error || 'failed');
-                models = Array.isArray(j.models) ? j.models : [];
-            } else {
-                const cleanBase = String(cfg.chatBase || '')
-                    .trim()
-                    .replace(/\/+$/, '')
-                    .replace(/\/(?:chat\/completions|models)$/i, '')
-                    .replace(/\/+$/, '');
-                if (!cleanBase || !cfg.chatKey) {
-                    throw new Error('请先填写 API Base URL 与 API Key');
-                }
-                const r = await fetch(`${cleanBase}/models`, {
-                    headers: { Authorization: `Bearer ${cfg.chatKey.trim()}` },
-                });
-                if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                const j = await r.json();
-                const rawList = Array.isArray(j.data) ? j.data : Array.isArray(j.models) ? j.models : [];
-                models = [
-                    ...new Set(
-                        rawList
-                            .map((x) => (typeof x === 'string' ? x : x?.id || String(x?.name || '').replace(/^models\//, '')))
-                            .map((s) => String(s || '').trim())
-                            .filter(Boolean)
-                    ),
-                ];
+            if (prevLocalMode !== cfg.localMode || prevServer !== cfg.ragServer) {
+                resolvedServerBase = '';
+                const ok = await fetchCorporaAndHealth(cfg);
+                renderConnStatus(ok);
+                renderCorpusDropdown();
             }
-            const sel = $('#lorecodex_model_select').empty();
-            sel.append(`<option value="">-- 点击此处从已拉取的 ${models.length} 个模型中选择 --</option>`);
-            for (const m of models) {
-                sel.append(`<option value="${escHtml(m)}" ${m === cfg.chatModel ? 'selected' : ''}>${escHtml(m)}</option>`);
+            syncUiFromCfg();
+            ev.source.postMessage({ type: 'lorecodex:st-settings-saved', ok: true, settings: getStSettingsPayload() }, '*');
+        } else if (msg.type === 'lorecodex:st-corpus-changed' && msg.corpusId) {
+            const cid = String(msg.corpusId).trim();
+            if (cid) {
+                cfg.corpus = cid;
+                saveSettingsDebounced();
+                $('#lorecodex_wb_corpus_pill').text(corporaMap.get(cid)?.name || cid);
+                renderCorpusDropdown();
+                syncUiFromCfg();
             }
-            if (models.length > 0) {
-                sel.show();
-                if (!cfg.chatModel || !models.includes(cfg.chatModel)) {
-                    cfg.chatModel = models[0];
-                    $('#lorecodex_chat_model').val(models[0]);
-                    sel.val(models[0]);
-                    saveSettingsDebounced();
-                    if (!isUsingLocalEngine(cfg) && lastHealthInfo?.ok) {
-                        await syncConfigToServer({ silent: true });
-                    }
-                }
-            }
-            st.text(
-                models.length > 0
-                    ? `已拉取 ${models.length} 个模型，可在上方下拉框直接切换（当前：${cfg.chatModel || '未选'}）`
-                    : '接口返回了 0 个模型，请直接在输入框填写模型名称'
-            );
-            if (typeof toastr !== 'undefined') toastr.success(`已拉取 ${models.length} 个模型`);
-        } catch (e) {
-            st.text('拉取失败: ' + e.message);
-            if (typeof toastr !== 'undefined') toastr.error('拉取模型失败: ' + e.message);
-        } finally {
-            btn.prop('disabled', false);
-        }
-    });
-
-    $('#lorecodex_save_srv').on('click', async () => {
-        await syncConfigToServer({ silent: false });
-    });
-
-    $('#lorecodex_test_query').on('keydown', (e) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            $('#lorecodex_test_btn').trigger('click');
-        }
-    });
-
-    $('#lorecodex_test_btn').on('click', async () => {
-        const btn = $('#lorecodex_test_btn');
-        if (btn.prop('disabled')) return;
-        const q = String($('#lorecodex_test_query').val() || '').trim();
-        if (!q) {
-            $('#lorecodex_status').text('请输入测试检索问题');
-            return;
-        }
-        const st = $('#lorecodex_status');
-        btn.prop('disabled', true);
-        st.text('正在执行树形 Agent 检索...');
-        try {
-            const ctx = getContext();
-            const j = await executeTreeSearchRequest(cfg, {
-                corpus: cfg.corpus || undefined,
-                query: q,
-                onDemand: q,
-                recentChat: collectRecentChat(ctx?.chat || [], cfg.recentTurns || 5),
-                sceneAnchor: { charName: ctx?.name2 || '', userName: ctx?.name1 || '旅人', pov: cfg.pov || '' },
-                maxScenes: normalizeMaxScenes(cfg.maxScenes),
-                maxOrder: normalizeMaxOrder(cfg.maxOrder) || undefined,
-                pov: cfg.pov || '',
-                apiConfig: buildApiConfig(cfg),
-            });
-            lastInjectionSnapshot = {
-                corpus_id: j.corpus_id || cfg.corpus,
-                corpus_name: j.corpus_name || corporaMap.get(j.corpus_id || cfg.corpus)?.name || cfg.corpus,
-                skip: Boolean(j.skip),
-                reason: j.reason || '',
-                took_ms: j.took_ms,
-                turns: j.turns,
-                max_order: j.max_order,
-                guide: j.guide || '',
-                scenes: j.scenes || [],
-                outlines: j.outlines || [],
-                run_id: j.run_id || '',
-                prompt_chars: (j.guide || '').length + (j.scenes || []).reduce((a, s) => a + (s.chars || 0), 0),
-            };
-            renderLastPreview(cfg);
-            const lines = [
-                `[${j.corpus_name || j.corpus_id}] 耗时: ${j.took_ms}ms | 轮次: ${j.turns} | skip=${j.skip}${j.max_order ? ' | 序<=' + j.max_order : ''}`,
-            ];
-            for (const t of j.trace || []) lines.push('  ' + t);
-            if (j.guide) lines.push('导读: ' + j.guide);
-            for (const s of j.scenes || []) lines.push(`[scene ${s.node_id} | ${s.arc_title}] ${s.title} (${s.chars}字)`);
-            st.text(lines.join('\n'));
-        } catch (e) {
-            st.text('检索失败: ' + e.message);
-        } finally {
-            btn.prop('disabled', false);
         }
     });
 });

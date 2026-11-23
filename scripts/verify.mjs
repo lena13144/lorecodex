@@ -1122,7 +1122,24 @@ async function main() {
       assert(listAfter.data.corpora.some((c) => c.id === tmpCorpusId), 'Imported corpus must appear in /corpora');
       const grepImported = await getJson(`/tree-grep?corpus=${tmpCorpusId}&q=${encodeURIComponent('星图罗盘')}`);
       assert(grepImported.data.total >= 1, 'Imported corpus must be searchable via /tree-grep');
-      console.log(`  PASS: uploaded & built "${tmpCorpusId}" via job ${jobId} cleanly`);
+
+      const foreignDel = await fetch(`${BASE}/corpora/${tmpCorpusId}`, {
+        method: 'DELETE',
+        headers: { Origin: 'https://evil.example', Connection: 'close' },
+      });
+      assert.strictEqual(foreignDel.status, 403, 'Foreign origin DELETE /corpora/:id must be blocked with 403');
+
+      const delRes = await fetch(`${BASE}/corpora/${tmpCorpusId}`, {
+        method: 'DELETE',
+        headers: { Connection: 'close' },
+      });
+      const delData = await delRes.json();
+      assert.strictEqual(delRes.status, 200, `DELETE /corpora/:id failed: ${JSON.stringify(delData)}`);
+      assert.strictEqual(delData.ok, true);
+      assert.strictEqual(delData.deleted, tmpCorpusId);
+      assert(!delData.corpora.some((c) => c.id === tmpCorpusId), 'Deleted corpus must be removed from /corpora');
+      assert(!fs.existsSync(tmpCorpusDir), 'Deleted corpus directory must be removed from disk');
+      console.log(`  PASS: uploaded, built, and deleted "${tmpCorpusId}" via job ${jobId} & DELETE /corpora/:id cleanly`);
     } finally {
       fs.rmSync(tmpCorpusDir, { recursive: true, force: true });
       await postJson('/corpora/reload', {});

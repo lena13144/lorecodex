@@ -16,18 +16,72 @@ import {
   closeModal,
   openSettingsModal,
   openCorpusModal,
+  openLibraryModal,
   openImportModal,
   openCommandPalette,
+  openStSettingsModal,
 } from './modals.js';
 
 function renderCorpusSelect() {
   const sel = $('#corpusSelect');
+  if (!state.corpora.length) {
+    sel.innerHTML = '<option value="">（暂无书库，请先导入）</option>';
+    return;
+  }
   sel.innerHTML = state.corpora
     .map(
       (c) =>
-        `<option value="${esc(c.id)}" ${c.id === state.corpusId ? 'selected' : ''}>${esc(c.name)} (${c.stats.arcs}卷)</option>`
+        `<option value="${esc(c.id)}" ${c.id === state.corpusId ? 'selected' : ''}>${esc(c.name)} (${c.stats?.arcs || 0}卷)</option>`
     )
     .join('');
+}
+
+function updateQuickLlmButton(st = {}) {
+  const btn = $('#llmBuildQuickBtn');
+  if (!btn) return;
+  const total = Number(st.scenes || 0);
+  const done = Number(st.llm_scenes || 0);
+  if (!state.corpusId || total === 0) {
+    btn.style.display = 'none';
+    return;
+  }
+  if (done < total) {
+    btn.style.display = '';
+    btn.textContent = `LLM 建目录 (${done}/${total})`;
+    btn.classList.add('btn-seal-outline');
+  } else {
+    btn.style.display = 'none';
+    btn.classList.remove('btn-seal-outline');
+  }
+}
+
+function renderEmptyLibraryState() {
+  state.corpusId = '';
+  state.corpusMeta = null;
+  state.index = null;
+  state.arcMap.clear();
+  state.sceneMap.clear();
+  renderCorpusSelect();
+  updateQuickLlmButton({});
+  $('#brandTitle').querySelector('span').textContent = 'LoreCodex';
+  document.title = 'LoreCodex — 典籍阅读与树检索工作台';
+  $('#statMeta').textContent = '当前书库为空，点击「导入」添加小说或世界书';
+  const tocList = $('#tocList');
+  if (tocList) tocList.innerHTML = '<div style="padding:18px 12px;color:var(--ink-muted);font-size:12px;">暂无书库目录</div>';
+  const sheet = $('#bookSheet');
+  if (sheet) {
+    sheet.innerHTML = `
+      <div class="cover-hero" style="padding:48px 16px;">
+        <h1 class="book-h1" style="font-size:24px;">书库目前为空</h1>
+        <p class="prose" style="max-width:440px;margin:10px auto 18px;text-align:center;color:var(--ink-soft);font-size:14px;">
+          点击下方「导入新书」上传小说 (.txt / .md / .epub)、世界书 (.json) 或 .lorepack.json 即可开始。
+        </p>
+        <div class="quick-actions">
+          <button id="emptyImportBtn" class="btn-seal">导入新书</button>
+        </div>
+      </div>`;
+    $('#emptyImportBtn')?.addEventListener('click', () => openImportModal());
+  }
 }
 
 async function loadCorpusIndex(cid) {
@@ -45,6 +99,7 @@ async function loadCorpusIndex(cid) {
   $('#brandTitle').querySelector('span').textContent = `LoreCodex · ${corpusName()}`;
   document.title = `${corpusName()} — LoreCodex 工作台`;
   $('#statMeta').textContent = `全录 ${st.arcs || 0} 卷 · ${st.scenes || 0} 幕 · ${fmtChars(st.total_chars || 0)} · 模型 ${state.modelName}`;
+  updateQuickLlmButton(st);
 
   const sg = idx.corpus?.spoiler_gate || {};
   const maxAvailable = st.max_order || state.corpusMeta?.stats?.max_order || 0;
@@ -108,6 +163,11 @@ async function switchCorpus(cid, { keepRun = false } = {}) {
   $('#qMaxScenes').value = 0;
 
   renderCorpusSelect();
+  if (document.body.classList.contains('embed-mode') && window.parent !== window && cid) {
+    try {
+      window.parent.postMessage({ type: 'lorecodex:st-corpus-changed', corpusId: cid }, '*');
+    } catch (_) {}
+  }
   await loadCorpusIndex(cid);
   renderPresets();
 }
@@ -182,9 +242,11 @@ Object.assign(actions, {
   openArcRead,
   setMaxOrder,
   switchCorpus,
+  renderEmptyLibraryState,
   refreshModelMeta,
   openSettingsModal,
   openCorpusModal,
+  openLibraryModal,
   openImportModal,
   openCommandPalette,
 });
@@ -358,7 +420,10 @@ function wireEvents() {
   });
 
   $('#settingsBtn').addEventListener('click', openSettingsModal);
-  $('#corpusCfgBtn').addEventListener('click', openCorpusModal);
+  $('#stSettingsBtn')?.addEventListener('click', openStSettingsModal);
+  $('#corpusCfgBtn').addEventListener('click', () => openCorpusModal('basic'));
+  $('#libraryBtn')?.addEventListener('click', openLibraryModal);
+  $('#llmBuildQuickBtn')?.addEventListener('click', () => openCorpusModal('upgrade'));
   $('#importBtn').addEventListener('click', openImportModal);
   $('#cmdPaletteBtn').addEventListener('click', openCommandPalette);
 
@@ -385,8 +450,13 @@ function wireEvents() {
 
 async function init() {
   const urlParams = new URLSearchParams(window.location.search);
-  if (urlParams.get('embed') === '1') {
+  const isEmbed = urlParams.get('embed') === '1';
+  if (isEmbed) {
     document.body.classList.add('embed-mode');
+    if (window.parent !== window) {
+      const stBtn = $('#stSettingsBtn');
+      if (stBtn) stBtn.style.display = '';
+    }
   }
   setMobilePane('stage');
 
@@ -396,6 +466,7 @@ async function init() {
   const hashRunMatch = String(window.location.hash || '').match(/run=([a-zA-Z0-9_-]+)/);
   const hashRunId = hashRunMatch ? hashRunMatch[1] : '';
   const reqCorpus = String(urlParams.get('corpus') || '').trim();
+  const reqAction = String(urlParams.get('action') || '').trim().toLowerCase();
 
   try {
     const [h, c] = await Promise.all([fetchHealth(), fetchCorpora()]);
@@ -408,6 +479,12 @@ async function init() {
     if (target) await switchCorpus(target);
     else $('#statMeta').textContent = '未发现语料包，请点击「导入建树」';
     await pollRuns({ autoSelectNewest: Boolean(hashRunId), preferHashRunId: hashRunId });
+
+    if (reqAction === 'settings') openSettingsModal();
+    else if (reqAction === 'library') openLibraryModal();
+    else if (reqAction === 'import') openImportModal();
+    else if (reqAction === 'upgrade' && state.corpusId) openCorpusModal('upgrade');
+    else if (reqAction === 'st-settings' && isEmbed && window.parent !== window) openStSettingsModal();
   } catch (e) {
     $('#statMeta').textContent = '连接异常：' + e.message;
   }

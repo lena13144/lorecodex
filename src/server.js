@@ -468,7 +468,7 @@ const server = http.createServer(async (req, res) => {
       'Content-Type': 'application/json; charset=utf-8',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     });
     res.end(JSON.stringify(obj));
   };
@@ -477,7 +477,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     });
     return res.end();
   }
@@ -532,7 +532,7 @@ const server = http.createServer(async (req, res) => {
     return send({
       ok: true,
       engine: 'lorecodex',
-      version: '2.0.0',
+      version: '2.2.0',
       mode: 'tree-only',
       boot_ms: bootMs,
       defaultCorpus: activeId,
@@ -691,6 +691,35 @@ const server = http.createServer(async (req, res) => {
       'Access-Control-Allow-Origin': '*',
     });
     return res.end(JSON.stringify(pack));
+  }
+
+  if (req.method === 'DELETE' && pathname.startsWith('/corpora/') && !pathname.slice('/corpora/'.length).includes('/')) {
+    if (!isLocalOrAllowedOrigin(req.headers.origin, req)) {
+      return send({ error: 'origin not allowed' }, 403);
+    }
+    const cid = decodeURIComponent(pathname.slice('/corpora/'.length)).trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(cid)) {
+      return send({ error: 'invalid corpus id' }, 400);
+    }
+    if (!corpusManager.hasCorpus(cid)) {
+      return send({ error: `corpus "${cid}" not found` }, 404);
+    }
+    const activeJob = importJobs.find((j) => j.status === 'running' && j.corpusId === cid);
+    if (activeJob) {
+      return send({ error: `书库 "${cid}" 正在执行任务 (${activeJob.id})，请先暂停或等待完成后再删除` }, 409);
+    }
+    const targetDir = path.resolve(CORPORA_DIR, cid);
+    const corporaPrefix = CORPORA_DIR.endsWith(path.sep) ? CORPORA_DIR : CORPORA_DIR + path.sep;
+    if (!targetDir.startsWith(corporaPrefix) || targetDir === CORPORA_DIR) {
+      return send({ error: 'forbidden' }, 403);
+    }
+    try {
+      fs.rmSync(targetDir, { recursive: true, force: true });
+      const list = corpusManager.reload();
+      return send({ ok: true, deleted: cid, defaultCorpus: resolveDefaultCorpusId(), corpora: list });
+    } catch (e) {
+      return send({ error: e.message }, 500);
+    }
   }
 
   if (req.method === 'GET' && pathname.startsWith('/corpora/')) {
