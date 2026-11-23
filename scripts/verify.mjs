@@ -48,7 +48,7 @@ async function waitForServer(timeoutMs = 8000) {
 }
 
 async function getJson(urlPath, headers = {}) {
-  const r = await fetch(`${BASE}${urlPath}`, { headers });
+  const r = await fetch(`${BASE}${urlPath}`, { headers: { Connection: 'close', ...headers } });
   const data = await r.json().catch(() => ({}));
   return { status: r.status, ok: r.ok, data };
 }
@@ -169,6 +169,180 @@ with zipfile.ZipFile(epub_path, "w") as zf:
     assert(wnCh1.startsWith('清晨雾气慢慢散开'), `Glued prefix must be stripped cleanly, got: ${wnCh1.slice(0, 40)}`);
     assert(!wnCh1.includes('爱下电子书') && !wnCh1.includes('正文卷'), 'Ad lines & glued markers removed');
     assert(wnIdx.arcs[0].characters.includes('林墨'), 'Offline heuristic cast extraction captures protagonist 林墨');
+
+    // Issue #2 regression: stray single-# export notes must not fracture series by default,
+    // while --h1-is-volume still opts in to arbitrary H1 volume headings.
+    const dirtyH1Path = path.join(tmpDir, 'dirty_h1.md');
+    fs.writeFileSync(
+      dirtyH1Path,
+      [
+        '# 条目名核验: 星港档案:2026年夏季活动"魔方演习"',
+        '## 第一章 开场',
+        '这是第一章的正文段落，内容足够长以便被识别为正常章节正文。'.repeat(12),
+        '# 说明: 以下为逐字原文，未做改写',
+        '# 第1集《灰骑士的勋章1》 段号 506901 共 119 行',
+        '# 阿斯缇亚（hero_id 1080）官方图鉴导出',
+        '## 第二章 中段',
+        '这是第二章的正文段落，角色们在雨夜的观测站里核对信号记录。'.repeat(12),
+        '## 第三章 收束',
+        '这是第三章的正文段落，黎明前的港湾恢复了短暂的宁静。'.repeat(12),
+      ].join('\n'),
+      'utf8'
+    );
+    execFileSync(
+      PYTHON_BIN,
+      [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--input',
+        dirtyH1Path,
+        '--corpus-id',
+        'dirty-h1-default',
+        '--out-dir',
+        outDir,
+        '--min-chars',
+        '50',
+        '--no-llm',
+      ],
+      { stdio: 'inherit' }
+    );
+    const dirtyH1Idx = JSON.parse(fs.readFileSync(path.join(outDir, 'dirty-h1-default', 'tree_index.json'), 'utf8'));
+    const dirtyH1Series = [...new Set(dirtyH1Idx.arcs.map((a) => a.series))];
+    assert.strictEqual(dirtyH1Idx.arcs.length, 3, 'Issue #2: dirty H1 notes must still parse 3 chapters');
+    assert.deepStrictEqual(dirtyH1Series, ['正文卷'], `Issue #2: stray # lines must not split series, got ${JSON.stringify(dirtyH1Series)}`);
+
+    const explicitH1Path = path.join(tmpDir, 'explicit_h1.md');
+    fs.writeFileSync(
+      explicitH1Path,
+      [
+        '# 序幕篇',
+        '## 第1章 启程',
+        '序幕篇的第一章正文内容，讲述旅人踏上星港之旅。'.repeat(10),
+        '# 终焉篇',
+        '## 第2章 归途',
+        '终焉篇的第二章正文内容，讲述星门闭合后的尾声。'.repeat(10),
+      ].join('\n'),
+      'utf8'
+    );
+    execFileSync(
+      PYTHON_BIN,
+      [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--input',
+        explicitH1Path,
+        '--corpus-id',
+        'explicit-h1-optin',
+        '--out-dir',
+        outDir,
+        '--min-chars',
+        '50',
+        '--h1-is-volume',
+        '--no-llm',
+      ],
+      { stdio: 'inherit' }
+    );
+    const explicitH1Idx = JSON.parse(fs.readFileSync(path.join(outDir, 'explicit-h1-optin', 'tree_index.json'), 'utf8'));
+    assert.deepStrictEqual(
+      explicitH1Idx.arcs.map((a) => a.series),
+      ['序幕篇', '终焉篇'],
+      '--h1-is-volume must allow arbitrary single-# headings as series names'
+    );
+
+    // Issue #3 regression: scraped MediaWiki JS/CSS blocks & --strip-block must be stripped
+    // cleanly without swallowing the next heading, and --no-clean-ads must warn via preflight.
+    const wikiNoisePath = path.join(tmpDir, 'wiki_noise.md');
+    const jsBodyLines = [];
+    for (let i = 0; i < 45; i++) {
+      jsBodyLines.push(`  const ele${i} = container.find(".video-${i}"); ele${i}.height(ele${i}.width() * 9 / 16 + barHeight);`);
+    }
+    fs.writeFileSync(
+      wikiNoisePath,
+      [
+        '## 第一章 开场',
+        '第一章正文内容：指挥官在夜色下检视前线传回的侦察简报，确认通信链路稳定。'.repeat(12),
+        '(window.RLQ ||= []).push([[ "mediawiki.base", "jquery" ], async () => {',
+        ...jsBodyLines,
+        '  toggleButton.text("隐藏视频");',
+        '  lazyLoadObserver.observe(iframe[0]);',
+        '}]);',
+        'html > body > .navpopup .bilibili-video-container::before {',
+        '  content: "请不要在注释里使用 BilibiliVideo 模板";',
+        '  display: block;',
+        '}',
+        '.generic-player-shell::before {',
+        '  position: relative;',
+        '  display: inline-block;',
+        '}',
+        'CUSTOM_WIDGET_BEGIN',
+        'const customNoise = "should be stripped by --strip-block";',
+        'CUSTOM_WIDGET_END',
+        '## 第二章 喘息（Gasp）',
+        '第二章正文内容：暴雨停歇之后，众人终于在废墟中找到了保存完好的黑匣子。'.repeat(12),
+      ].join('\n'),
+      'utf8'
+    );
+    const cleanWikiOut = execFileSync(
+      PYTHON_BIN,
+      [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--input',
+        wikiNoisePath,
+        '--corpus-id',
+        'wiki-noise-cleaned',
+        '--out-dir',
+        outDir,
+        '--min-chars',
+        '200',
+        '--target-chars',
+        '800',
+        '--max-chars',
+        '3000',
+        '--strip-block',
+        'start=^CUSTOM_WIDGET_BEGIN||end=^CUSTOM_WIDGET_END',
+        '--no-llm',
+      ],
+      { encoding: 'utf8' }
+    );
+    assert(cleanWikiOut.includes('[build_novel] cleaned: stripped'), `Expected cleaning summary in stdout, got:\n${cleanWikiOut}`);
+    const wikiCleanIdx = JSON.parse(fs.readFileSync(path.join(outDir, 'wiki-noise-cleaned', 'tree_index.json'), 'utf8'));
+    const wikiCleanTxt = JSON.parse(fs.readFileSync(path.join(outDir, 'wiki-noise-cleaned', 'tree_texts.json'), 'utf8'));
+    assert.strictEqual(wikiCleanIdx.arcs.length, 2, 'Issue #3: heading after JS/CSS noise must not be swallowed');
+    assert.strictEqual(wikiCleanIdx.arcs[1].title, '第二章 喘息（Gasp）', 'Issue #3: second chapter title must be preserved intact');
+    const cleanSceneCount = wikiCleanIdx.arcs.reduce((s, a) => s + a.scenes.length, 0);
+    assert.strictEqual(cleanSceneCount, 2, `Issue #3: expected 2 clean prose scenes, got ${cleanSceneCount}`);
+    const allCleanWikiText = Object.values(wikiCleanTxt).map((t) => t.text).join('\n');
+    assert(
+      !allCleanWikiText.includes('window.RLQ') &&
+        !allCleanWikiText.includes('BilibiliVideo') &&
+        !allCleanWikiText.includes('generic-player-shell') &&
+        !allCleanWikiText.includes('customNoise'),
+      'Issue #3: stripped JS/CSS/generic/custom blocks must not leak into tree_texts.json'
+    );
+
+    const rawWikiOut = execFileSync(
+      PYTHON_BIN,
+      [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--input',
+        wikiNoisePath,
+        '--corpus-id',
+        'wiki-noise-raw',
+        '--out-dir',
+        outDir,
+        '--min-chars',
+        '200',
+        '--target-chars',
+        '800',
+        '--max-chars',
+        '3000',
+        '--no-clean-ads',
+        '--no-llm',
+      ],
+      { encoding: 'utf8' }
+    );
+    assert(
+      rawWikiOut.includes('low_cjk(<20%)=') && rawWikiOut.includes('preflight warning:'),
+      `Issue #3: --no-clean-ads on dirty wiki corpus must emit low_cjk preflight warning, got:\n${rawWikiOut}`
+    );
 
     // SillyTavern V2 Character Card character_book + disabled & CSS/macro filtering
     const cardPath = path.join(tmpDir, 'char_card_v2.json');
@@ -426,9 +600,6 @@ with zipfile.ZipFile(epub_path, "w") as zf:
       mockCounts.leaf = 0;
       mockCounts.arc = 0;
       mockCounts.seriesMeta = 0;
-      // leaf failures degrade to heuristics by design, so the diagnosis lands in the
-      // warn line rather than in a thrown error; either surface is fine as long as it
-      // names the real cause instead of a raw TypeError.
       const emptyRun = await execFileAsync(PYTHON_BIN, [
         path.join(ROOT, 'builders', 'build_novel.py'),
         '--upgrade',
@@ -459,6 +630,42 @@ with zipfile.ZipFile(epub_path, "w") as zf:
         !emptyErrText.includes('expected string or bytes-like object'),
         'empty LLM content must not surface the raw re.search TypeError'
       );
+
+      // Preflight circuit-breaker: noisy corpus must refuse to spend LLM calls unless --allow-noisy is passed
+      mockEmptyContent = false;
+      mockCounts.leaf = 0;
+      mockCounts.arc = 0;
+      mockCounts.seriesMeta = 0;
+      let breakerErr = '';
+      try {
+        await execFileAsync(PYTHON_BIN, [
+          path.join(ROOT, 'builders', 'build_novel.py'),
+          '--input',
+          wikiNoisePath,
+          '--corpus-id',
+          'wiki-noise-breaker',
+          '--out-dir',
+          outDir,
+          '--config',
+          mockCfgPath,
+          '--min-chars',
+          '200',
+          '--target-chars',
+          '800',
+          '--max-chars',
+          '3000',
+          '--no-clean-ads',
+          '--workers',
+          '1',
+        ]);
+      } catch (e) {
+        breakerErr = String((e && (e.stderr || e.stdout || e.message)) || '');
+      }
+      assert(
+        breakerErr.includes('Refusing to spend LLM calls') && breakerErr.includes('--allow-noisy'),
+        `Preflight circuit-breaker must abort noisy LLM build with --allow-noisy hint, got: ${breakerErr.slice(0, 400)}`
+      );
+      assert.strictEqual(mockCounts.leaf, 0, 'Preflight circuit-breaker must abort before sending any LLM request');
     } finally {
       mockSrv.close();
     }
@@ -962,44 +1169,48 @@ async function main() {
     testHygieneAndSyntax();
 
     console.log('\n[9/9] Checking live LLM regression eligibility (demo-chronicles)...');
-    const liveCfg = (await getJson('/config')).data || {};
-    const hasLiveKey = liveCfg.chatKey === '***';
-    if (OFFLINE || !hasLiveKey) {
-      console.log(`  [SKIP] Live LLM checks skipped (${OFFLINE ? '--offline mode' : 'no chatKey configured'})`);
+    if (OFFLINE) {
+      console.log('  [SKIP] Live LLM checks skipped (--offline mode)');
     } else {
-      const demo_1 = await postJson('/tree-search', {
-        corpus: 'demo-chronicles',
-        maxOrder: 3,
-        query: '苏璃的真正身份和苍穹之心是什么？',
-        sceneAnchor: { charName: '灰烬星港', userName: '旅人' },
-        maxScenes: 0,
-      });
-      assert.strictEqual(demo_1.status, 200);
-      assert(
-        (demo_1.data.scenes || []).every((s) => s.order === null || s.order <= 3),
-        'Demo #1 must never return scenes with order > 3'
-      );
-      assert(
-        !String(demo_1.data.guide || '').includes('初代星门守望者'),
-        `Demo #1 guide leaked spoiler: ${demo_1.data.guide}`
-      );
-      console.log(`  PASS Demo #1 (Spoiler Gate order<=3): skip=${demo_1.data.skip}, scenes=${demo_1.data.scenes.length}, took=${demo_1.data.took_ms}ms`);
+      const liveCfg = (await getJson('/config')).data || {};
+      const hasLiveKey = liveCfg.chatKey === '***';
+      if (!hasLiveKey) {
+        console.log('  [SKIP] Live LLM checks skipped (no chatKey configured)');
+      } else {
+        const demo_1 = await postJson('/tree-search', {
+          corpus: 'demo-chronicles',
+          maxOrder: 3,
+          query: '苏璃的真正身份和苍穹之心是什么？',
+          sceneAnchor: { charName: '灰烬星港', userName: '旅人' },
+          maxScenes: 0,
+        });
+        assert.strictEqual(demo_1.status, 200);
+        assert(
+          (demo_1.data.scenes || []).every((s) => s.order === null || s.order <= 3),
+          'Demo #1 must never return scenes with order > 3'
+        );
+        assert(
+          !String(demo_1.data.guide || '').includes('初代星门守望者'),
+          `Demo #1 guide leaked spoiler: ${demo_1.data.guide}`
+        );
+        console.log(`  PASS Demo #1 (Spoiler Gate order<=3): skip=${demo_1.data.skip}, scenes=${demo_1.data.scenes.length}, took=${demo_1.data.took_ms}ms`);
 
-      const demo_2 = await postJson('/tree-search', {
-        corpus: 'demo-chronicles',
-        maxOrder: 6,
-        onDemand: '苏璃的真正身份以及银鸢号推进器参数',
-        query: '苏璃的真正身份以及银鸢号推进器参数',
-        sceneAnchor: { charName: '灰烬星港', userName: '旅人' },
-        maxScenes: 0,
-      });
-      assert.strictEqual(demo_2.status, 200);
-      assert.strictEqual(demo_2.data.skip, false, 'Demo #2 must not skip');
-      const hitStory = demo_2.data.scenes.some((s) => s.order === 5 || s.text.includes('初代星门守望者'));
-      const hitLore = demo_2.data.scenes.some((s) => s.category === '档案设定' || s.text.includes('风神-IV型'));
-      assert(hitStory, 'Demo #2 should retrieve Ch.5 secret reveal');
-      assert(hitLore, 'Demo #2 should retrieve merged worldbook thruster specs');
-      console.log(`  PASS Demo #2 (Unlocked + Merged Lore): ${demo_2.data.scenes.length} scenes in ${demo_2.data.took_ms}ms`);
+        const demo_2 = await postJson('/tree-search', {
+          corpus: 'demo-chronicles',
+          maxOrder: 6,
+          onDemand: '苏璃的真正身份以及银鸢号推进器参数',
+          query: '苏璃的真正身份以及银鸢号推进器参数',
+          sceneAnchor: { charName: '灰烬星港', userName: '旅人' },
+          maxScenes: 0,
+        });
+        assert.strictEqual(demo_2.status, 200);
+        assert.strictEqual(demo_2.data.skip, false, 'Demo #2 must not skip');
+        const hitStory = demo_2.data.scenes.some((s) => s.order === 5 || s.text.includes('初代星门守望者'));
+        const hitLore = demo_2.data.scenes.some((s) => s.category === '档案设定' || s.text.includes('风神-IV型'));
+        assert(hitStory, 'Demo #2 should retrieve Ch.5 secret reveal');
+        assert(hitLore, 'Demo #2 should retrieve merged worldbook thruster specs');
+        console.log(`  PASS Demo #2 (Unlocked + Merged Lore): ${demo_2.data.scenes.length} scenes in ${demo_2.data.took_ms}ms`);
+      }
     }
 
     console.log(`\nALL LORECODEX VERIFICATION CHECKS PASSED! (${OFFLINE ? 'offline' : 'full'})`);

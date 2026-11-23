@@ -35,14 +35,20 @@ CN_NUM_MAP = {
 }
 
 VOL_RE = re.compile(
-    r"^(?:#\s+(.+)|"
+    r"^(?:#\s+)?"
+    r"(?:"
     r"第([零〇一二三四五六七八九十百千万两\d]+)[卷部篇册集](?:[\s　:：\-—\.、,，]+.*)?|"
     r"[卷部]([零〇一二三四五六七八九十两\d]+)(?:[\s　:：\-—\.、]+.*)?|"
     r"(?:Volume|Vol\.?|Book|Part)\s+([IVXLCDM\d]+)(?:[:.\-\s]+.*)?)$",
     re.IGNORECASE,
 )
 
-VOL_TEASER_EXCLUDE_RE = re.compile(r"敬请期待|·完$|完结|求订阅|求月票|求推荐|感谢大家|新书|感言|音乐|曲目|攫欝")
+H1_VOL_RE = re.compile(r"^#\s+(.+)$")
+
+VOL_TEASER_EXCLUDE_RE = re.compile(
+    r"敬请期待|·完$|完结|求订阅|求月票|求推荐|感谢大家|新书|感言|音乐|曲目|攫欝|"
+    r"(?:段号|行号|节点)\s*[:：=]?\s*\d+|共\s*\d+\s*[行字页条]|hero_id"
+)
 
 CHAP_RE = re.compile(
     r"^(?:##\s+(.+)|"
@@ -61,6 +67,305 @@ AD_LINE_RE = re.compile(
 )
 
 SCENE_BREAK_RE = re.compile(r"^(?:\*\s*\*\s*\*|-{3,}|={3,}|—{3,}|◆+|◇+|【场景切换】)$")
+
+CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+MD_HEADING_RE = re.compile(r"^#{1,6}\s+\S")
+WEB_TAG_START_RE = re.compile(r"^<(script|style)(?:\s[^>]*)?>", re.IGNORECASE)
+WEB_CODE_START_RE = re.compile(
+    r"^(?:"
+    r"\(\s*window\.[A-Za-z_$][\w$]*\s*(?:\|\|=|\|\|)\s*\[\s*\]\s*\)\.push\s*\(|"
+    r"window\.[A-Za-z_$][\w$]*\s*=\s*window\.[A-Za-z_$][\w$]*|"
+    r"mw\.(?:hook|loader|config)\s*\(|"
+    r"RLQ\.push\s*\(|"
+    r"@(?:keyframes|media|supports|import|charset)\b|"
+    r"html\s*>\s*body\s*>|"
+    r"\.mw-[a-zA-Z0-9_-]+|"
+    r"\$\(\s*(?:function\b|document\b|\(\s*\)\s*=>)|"
+    r"document\.(?:addEventListener|querySelector|getElementById)\s*\("
+    r")"
+)
+GENERIC_CODE_LINE_RE = re.compile(
+    r"(?:"
+    r"^\s*(?:const|let|var|function|async\s+function|return|import|export)\s+[A-Za-z_$]|"
+    r"^\s*(?:if|else\s+if|for|while|switch|catch)\s*\([^)]*\)\s*\{|"
+    r"^\s*[\}\]\)]+;?\s*$|"
+    r"^\s*[.#][A-Za-z_-][\w-]*(?:[\s>+~.:#\[\]=*\"'\w-])*\{\s*$|"
+    r"^\s*[a-z-]{2,24}\s*:\s*[^:\n]{1,120};\s*$|"
+    r"=>\s*\{|"
+    r"\.\w+\([^)]*\);\s*$"
+    r")"
+)
+
+
+def _count_cjk(text):
+    return len(CJK_CHAR_RE.findall(text)) if text else 0
+
+
+def _brace_delta(line):
+    """Net bracket/brace balance change on one code line, ignoring quoted strings and // comments."""
+    delta = 0
+    quote = None
+    escaped = False
+    n = len(line)
+    i = 0
+    while i < n:
+        ch = line[i]
+        if escaped:
+            escaped = False
+            i += 1
+            continue
+        if quote is not None:
+            if ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "/" and (i == 0 or line[i - 1] != ":"):
+            break
+        if ch in ("'", '"', "`"):
+            quote = ch
+        elif ch in "{[(":
+            delta += 1
+        elif ch in "}])":
+            delta -= 1
+        i += 1
+    return delta
+
+
+def _looks_like_chinese_prose(s):
+    if not s or len(s) < 15:
+        return False
+    cjk = _count_cjk(s)
+    if cjk < 12:
+        return False
+    non_ws = len(re.sub(r"\s+", "", s))
+    if non_ws == 0 or (cjk / non_ws) < 0.45:
+        return False
+    if re.search(r"[{};]|=>|function\s*\(|const\s+\w+|var\s+\w+|let\s+\w+", s):
+        return False
+    return True
+
+
+def _is_structural_heading(s, h1_is_volume=False, clean_ads=True):
+    if not s:
+        return False
+    if MD_HEADING_RE.match(s):
+        return True
+    if len(s) <= 65 and not re.search(r"[。！？；]$", s) and not (clean_ads and VOL_TEASER_EXCLUDE_RE.search(s)):
+        if VOL_RE.match(s) or (h1_is_volume and H1_VOL_RE.match(s)):
+            return True
+    if len(s) <= 60 and not re.search(r"[。！？；，,:：]$", s) and not (clean_ads and FAKE_CHAP_NOTE_RE.search(s)):
+        if CHAP_RE.match(s):
+            return True
+    return False
+
+
+def _parse_strip_block_specs(specs):
+    """Parse --strip-block specs of form 'start=<RE>||end=<RE>' or 'start=<RE>,end=<RE>' or '<RE>'."""
+    compiled = []
+    for raw in specs or []:
+        spec = str(raw or "").strip()
+        if not spec:
+            continue
+        start_pat = spec
+        end_pat = ""
+        if "||end=" in spec:
+            start_pat, end_pat = spec.split("||end=", 1)
+        elif re.search(r"[,，]\s*end=", spec):
+            start_pat, end_pat = re.split(r"[,，]\s*end=", spec, maxsplit=1)
+        if start_pat.startswith("start="):
+            start_pat = start_pat[len("start="):]
+        start_pat = start_pat.strip()
+        end_pat = end_pat.strip()
+        if not start_pat:
+            raise ValueError(f"Invalid --strip-block spec (empty start pattern): {raw!r}")
+        try:
+            start_re = re.compile(start_pat)
+            end_re = re.compile(end_pat) if end_pat else None
+        except re.error as e:
+            raise ValueError(f"Invalid --strip-block regex in {raw!r}: {e}") from e
+        compiled.append((start_re, end_re))
+    return compiled
+
+
+def strip_web_noise_blocks(lines, clean_web_noise=True, strip_block_specs=None, h1_is_volume=False, clean_ads=True):
+    """Strip high-confidence scraped JS/CSS/template blocks before structure parsing.
+
+    Always terminates immediately on structural headings (e.g. # / ## / Chapter) so a
+    truncated script or unclosed brace can never swallow the following chapter.
+    """
+    compiled_custom = _parse_strip_block_specs(strip_block_specs)
+    stats = {"web_blocks": 0, "web_lines": 0, "custom_blocks": 0, "custom_lines": 0}
+    if not clean_web_noise and not compiled_custom:
+        return lines, stats
+
+    out = []
+    mode = None  # None | "tag" | "code" | "custom"
+    tag_end_re = None
+    code_depth = 0
+    code_opened = False
+    code_lines = 0
+    saw_blank_in_code = False
+    custom_end_re = None
+    custom_lines = 0
+
+    for raw in lines:
+        s = raw.strip()
+
+        if mode == "custom":
+            if _is_structural_heading(s, h1_is_volume=h1_is_volume, clean_ads=clean_ads):
+                mode = None
+                custom_end_re = None
+                custom_lines = 0
+            else:
+                stats["custom_lines"] += 1
+                custom_lines += 1
+                if (custom_end_re is not None and custom_end_re.search(s)) or custom_lines >= 2000:
+                    mode = None
+                    custom_end_re = None
+                    custom_lines = 0
+                continue
+
+        elif mode == "tag":
+            if _is_structural_heading(s, h1_is_volume=h1_is_volume, clean_ads=clean_ads):
+                mode = None
+                tag_end_re = None
+            else:
+                stats["web_lines"] += 1
+                if tag_end_re is not None and tag_end_re.search(s):
+                    mode = None
+                    tag_end_re = None
+                continue
+
+        elif mode == "code":
+            if _is_structural_heading(s, h1_is_volume=h1_is_volume, clean_ads=clean_ads):
+                mode = None
+            elif not s:
+                saw_blank_in_code = True
+                stats["web_lines"] += 1
+                code_lines += 1
+                if code_lines >= 400:
+                    mode = None
+                continue
+            elif saw_blank_in_code and _looks_like_chinese_prose(s):
+                mode = None
+            else:
+                stats["web_lines"] += 1
+                code_lines += 1
+                saw_blank_in_code = False
+                code_depth += _brace_delta(s)
+                if code_depth > 0:
+                    code_opened = True
+                if (code_opened and code_depth <= 0) or code_lines >= 400:
+                    mode = None
+                continue
+
+        # Normal mode: check user-supplied --strip-block rules first
+        matched_custom = False
+        for start_re, end_re in compiled_custom:
+            if start_re.search(s):
+                stats["custom_blocks"] += 1
+                stats["custom_lines"] += 1
+                if not (end_re is not None and end_re.search(s)):
+                    mode = "custom"
+                    custom_end_re = end_re
+                    custom_lines = 1
+                matched_custom = True
+                break
+        if matched_custom:
+            continue
+
+        if clean_web_noise and s:
+            tm = WEB_TAG_START_RE.match(s)
+            if tm:
+                tag = tm.group(1).lower()
+                end_re = re.compile(rf"</{tag}\s*>", re.IGNORECASE)
+                stats["web_blocks"] += 1
+                stats["web_lines"] += 1
+                if not end_re.search(s):
+                    mode = "tag"
+                    tag_end_re = end_re
+                continue
+
+            if _count_cjk(s) <= 4 and WEB_CODE_START_RE.match(s):
+                stats["web_blocks"] += 1
+                stats["web_lines"] += 1
+                delta = _brace_delta(s)
+                if delta > 0 or s.rstrip().endswith(("{", "(", "[", ",", "=>", "/*")):
+                    mode = "code"
+                    code_depth = max(delta, 0)
+                    code_opened = delta > 0
+                    code_lines = 1
+                    saw_blank_in_code = False
+                continue
+
+        out.append(raw)
+
+    if clean_web_noise and out:
+        out, g_blocks, g_lines = _strip_generic_code_runs(
+            out, h1_is_volume=h1_is_volume, clean_ads=clean_ads
+        )
+        stats["web_blocks"] += g_blocks
+        stats["web_lines"] += g_lines
+
+    return out, stats
+
+
+def _is_generic_code_line(s):
+    if not s or len(s) > 300:
+        return False
+    return bool(GENERIC_CODE_LINE_RE.search(s))
+
+
+def _strip_generic_code_runs(lines, h1_is_volume=False, clean_ads=True):
+    """Strip prefix-agnostic contiguous JS/CSS runs (>=3 code-syntax lines, low CJK).
+
+    Complements explicit MediaWiki/tag rules when scrapers truncate the opening wrapper
+    line. Never crosses structural headings and requires strict JS/CSS syntax so normal
+    English prose or stat tables are untouched.
+    """
+    out = []
+    run = []
+    stripped_blocks = 0
+    stripped_lines = 0
+
+    def flush_run():
+        nonlocal run, stripped_blocks, stripped_lines
+        if not run:
+            return
+        non_empty = [r.strip() for r in run if r.strip()]
+        if len(non_empty) >= 3:
+            joined = "".join(non_empty)
+            non_ws = len(re.sub(r"\s+", "", joined))
+            cjk_ratio = (_count_cjk(joined) / non_ws) if non_ws else 0.0
+            if cjk_ratio < 0.25:
+                stripped_blocks += 1
+                stripped_lines += len(run)
+                run = []
+                return
+        out.extend(run)
+        run = []
+
+    for raw in lines:
+        s = raw.strip()
+        if not s:
+            if run:
+                flush_run()
+            out.append(raw)
+            continue
+        if _is_structural_heading(s, h1_is_volume=h1_is_volume, clean_ads=clean_ads):
+            flush_run()
+            out.append(raw)
+            continue
+        if _is_generic_code_line(s):
+            run.append(raw)
+            continue
+        flush_run()
+        out.append(raw)
+
+    flush_run()
+    return out, stripped_blocks, stripped_lines
 
 
 def parse_cn_or_int(raw):
@@ -342,7 +647,24 @@ def _strip_glued_chap_prefix(lines, book_name, chap_title):
     return lines
 
 
-def parse_structure(lines, default_series_name="正文卷", book_name="", clean_ads=True):
+def parse_structure(
+    lines,
+    default_series_name="正文卷",
+    book_name="",
+    clean_ads=True,
+    h1_is_volume=False,
+    strip_blocks=None,
+    clean_stats_out=None,
+):
+    lines, strip_stats = strip_web_noise_blocks(
+        lines,
+        clean_web_noise=clean_ads,
+        strip_block_specs=strip_blocks,
+        h1_is_volume=h1_is_volume,
+        clean_ads=clean_ads,
+    )
+    if clean_stats_out is not None:
+        clean_stats_out.update(strip_stats)
     lines = clean_input_lines(lines, book_name=book_name, clean_ads=clean_ads)
     volumes = []
     cur_series = default_series_name
@@ -381,14 +703,15 @@ def parse_structure(lines, default_series_name="正文卷", book_name="", clean_
             continue
 
         vm = VOL_RE.match(s)
-        if vm and len(s) <= 65 and not re.search(r"[。！？；]$", s) and not (clean_ads and VOL_TEASER_EXCLUDE_RE.search(s)):
-            v_num = parse_cn_or_int(vm.group(2) or vm.group(3) or vm.group(4))
+        h1m = H1_VOL_RE.match(s) if (not vm and h1_is_volume) else None
+        if (vm or h1m) and len(s) <= 65 and not re.search(r"[。！？；]$", s) and not (clean_ads and VOL_TEASER_EXCLUDE_RE.search(s)):
+            v_num = parse_cn_or_int(vm.group(1) or vm.group(2) or vm.group(3)) if vm else None
             # Ignore backward or repeated volume headings (typically author notes/song indexes mid-volume)
             if v_num is not None and cur_vol_num > 0 and v_num <= cur_vol_num and len(cur_chapters) > 5:
                 cur_buf.append(s)
                 continue
             flush_chapter()
-            cur_series = (vm.group(1) or s).lstrip("#").strip()
+            cur_series = (h1m.group(1) if h1m else s).lstrip("#").strip()
             if v_num is not None:
                 cur_vol_num = v_num
                 auto_vol_idx = max(auto_vol_idx, v_num)
@@ -899,16 +1222,29 @@ def select_target_arcs(arcs, series_filter="", start_arc=1, limit_arcs=0):
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _report_structure_preflight(chapters, arcs, texts_map):
-    """Print a scene-length and ASCII-ratio summary before any LLM spend.
+def _report_structure_preflight(chapters, arcs, texts_map, clean_stats=None):
+    """Print a scene-length, ASCII-ratio, and CJK-ratio summary before any LLM spend.
 
     A clean prose corpus has a tight scene-length distribution. Web-page dumps that
     still carry JS/CSS/nav tables show up as a long tail of very short scenes plus a
-    high share of pure-ASCII lines, which is exactly the shape that silently multiplies
-    the number of LLM calls. Surfacing it here lets the caller fix the input first
-    instead of paying for scenes that will be thrown away on the next rebuild.
+    high share of pure-ASCII lines or low-CJK scenes, which is exactly the shape that
+    silently multiplies the number of LLM calls. Surfacing it here lets the caller fix
+    the input first instead of paying for scenes that will be thrown away on the next
+    rebuild.
     """
     try:
+        if clean_stats:
+            wb = int(clean_stats.get("web_blocks") or 0)
+            wl = int(clean_stats.get("web_lines") or 0)
+            cb = int(clean_stats.get("custom_blocks") or 0)
+            cl = int(clean_stats.get("custom_lines") or 0)
+            if wb or cb:
+                parts = []
+                if wb:
+                    parts.append(f"{wb} web/code block(s) ({wl} lines)")
+                if cb:
+                    parts.append(f"{cb} --strip-block region(s) ({cl} lines)")
+                print(f"[build_novel] cleaned: stripped {', '.join(parts)}")
         sizes = sorted(len(t.get("text") or "") for t in texts_map.values())
         if not sizes:
             return
@@ -920,8 +1256,18 @@ def _report_structure_preflight(chapters, arcs, texts_map):
             series[a["series"]] = series.get(a["series"], 0) + 1
         ascii_lines = 0
         total_lines = 0
+        total_non_ws = 0
+        total_cjk = 0
+        scene_cjk_ratios = []
         for t in texts_map.values():
-            for ln in (t.get("text") or "").split("\n"):
+            txt = t.get("text") or ""
+            non_ws = len(re.sub(r"\s+", "", txt))
+            cjk = _count_cjk(txt)
+            total_non_ws += non_ws
+            total_cjk += cjk
+            if non_ws > 0:
+                scene_cjk_ratios.append(cjk / non_ws)
+            for ln in txt.split("\n"):
                 ln = ln.strip()
                 if not ln:
                     continue
@@ -929,16 +1275,34 @@ def _report_structure_preflight(chapters, arcs, texts_map):
                 if all(ord(c) < 128 for c in ln):
                     ascii_lines += 1
         ascii_pct = (ascii_lines * 100.0 / total_lines) if total_lines else 0.0
+        corpus_cjk_ratio = (total_cjk / total_non_ws) if total_non_ws else 0.0
+        is_cjk_corpus = corpus_cjk_ratio >= 0.30 or any(r >= 0.30 for r in scene_cjk_ratios)
+        low_cjk_scenes = sum(1 for r in scene_cjk_ratios if r < 0.20) if is_cjk_corpus else 0
+        extra_metric = f" low_cjk(<20%)={low_cjk_scenes}" if is_cjk_corpus else ""
         print(
             f"[build_novel] preflight: scenes={n} min={sizes[0]} median={median} max={sizes[-1]} "
-            f"tiny(<200)={tiny} ascii_lines={ascii_pct:.1f}% series={len(series)}"
+            f"tiny(<200)={tiny} ascii_lines={ascii_pct:.1f}%{extra_metric} series={len(series)}"
         )
         if len(series) > 1:
             preview = ", ".join(f"{k}({v})" for k, v in list(series.items())[:8])
             more = "" if len(series) <= 8 else f", ...(+{len(series) - 8})"
             print(f"[build_novel] preflight: series -> {preview}{more}")
+        if is_cjk_corpus and (low_cjk_scenes > 0 or ascii_pct >= 15.0):
+            print(
+                f"[build_novel] preflight warning: detected likely non-prose/code noise "
+                f"(low_cjk(<20%)={low_cjk_scenes}/{n}, ascii_lines={ascii_pct:.1f}%). "
+                f"Consider cleaning input or passing --strip-block before LLM spend."
+            )
+        return {
+            "scenes": n,
+            "ascii_pct": ascii_pct,
+            "is_cjk_corpus": is_cjk_corpus,
+            "low_cjk_scenes": low_cjk_scenes,
+            "series_count": len(series),
+        }
     except Exception as e:  # reporting must never break a build
         print(f"[build_novel] preflight skipped ({e})")
+        return None
 
 
 def _default_config_path():
@@ -964,7 +1328,10 @@ def main():
     parser.add_argument("--max-chars", type=int, default=6500)
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--no-llm", action="store_true", help="Build deterministically without calling LLM API")
-    parser.add_argument("--no-clean-ads", action="store_true", help="Disable web-novel ad/watermark line stripping")
+    parser.add_argument("--no-clean-ads", action="store_true", help="Disable web-novel ad/watermark and scraped JS/CSS block stripping")
+    parser.add_argument("--h1-is-volume", action="store_true", help="Treat arbitrary single-# Markdown headings as volume/series names (default: only explicit volume markers like '# 第1卷')")
+    parser.add_argument("--strip-block", action="append", default=[], help="Strip custom noise blocks before parsing: 'start=<REGEX>||end=<REGEX>' (repeatable; always stops safely at headings)")
+    parser.add_argument("--allow-noisy", action="store_true", help="Proceed with LLM summarization even when preflight detects high code/non-prose noise")
     parser.add_argument("--overwrite-config", action="store_true", help="Overwrite existing corpus.json if present")
     parser.add_argument("--upgrade", action="store_true", help="Upgrade an existing corpus index in place with LLM summaries")
     parser.add_argument("--series", default="", help="Only LLM-summarize arcs belonging to this exact series")
@@ -1022,7 +1389,16 @@ def main():
         existing_series_summaries = {}
 
         lines = load_input_lines(args.input)
-        chapters = parse_structure(lines, default_series_name="正文卷", book_name=args.name, clean_ads=not args.no_clean_ads)
+        clean_stats = {}
+        chapters = parse_structure(
+            lines,
+            default_series_name="正文卷",
+            book_name=args.name,
+            clean_ads=not args.no_clean_ads,
+            h1_is_volume=args.h1_is_volume,
+            strip_blocks=args.strip_block,
+            clean_stats_out=clean_stats,
+        )
         if not chapters:
             raise RuntimeError(f"No readable chapters parsed from {args.input}")
 
@@ -1086,8 +1462,22 @@ def main():
                 "key_items": [],
             })
 
+    preflight = None
     if not args.upgrade:
-        _report_structure_preflight(chapters, arcs, texts_map)
+        preflight = _report_structure_preflight(chapters, arcs, texts_map, clean_stats=clean_stats)
+        if (
+            not args.no_llm
+            and not args.allow_noisy
+            and preflight
+            and preflight.get("is_cjk_corpus")
+            and (preflight.get("low_cjk_scenes", 0) > 0 or preflight.get("ascii_pct", 0.0) >= 20.0)
+        ):
+            raise RuntimeError(
+                f"Refusing to spend LLM calls on noisy corpus "
+                f"(low_cjk(<20%)={preflight['low_cjk_scenes']}/{preflight['scenes']}, "
+                f"ascii_lines={preflight['ascii_pct']:.1f}%). "
+                f"Inspect with --no-llm, clean input with --strip-block, or pass --allow-noisy to override."
+            )
 
     cfg = {}
     if not args.no_llm:

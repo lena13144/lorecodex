@@ -894,10 +894,9 @@ export function openImportModal() {
       <div id="impSplitPreviewWrap" class="split-preview-wrap" style="display:none;"></div>
 
       <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;justify-content:space-between;font-size:12px;">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:220px;">
-          <input id="impUseLlm" type="checkbox" checked />
-          <span><b>启用 LLM 智能目录构建</b>（自动生成分幕摘要、卷总览、人物别名对照表与术语表；数百万字大书可先取消勾选切好分卷，再在「语料配置 -> LLM 目录补全」按卷升级）</span>
-        </label>
+        <div style="flex:1;min-width:220px;line-height:1.5;color:var(--ink-soft);">
+          <b>两步建库</b>：点击「开始导入」先做免费、秒级离线切分入库；核对结构无误后，再手动点击「开始 LLM 建立目录」（也可稍后在「语料配置 → LLM 目录补全」按卷升级）。
+        </div>
         <div class="fld-group" style="width:130px;flex-shrink:0;">
           <label class="fld">LLM 建库并发数</label>
           <input id="impWorkers" type="number" min="1" max="24" value="8" />
@@ -914,6 +913,7 @@ export function openImportModal() {
       </div>
     </div>
     <div class="modal-foot">
+      <button id="impStartLlmBtn" class="btn-seal" style="display:none;">开始 LLM 建立目录</button>
       <button id="impDoneSwitchBtn" class="btn-seal" style="display:none;">立即打开新书库</button>
       <button data-close-modal>关闭</button>
       <button id="impStartBtn" class="btn-seal">开始导入</button>
@@ -933,11 +933,6 @@ export function openImportModal() {
   };
 
   let previewSeq = 0;
-  let userExplicitlyEnabledLlm = false;
-
-  $('#impUseLlm').addEventListener('change', (e) => {
-    userExplicitlyEnabledLlm = Boolean(e.target.checked);
-  });
 
   const runFileSplitPreview = async (file) => {
     const wrap = $('#impSplitPreviewWrap');
@@ -968,13 +963,7 @@ export function openImportModal() {
         wrap.innerHTML = '';
         return;
       }
-      let autoUncheckedLlm = false;
-      const useLlmEl = $('#impUseLlm');
-      if (res.report.shouldBlockAutoLlm && !res.report.isLorePack && useLlmEl.checked && !userExplicitlyEnabledLlm) {
-        useLlmEl.checked = false;
-        autoUncheckedLlm = true;
-      }
-      wrap.innerHTML = renderSplitPreviewHtml(res.report, res.estimate, { autoUncheckedLlm });
+      wrap.innerHTML = renderSplitPreviewHtml(res.report, res.estimate, { autoUncheckedLlm: false });
       wrap.style.display = 'flex';
     } catch (_) {
       if (seq === previewSeq) {
@@ -998,7 +987,12 @@ export function openImportModal() {
   const handleFile = (file) => {
     if (!file) return;
     selectedFile = file;
-    userExplicitlyEnabledLlm = false;
+    const startLlmBtn = $('#impStartLlmBtn');
+    if (startLlmBtn) {
+      startLlmBtn.style.display = 'none';
+      startLlmBtn.disabled = false;
+      startLlmBtn.textContent = '开始 LLM 建立目录';
+    }
     const lower = file.name.toLowerCase();
     const isLorepack = lower.endsWith('.lorepack.json');
     if (isLorepack) {
@@ -1069,6 +1063,7 @@ export function openImportModal() {
     try {
       const contentBase64 = await readBase64(selectedFile);
       const kind = $('#impKind').value;
+      const isLorepack = selectedFile.name.toLowerCase().endsWith('.lorepack.json');
       const mergeInto = kind === 'lore' ? $('#impMergeInto').value : '';
       const res = await importCorpus({
         kind,
@@ -1078,14 +1073,59 @@ export function openImportModal() {
         contentBase64,
         category: $('#impCategory').value.trim(),
         mergeInto,
-        useLlm: $('#impUseLlm').checked,
+        useLlm: false,
         workers: Math.min(Math.max(Number($('#impWorkers')?.value) || 8, 1), 24),
-        allowLlmOnAnomaly: userExplicitlyEnabledLlm,
+        allowLlmOnAnomaly: false,
         filterGameStats: $('#impFilterStats').checked,
       });
 
       const jobId = res.job.id;
       const targetId = res.job.corpusId;
+      const startLlmBtn = $('#impStartLlmBtn');
+      const switchBtn = $('#impDoneSwitchBtn');
+
+      const attachManualLlmUpgrade = (upgJob) => {
+        startModalJobPoll({
+          jobId: upgJob.id,
+          initialJob: upgJob,
+          progPrefix: 'imp',
+          logsEl: $('#impJobLogs'),
+          statusEl: $('#impJobStatus'),
+          stopBtnEl: $('#impStopBtn'),
+          runningText: (j) => {
+            const p = j?.progress;
+            if (p && p.totalCalls > 0) {
+              const etaStr = p.etaMs !== null && p.etaMs !== undefined ? ` · 剩余约 ${formatDurationZh(p.etaMs)}` : '';
+              return `正在执行 LLM 建立目录 (${p.percent}%${etaStr})...`;
+            }
+            return `正在执行 LLM 建立目录 (${j.kind})...`;
+          },
+          onDone: async (j) => {
+            $('#impJobStatus').textContent = `LLM 目录构建完成（耗时 ${formatDurationZh(j?.progress?.elapsedMs)}）！书库 "${targetId}" 已就绪`;
+            const listRes = await fetchCorpora();
+            state.corpora = listRes.corpora || [];
+            showToast(`书库「${targetId}」LLM 智能目录构建完成！`, 'ok');
+            if (startLlmBtn) startLlmBtn.style.display = 'none';
+            switchBtn.style.display = 'inline-flex';
+          },
+          onAborted: async () => {
+            const listRes = await fetchCorpora();
+            state.corpora = listRes.corpora || [];
+            $('#impJobStatus').textContent = `已暂停 LLM 建立目录并保存断点，可随时点击「继续 LLM 建立目录」续传`;
+            showToast(`书库「${targetId}」已保存断点，可随时继续`, 'ok');
+            if (startLlmBtn) {
+              startLlmBtn.disabled = false;
+              startLlmBtn.textContent = '继续 LLM 建立目录';
+              startLlmBtn.style.display = 'inline-flex';
+            }
+          },
+          onError: (j) => {
+            $('#impJobStatus').textContent = `LLM 目录构建失败: ${j.error}`;
+            if (startLlmBtn) startLlmBtn.disabled = false;
+          },
+        });
+      };
+
       startModalJobPoll({
         jobId,
         initialJob: res.job,
@@ -1093,33 +1133,48 @@ export function openImportModal() {
         logsEl: $('#impJobLogs'),
         statusEl: $('#impJobStatus'),
         stopBtnEl: $('#impStopBtn'),
-        runningText: (job) => {
-          const p = job?.progress;
-          if (p && p.totalCalls > 0) {
-            const etaStr = p.etaMs !== null && p.etaMs !== undefined ? ` · 剩余约 ${formatDurationZh(p.etaMs)}` : '';
-            return `正在构建 (${p.percent}%${etaStr})...`;
-          }
-          return `正在运行 (${job.kind})...`;
-        },
+        runningText: (job) => `正在离线切分入库 (${job.kind})...`,
         onDone: async (job) => {
           const wrap = $('#impSplitPreviewWrap');
           if (wrap && !wrap.innerHTML.trim() && job?.structureReport) {
             wrap.innerHTML = renderSplitPreviewHtml(job.structureReport, null);
             wrap.style.display = 'flex';
           }
-          const wasBlocked = job?.structureReport?.shouldBlockAutoLlm && $('#impUseLlm').checked && !userExplicitlyEnabledLlm;
-          $('#impJobStatus').textContent = wasBlocked
-            ? `已切分入库 "${targetId}"（高危异常已拦截自动 LLM 构建）`
-            : `构建完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！书库 "${targetId}" 已入库`;
+          const canManualLlm = kind === 'novel' && !isLorepack;
+          $('#impJobStatus').textContent = canManualLlm
+            ? `离线切分完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！书库 "${targetId}" 已入库，请确认结构无误后点击「开始 LLM 建立目录」`
+            : `导入完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！书库 "${targetId}" 已入库`;
           const listRes = await fetchCorpora();
           state.corpora = listRes.corpora || [];
-          showToast(wasBlocked ? `书库「${targetId}」已切分入库，请检查结构后构建` : `书库「${targetId}」导入建树成功！`, 'ok');
-          const switchBtn = $('#impDoneSwitchBtn');
+          showToast(
+            canManualLlm ? `书库「${targetId}」已离线入库，确认无误后可手动启动 LLM 建目录` : `书库「${targetId}」导入成功！`,
+            'ok'
+          );
           switchBtn.style.display = 'inline-flex';
           switchBtn.onclick = async () => {
             await actions.switchCorpus?.(targetId);
             cleanupClose();
           };
+          if (startLlmBtn && canManualLlm) {
+            startLlmBtn.style.display = 'inline-flex';
+            startLlmBtn.disabled = false;
+            startLlmBtn.textContent = '开始 LLM 建立目录';
+            startLlmBtn.onclick = async () => {
+              startLlmBtn.disabled = true;
+              $('#impJobStatus').textContent = '正在提交 LLM 目录构建任务...';
+              try {
+                const upgRes = await upgradeCorpus(targetId, {
+                  workers: Math.min(Math.max(Number($('#impWorkers')?.value) || 8, 1), 24),
+                  skipMeta: false,
+                  force: false,
+                });
+                attachManualLlmUpgrade(upgRes.job);
+              } catch (e) {
+                $('#impJobStatus').textContent = '提交 LLM 任务失败: ' + e.message;
+                startLlmBtn.disabled = false;
+              }
+            };
+          }
         },
         onAborted: async () => {
           const listRes = await fetchCorpora();
