@@ -6,6 +6,6 @@
   "js": "extension/st-tree-lore/index.js",
   "css": "extension/st-tree-lore/style.css",
   "author": "LoreCodex",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "homePage": "https://github.com/lena13144/lorecodex"
 }

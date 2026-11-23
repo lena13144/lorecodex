@@ -38,7 +38,7 @@ function copyRecursive(src, dest) {
   if (st.isDirectory()) {
     fs.mkdirSync(dest, { recursive: true });
     for (const ent of fs.readdirSync(src)) {
-      if (ent === '__pycache__' || ent.endsWith('.pyc') || ent.endsWith('.ckpt.jsonl')) continue;
+      if (ent === '__pycache__' || ent.endsWith('.pyc') || ent.endsWith('.ckpt.jsonl') || ent === 'ARCHITECTURE-V3-DESIGN.md') continue;
       copyRecursive(path.join(src, ent), path.join(dest, ent));
     }
   } else {
@@ -115,8 +115,8 @@ function main() {
       '',
       '### 方式 B：离线手动解压安装',
       '1. 将本压缩包内的 `st-tree-lore` 文件夹解压到酒馆目录的 `public/scripts/extensions/third-party/st-tree-lore/`。',
-      '2. 刷新酒馆页面，在「扩展 -> LoreCodex 书阁旁路检索」中展开 **「TauriTavern / 手机免服务端内置书库 (IndexedDB 纯前端引擎)」**。',
-      '3. 可直接点击「选择文件并构建入库」导入本包附带的 `demo-chronicles.lorepack.json`，或直接选择您的 `.txt` / `.md` 小说、世界书 `.json` 或角色卡 V2 `.json` 构建入库。',
+      '2. 刷新酒馆页面，展开右侧 **「LoreCodex 典籍检索」** 极简卡片（支持顶部小太阳/小月亮切换素笺浅色 / 墨灯深色主题）。',
+      '3. 点击 **「打开 LoreCodex 大面板」**，在工作台顶栏点击 **「导入」** 导入本包附带的 `demo-chronicles.lorepack.json`，或直接导入 `.txt` / `.md` / `.epub` 小说与世界书 `.json`，随后可手动启动 LLM 目录构建并在侧边栏实时查看进度条。',
       '',
     ].join('\n'),
     'utf8'

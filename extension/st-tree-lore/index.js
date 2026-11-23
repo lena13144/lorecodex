@@ -822,7 +822,14 @@ jQuery(async () => {
         if (String(cfg.pov || '').trim()) badges.push(`视角:${String(cfg.pov).trim()}`);
         const badgeWrap = $('#lorecodex_active_badges');
         if (badges.length) {
-            badgeWrap.html(badges.map((b) => `<span class="lorecodex-pill accent">${escHtml(b)}</span>`).join('')).show();
+            badgeWrap.html(
+                badges
+                    .map((b) => `<button type="button" class="lorecodex-pill accent lorecodex-pill-btn" title="点击调整防剧透进度或视角">${escHtml(b)}</button>`)
+                    .join('')
+            ).show();
+            badgeWrap.find('.lorecodex-pill-btn').on('click', () => {
+                openWorkbenchModal(cfg, { corpusId: cfg.corpus, action: 'st-settings' });
+            });
         } else {
             badgeWrap.empty().hide();
         }

@@ -1496,7 +1496,48 @@ export async function openStSettingsModal() {
   try {
     const reply = await requestStParent('lorecodex:st-get-settings', {}, 'lorecodex:st-settings');
     const st = reply.settings || {};
+    const arcs = state.index?.arcs || [];
     const maxAvail = state.index?.stats?.max_order || state.corpusMeta?.stats?.max_order || 0;
+    const curOrder = Math.max(0, Math.floor(Number(st.maxOrder) || 0));
+
+    // Build human-readable spoiler gate options (per-arc if <=60 arcs, else per-series ceiling)
+    const orderOptions = [{ value: 0, label: '全库开放（关闭防剧透）' }];
+    const orderedArcs = arcs
+      .filter((a) => Number(a.order) > 0)
+      .sort((a, b) => Number(a.order) - Number(b.order));
+    if (orderedArcs.length > 0 && orderedArcs.length <= 60) {
+      const seen = new Set();
+      for (const a of orderedArcs) {
+        const ord = Math.floor(Number(a.order));
+        if (seen.has(ord)) continue;
+        seen.add(ord);
+        const seriesPrefix = a.series && a.series !== a.title ? `${a.series} · ` : '';
+        orderOptions.push({
+          value: ord,
+          label: `序 ≤ ${ord} · ${seriesPrefix}${a.title || a.arc_id}`,
+        });
+      }
+    } else if (orderedArcs.length > 60) {
+      const seriesMax = new Map();
+      for (const a of orderedArcs) {
+        const sk = String(a.series || a.category || '默认分卷').trim();
+        const ord = Math.floor(Number(a.order));
+        if (!seriesMax.has(sk) || ord > seriesMax.get(sk).ord) {
+          seriesMax.set(sk, { ord, title: a.title || '' });
+        }
+      }
+      const entries = [...seriesMax.entries()].sort((a, b) => a[1].ord - b[1].ord);
+      for (const [sk, info] of entries) {
+        orderOptions.push({
+          value: info.ord,
+          label: `至「${sk}」完结（序 ≤ ${info.ord}）`,
+        });
+      }
+    }
+    const hasExactOpt = orderOptions.some((o) => o.value === curOrder);
+    const selectOptsHtml = orderOptions
+      .map((o) => `<option value="${o.value}" ${o.value === curOrder ? 'selected' : ''}>${esc(o.label)}</option>`)
+      .join('') + (!hasExactOpt ? `<option value="${curOrder}" selected>自定义序数（序 ≤ ${curOrder}）</option>` : '');
 
     $('#modalDialog').innerHTML = `
       <div class="modal-head">
@@ -1505,8 +1546,11 @@ export async function openStSettingsModal() {
       </div>
       <div class="modal-body">
         <div class="fld-group">
-          <label class="fld">防剧透章节序上限（0 = 全库开放${maxAvail ? `，当前书库共 ${maxAvail} 序` : ''}）</label>
-          <input id="stMaxOrder" type="number" min="0" value="${Number(st.maxOrder) || 0}" />
+          <label class="fld">防剧透进度上限（仅检索该进度之前的剧情${maxAvail ? `，全书共 ${maxAvail} 序` : ''}）</label>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <select id="stMaxOrderSelect" style="flex:1;min-width:0;">${selectOptsHtml}</select>
+            <input id="stMaxOrder" type="number" min="0" value="${curOrder}" title="精确章节序上限（0=全库开放）" style="width:82px;flex-shrink:0;" />
+          </div>
         </div>
         <div class="fld-group">
           <label class="fld">检索视角角色 POV（可选，留空为全景视角）</label>
@@ -1571,6 +1615,18 @@ export async function openStSettingsModal() {
       </div>`;
 
     $('#modalDialog').querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', closeModal));
+    const orderSel = $('#stMaxOrderSelect');
+    const orderInp = $('#stMaxOrder');
+    if (orderSel && orderInp) {
+      orderSel.addEventListener('change', () => {
+        orderInp.value = orderSel.value;
+      });
+      orderInp.addEventListener('input', () => {
+        const v = String(Math.max(0, Math.floor(Number(orderInp.value) || 0)));
+        const match = [...orderSel.options].some((o) => o.value === v);
+        if (match) orderSel.value = v;
+      });
+    }
     $('#saveStSettingsBtn').addEventListener('click', async () => {
       const btn = $('#saveStSettingsBtn');
       btn.disabled = true;

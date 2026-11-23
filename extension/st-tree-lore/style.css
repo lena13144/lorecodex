@@ -252,6 +252,16 @@
     color: #e0b775;
 }
 
+.lorecodex-pill-btn {
+    appearance: none;
+    cursor: pointer;
+    transition: filter 140ms ease, transform 100ms ease;
+}
+
+.lorecodex-pill-btn:hover {
+    filter: brightness(1.12);
+}
+
 .lorecodex-pill.ok {
     border-color: rgba(99, 170, 144, 0.38);
     background: var(--lc-jade-soft);
