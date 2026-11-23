@@ -818,6 +818,16 @@ function testHygieneAndSyntax() {
   const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'));
   assert.strictEqual(manifest.js, 'index.js');
   assert.strictEqual(manifest.css, 'style.css');
+
+  // Regression guard (77a2cf9 was silently reverted by the v2.2 redesign): on mobile ST WebViews
+  // the workbench overlay must size to the viewport explicitly and sit above ST's drawers.
+  {
+    const css = fs.readFileSync(path.join(extDir, 'style.css'), 'utf8');
+    const block = (css.replace(/\/\*[\s\S]*?\*\//g, '').match(/\.lorecodex-wb-backdrop\s*\{[^}]*\}/) || [''])[0];
+    assert(/height:\s*100dvh/.test(block), 'workbench overlay must use height: 100dvh (mobile half-screen bug)');
+    assert(/z-index:\s*30000/.test(block), 'workbench overlay must use z-index: 30000 (above ST drawers)');
+    assert(!/(^|[;{\s])inset:\s*0/.test(block), 'workbench overlay must not use inset: 0 (mobile half-screen bug)');
+  }
   execFileSync('node', ['--check', path.join(extDir, 'index.js')], { stdio: 'inherit' });
   execFileSync('node', ['--check', path.join(extDir, 'browser_engine.js')], { stdio: 'inherit' });
   assert(fs.existsSync(path.join(ROOT, 'skills', 'lorecodex', 'SKILL.md')), 'skills/lorecodex/SKILL.md must exist');

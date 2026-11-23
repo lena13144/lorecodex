@@ -543,7 +543,7 @@ const server = http.createServer(async (req, res) => {
     return send({
       ok: true,
       engine: 'lorecodex',
-      version: '2.2.0',
+      version: '2.3.0',
       mode: 'tree-only',
       boot_ms: bootMs,
       defaultCorpus: activeId,
