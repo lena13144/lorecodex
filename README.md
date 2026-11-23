@@ -92,6 +92,7 @@ SillyTavern / TauriTavern 对话轮次 或 原生 Agent (MCP / DeepSeek Harness)
 | 发行包名称 | 适用人群 | 包含内容 |
 | :--- | :--- | :--- |
 | **`lorecodex-sillytavern-tauritavern-extension-v2.2.0.zip`** | **手机端 / TauriTavern / 纯酒馆前端玩家**（零后台，无需安装 Node.js 或 Python） | 仅含 `st-tree-lore` 酒馆扩展（v2.2 极简墨灯/素笺双模式侧边栏、IndexedDB 免后台引擎、内嵌大面板、纯前端 TXT/EPUB/JSON 建库与 LLM 目录升级器）+ `demo-chronicles.lorepack.json` |
+| **`lorecodex-cloud-builder-kit-v2.2.0.zip`** | **云端 AI 拆书玩家**（Gemini App Task / Muse / Grok / Qoder / WorkBuddy / Claude） | 超轻量纯 Python 零依赖拆书工具包（`build_novel.py` + `build_lore.py` + `pack_lorepack.py` + `AGENT_INSTRUCTIONS.md`），连同小说直接丢给云端 AI 即可免 API Key 产出满血 `.lorepack.json` 供手机 1 秒导入 |
 | **`lorecodex-agent-dsh-mcp-plugin-v2.2.0.zip`** | **AI Agent 开发者**（DeepSeek Harness `dsh` / Claude Code / Cursor / Antigravity） | 仅含 DeepSeek Harness (`@deepseek-ai/cordis`) 插件、零依赖 MCP Server、Agent Skill 与核心树引擎（剔除所有酒馆与 Web UI 资源） |
 | **`lorecodex-full-server-workbench-v2.2.0.zip`** | **独立桌面书阁 / 本地命令行建库玩家**（需要脱离酒馆独立运行 `127.0.0.1:5240` 服务、绕过中转站 CORS 限制或与 MCP 共享本地磁盘 `corpora/`） | 完整 Node 服务端 + 独立书阁 Web UI + Python 批量建树器 + 酒馆扩展 + Agent 插件 |
 

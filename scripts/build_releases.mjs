@@ -2,7 +2,7 @@
 /**
  * Build standalone LoreCodex release artifacts under dist/releases/v<version>/
  *
- * Produces 4 clean, targeted distribution assets:
+ * Produces 5 clean, targeted distribution assets:
  *  1. demo-chronicles.lorepack.json
  *     Single-file sample corpus bundle for direct import into TauriTavern / mobile IndexedDB.
  *  2. lorecodex-sillytavern-tauritavern-extension-v<version>.zip
@@ -13,6 +13,10 @@
  *  4. lorecodex-full-server-workbench-v<version>.zip
  *     Complete desktop distribution: Node server, Archival Codex & Trace Workbench Web UI,
  *     Python offline/LLM builders, SillyTavern/TauriTavern extension, and Agent integrations.
+ *  5. lorecodex-cloud-builder-kit-v<version>.zip
+ *     Ultra-lightweight zero-dependency Python builder kit + AGENT_INSTRUCTIONS.md for Cloud AI
+ *     Tasks (Gemini App Task, Muse, Grok, Qoder, WorkBuddy, Claude) to split novels and export
+ *     a ready-to-import .lorepack.json without local setup or external API keys.
  */
 
 import fs from 'fs';
@@ -237,10 +241,109 @@ function main() {
   }
   const fullZipPath = path.join(OUT_DIR, `lorecodex-full-server-workbench-${TAG}.zip`);
   createZipFromDir(fullStage, fullZipPath);
-  console.log(`[4/4] Built ${path.relative(ROOT, fullZipPath)}`);
+  console.log(`[4/5] Built ${path.relative(ROOT, fullZipPath)}`);
+
+  // 5. Build Cloud AI / Agent Standalone Builder Kit zip (pure zero-dep Python + SOP prompt)
+  const kitStage = path.join(STAGE_ROOT, 'cloud-builder-kit');
+  fs.mkdirSync(path.join(kitStage, 'builders'), { recursive: true });
+  for (const pyFile of ['build_novel.py', 'build_lore.py', 'pack_lorepack.py']) {
+    fs.copyFileSync(path.join(ROOT, 'builders', pyFile), path.join(kitStage, 'builders', pyFile));
+  }
+  fs.copyFileSync(path.join(ROOT, 'LICENSE'), path.join(kitStage, 'LICENSE'));
+  fs.writeFileSync(
+    path.join(kitStage, 'AGENT_INSTRUCTIONS.md'),
+    [
+      `# LoreCodex Cloud Builder Kit (${TAG}) — Agent Execution SOP`,
+      '',
+      'You have been given this zero-dependency Python builder kit alongside one or more user source files (`.txt`, `.epub`, `.md` novels, and/or SillyTavern worldbook/character card `.json`).',
+      'Your goal is to build a high-quality, ready-to-import **`<corpus_id>.lorepack.json`** file for LoreCodex.',
+      '',
+      '## Workflow (4 Steps)',
+      '',
+      '### Step 1: Offline Split & Structure Preflight',
+      'Run the zero-dependency Python splitter first (never spend external API calls before checking structure):',
+      '```bash',
+      'python3 builders/build_novel.py --input "<source_file>" --corpus-id "<slug>" --name "<Book Title>" --no-llm --out-dir ./out',
+      '```',
+      '- If the user also provided a SillyTavern worldbook or V2 character card `.json`, merge it into the same corpus:',
+      '  ```bash',
+      '  python3 builders/build_lore.py --input "<worldbook.json>" --corpus-id "<slug>" --merge-into ./out/<slug> --filter-game-stats',
+      '  ```',
+      '- Inspect the `[build_novel] preflight:` line. If `series` looks wrong because the book uses Markdown `# Volume` headings, re-run with `--h1-is-volume`. If scraped web noise remains, use `--strip-block "start=<RE>||end=<RE>"`.',
+      '',
+      '### Step 2: Synthesize LLM Directory Metadata (No External API Key Needed!)',
+      'Read `./out/<slug>/tree_index.json` and `./out/<slug>/tree_texts.json` in batches using your own context window and reasoning:',
+      '- For each scene (`node_id`), write a concise **80–150 character Chinese (or source-language) summary** resolving ambiguous pronouns ("他/她/对方") into canonical character names, noting key events, locations, and plot turns.',
+      '- For each arc (`arc_id`), write a 1–2 sentence arc summary.',
+      '- For each volume (`series`), write a concise volume overview in `series_summaries`.',
+      '- Extract **2D character alias groups** (`aliases`: `[["主名", "化名", "外号"], ...]`) and key **worldbuilding terms** (`glossary`: `{"术语": "简明释义"}`).',
+      '- Save your results to one or more JSON files (e.g. `meta_part1.json`, `meta_part2.json`) matching this schema:',
+      '```json',
+      '{',
+      '  "scene_summaries": {',
+      '    "A01_S01": { "summary": "...", "characters": ["角色A", "角色B"], "keywords": ["关键词"] }',
+      '  },',
+      '  "arc_summaries": {',
+      '    "A01": "..."',
+      '  },',
+      '  "series_summaries": {',
+      '    "第一卷": "..."',
+      '  },',
+      '  "aliases": [',
+      '    ["本名", "化名", "外号"]',
+      '  ],',
+      '  "glossary": {',
+      '    "专有名词": "简明释义"',
+      '  }',
+      '}',
+      '```',
+      '*(If the user explicitly supplied an external API key and asked to use it, you may instead run `python3 builders/build_novel.py --upgrade --corpus-id <slug> --out-dir ./out --api-base <url> --api-key <key> --model <model> --workers 8`.)*',
+      '',
+      '### Step 3: Apply Metadata, Validate & Export `.lorepack.json`',
+      'Run the zero-dependency packager (pass `--apply-meta` once per batch file):',
+      '```bash',
+      'python3 builders/pack_lorepack.py --corpus-dir ./out/<slug> --apply-meta meta_part1.json --out <slug>.lorepack.json --strict',
+      '```',
+      'Verify the printed `llm_toc=X/Y (100.0%)` coverage and ensure exit code is `0`.',
+      '',
+      '### Step 4: Deliver to User',
+      'Provide the generated **`<slug>.lorepack.json`** file to the user for download, along with a short summary (volumes, arcs, scenes, aliases count, glossary count).',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(kitStage, 'README-BUILDER-KIT.md'),
+    [
+      `# LoreCodex 云端 AI 拆书工具包 (${TAG})`,
+      '',
+      '本压缩包是 **完全解耦的纯 Python 零依赖拆书工具包**，专为 **Gemini App Task、Muse、Grok、Qoder、WorkBuddy、Claude** 等带云端沙盒的 AI 工具设计。',
+      '',
+      '无需在手机或电脑上折腾环境，也无需额外填外部 API Key——把本包和小说一起发给云端 AI，让它直接用自身算力切树、写目录摘要、提炼人物别名表，并输出单文件 **`.lorepack.json`** 供酒馆 1 秒导入！',
+      '',
+      '## 30 秒使用方式',
+      '',
+      '1. 将本压缩包 **`lorecodex-cloud-builder-kit-' + TAG + '.zip`** 和你的小说文件（`.txt` / `.epub` / `.md`，可选附带世界书 `.json`）一起上传给云端 AI（如 Gemini App Task / Muse / Qoder / WorkBuddy）。',
+      '2. 发送下面这段提示词即可：',
+      '',
+      '```text',
+      '请解压附件中的 lorecodex-cloud-builder-kit，严格按照里面的 AGENT_INSTRUCTIONS.md 执行拆书流程：',
+      '1. 先用 builders/build_novel.py --no-llm 离线切分我上传的小说（若附带世界书请一并合并）；',
+      '2. 直接用你自己的阅读能力分批读取原文，补全所有分幕摘要（注意把代词消解为具体人名）、全卷总览、人物别名对照表(aliases)和专有术语表(glossary)；',
+      '3. 用 builders/pack_lorepack.py --apply-meta 回填校验并打包输出最终的 .lorepack.json 文件供我下载。',
+      '```',
+      '',
+      '3. 下载云端 AI 生成的 `.lorepack.json`，在 SillyTavern / TauriTavern 中打开 **LoreCodex 大面板 → 导入**，1 秒导入即可开玩！',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+  const kitZipPath = path.join(OUT_DIR, `lorecodex-cloud-builder-kit-${TAG}.zip`);
+  createZipFromDir(kitStage, kitZipPath);
+  console.log(`[5/5] Built ${path.relative(ROOT, kitZipPath)}`);
 
   fs.rmSync(STAGE_ROOT, { recursive: true, force: true });
-  console.log(`\nAll 4 release artifacts generated in ${path.relative(ROOT, OUT_DIR)}`);
+  console.log(`\nAll 5 release artifacts generated in ${path.relative(ROOT, OUT_DIR)}`);
 }
 
 main();

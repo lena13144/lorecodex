@@ -670,7 +670,53 @@ with zipfile.ZipFile(epub_path, "w") as zf:
       mockSrv.close();
     }
 
-    console.log(`  PASS: EPUB, web-novel, Character Card V2, and in-place LLM --upgrade verified via ${PYTHON_BIN}`);
+    // Cloud Builder Kit: verify pack_lorepack.py --apply-meta & --strict export
+    const agentMetaPath = path.join(tmpDir, 'agent_meta.json');
+    const packedLorepackPath = path.join(tmpDir, 'epub-smoke.lorepack.json');
+    const epubIdxPre = JSON.parse(fs.readFileSync(path.join(outDir, 'epub-smoke', 'tree_index.json'), 'utf8'));
+    const firstSceneId = epubIdxPre.arcs[0].scenes[0].node_id;
+    fs.writeFileSync(
+      agentMetaPath,
+      JSON.stringify(
+        {
+          scene_summaries: {
+            [firstSceneId]: {
+              summary: '林岚与零七在星港会合，确认遗失档案的坐标。',
+              characters: ['林岚', '零七'],
+              keywords: ['星港', '坐标'],
+            },
+          },
+          series_summaries: {
+            正文卷: '星港篇总览：围绕遗失档案展开的调查。',
+          },
+          aliases: [['零七', 'Zero-7', '七号']],
+          glossary: { 灰烬星港: '边缘轨道补给站' },
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+    await execFileAsync(PYTHON_BIN, [
+      path.join(ROOT, 'builders', 'pack_lorepack.py'),
+      '--corpus-dir',
+      path.join(outDir, 'epub-smoke'),
+      '--apply-meta',
+      agentMetaPath,
+      '--out',
+      packedLorepackPath,
+      '--strict',
+    ]);
+    const packedObj = JSON.parse(fs.readFileSync(packedLorepackPath, 'utf8'));
+    assert.strictEqual(packedObj.format, 'lorecodex-pack-v2', 'pack_lorepack must emit lorecodex-pack-v2');
+    assert.strictEqual(packedObj.indexData.stats.llm_scenes, 1, 'pack_lorepack must update llm_scenes count');
+    assert(
+      Array.isArray(packedObj.config.aliases) && packedObj.config.aliases.some((g) => g.includes('Zero-7')),
+      'pack_lorepack must merge aliases into corpus config'
+    );
+    assert.strictEqual(packedObj.config.glossary['灰烬星港'], '边缘轨道补给站', 'pack_lorepack must merge glossary');
+
+    console.log(`  PASS: EPUB, web-novel, Character Card V2, in-place LLM --upgrade, and pack_lorepack verified via ${PYTHON_BIN}`);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
