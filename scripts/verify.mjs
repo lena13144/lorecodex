@@ -219,6 +219,7 @@ with zipfile.ZipFile(epub_path, "w") as zf:
     // Mock OpenAI endpoint to verify in-place --upgrade, single-scene skip, ckpt caching, and series_meta extraction
     const mockCounts = { leaf: 0, arc: 0, seriesMeta: 0 };
     let expectedMaxTokens = undefined;
+    let mockEmptyContent = false;
     const mockSrv = http.createServer((req, res) => {
       if (req.method === 'POST' && req.url.endsWith('/chat/completions')) {
         const chunks = [];
@@ -239,6 +240,19 @@ with zipfile.ZipFile(epub_path, "w") as zf:
             expectedMaxTokens,
             `Expected body.max_tokens=${expectedMaxTokens}, got ${body.max_tokens}`
           );
+
+          if (mockEmptyContent) {
+            // Simulates a reasoning model that spends the whole token budget on
+            // thinking: finish_reason=length with a null content body.
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(
+              JSON.stringify({
+                choices: [{ message: { content: null }, finish_reason: 'length' }],
+                usage: { prompt_tokens: 120, completion_tokens: 8192 },
+              })
+            );
+            return;
+          }
 
           let replyObj;
           if (content.includes('series_summary')) {
@@ -405,6 +419,46 @@ with zipfile.ZipFile(epub_path, "w") as zf:
       const graphEdges = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
       const partnerEdge = graphEdges.find((e) => e.s === '白川澄' && e.r === '搭档' && e.o === '林夜');
       assert(partnerEdge && partnerEdge.w >= 1, 'graph.json must contain synthesized 白川澄 -> 林夜 edge with w >= 1');
+
+      // A null/empty content body must surface an actionable error naming the token
+      // budget, not a bare "TypeError: expected string or bytes-like object".
+      mockEmptyContent = true;
+      mockCounts.leaf = 0;
+      mockCounts.arc = 0;
+      mockCounts.seriesMeta = 0;
+      // leaf failures degrade to heuristics by design, so the diagnosis lands in the
+      // warn line rather than in a thrown error; either surface is fine as long as it
+      // names the real cause instead of a raw TypeError.
+      const emptyRun = await execFileAsync(PYTHON_BIN, [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--upgrade',
+        '--corpus-id',
+        'llm-upgrade-smoke',
+        '--out-dir',
+        outDir,
+        '--config',
+        mockCfgPath,
+        '--series',
+        '第1卷',
+        '--workers',
+        '1',
+        '--max-tokens',
+        '8192',
+        '--force',
+      ]);
+      const emptyErrText = String((emptyRun && (emptyRun.stdout || emptyRun.stderr)) || '');
+      assert(
+        emptyErrText.includes('empty message content'),
+        `empty LLM content must surface an explicit diagnosis, got: ${emptyErrText.slice(0, 400)}`
+      );
+      assert(
+        emptyErrText.includes('maxTokens'),
+        'empty LLM content error must name maxTokens / reasoningEffort as the fix'
+      );
+      assert(
+        !emptyErrText.includes('expected string or bytes-like object'),
+        'empty LLM content must not surface the raw re.search TypeError'
+      );
     } finally {
       mockSrv.close();
     }

@@ -677,8 +677,26 @@ def llm_json(cfg, prompt, retries=4):
             )
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            txt = data["choices"][0]["message"]["content"]
+            choice = (data.get("choices") or [{}])[0]
+            txt = (choice.get("message") or {}).get("content")
             usage = data.get("usage") or {}
+            if not txt or not str(txt).strip():
+                # An empty content body is almost always the model spending the whole
+                # budget on reasoning tokens (finish_reason=length). Report that directly
+                # instead of letting re.search() raise a bare TypeError downstream.
+                finish = choice.get("finish_reason") or "unknown"
+                used = usage.get("completion_tokens")
+                detail = f"finish_reason={finish}"
+                if used is not None:
+                    detail += f", completion_tokens={used}"
+                if max_tokens_val is not None:
+                    detail += f", max_tokens={max_tokens_val}"
+                raise RuntimeError(
+                    "empty message content from LLM (" + detail + "). "
+                    "The model likely spent all tokens on reasoning: raise maxTokens "
+                    "or set reasoningEffort to low."
+                )
+            txt = str(txt)
             m = re.search(r"```(?:json)?\s*([\s\S]*?)```", txt)
             raw = m.group(1) if m else txt
             m2 = re.search(r"(\{[\s\S]*\})", raw)
@@ -878,13 +896,68 @@ def select_target_arcs(arcs, series_filter="", start_arc=1, limit_arcs=0):
     return scoped
 
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _report_structure_preflight(chapters, arcs, texts_map):
+    """Print a scene-length and ASCII-ratio summary before any LLM spend.
+
+    A clean prose corpus has a tight scene-length distribution. Web-page dumps that
+    still carry JS/CSS/nav tables show up as a long tail of very short scenes plus a
+    high share of pure-ASCII lines, which is exactly the shape that silently multiplies
+    the number of LLM calls. Surfacing it here lets the caller fix the input first
+    instead of paying for scenes that will be thrown away on the next rebuild.
+    """
+    try:
+        sizes = sorted(len(t.get("text") or "") for t in texts_map.values())
+        if not sizes:
+            return
+        n = len(sizes)
+        median = sizes[n // 2] if n % 2 else (sizes[n // 2 - 1] + sizes[n // 2]) // 2
+        tiny = sum(1 for s in sizes if s < 200)
+        series = collections.OrderedDict()
+        for a in arcs:
+            series[a["series"]] = series.get(a["series"], 0) + 1
+        ascii_lines = 0
+        total_lines = 0
+        for t in texts_map.values():
+            for ln in (t.get("text") or "").split("\n"):
+                ln = ln.strip()
+                if not ln:
+                    continue
+                total_lines += 1
+                if all(ord(c) < 128 for c in ln):
+                    ascii_lines += 1
+        ascii_pct = (ascii_lines * 100.0 / total_lines) if total_lines else 0.0
+        print(
+            f"[build_novel] preflight: scenes={n} min={sizes[0]} median={median} max={sizes[-1]} "
+            f"tiny(<200)={tiny} ascii_lines={ascii_pct:.1f}% series={len(series)}"
+        )
+        if len(series) > 1:
+            preview = ", ".join(f"{k}({v})" for k, v in list(series.items())[:8])
+            more = "" if len(series) <= 8 else f", ...(+{len(series) - 8})"
+            print(f"[build_novel] preflight: series -> {preview}{more}")
+    except Exception as e:  # reporting must never break a build
+        print(f"[build_novel] preflight skipped ({e})")
+
+
+def _default_config_path():
+    """Resolve config.json against the package root, not the current working directory.
+
+    src/mcp_server.js already reads <ROOT_DIR>/config.json; matching that here means
+    running the builder from any subdirectory finds the same file instead of failing
+    with "Config file not found: config.json".
+    """
+    return os.path.join(ROOT_DIR, "config.json")
+
+
 def main():
     parser = argparse.ArgumentParser(description="LoreCodex universal novel/TXT/MD/EPUB tree builder")
     parser.add_argument("--input", default="", help="Path to .txt / .md / .epub file or directory")
     parser.add_argument("--corpus-id", required=True, help="Target corpus ID (e.g. my-novel)")
     parser.add_argument("--name", default="", help="Display name of the work")
     parser.add_argument("--out-dir", default="corpora", help="Corpora root directory (default: corpora)")
-    parser.add_argument("--config", default="config.json", help="Config file with chatBase/chatKey/chatModel")
+    parser.add_argument("--config", default=_default_config_path(), help="Config file with chatBase/chatKey/chatModel (default: <package root>/config.json)")
     parser.add_argument("--category", default="正文", help="Default category label (default: 正文)")
     parser.add_argument("--min-chars", type=int, default=1800)
     parser.add_argument("--target-chars", type=int, default=3600)
@@ -1012,6 +1085,9 @@ def main():
                 "scenes": leaf_nodes,
                 "key_items": [],
             })
+
+    if not args.upgrade:
+        _report_structure_preflight(chapters, arcs, texts_map)
 
     cfg = {}
     if not args.no_llm:
