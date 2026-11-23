@@ -63,6 +63,59 @@ def merge_alias_groups(existing, incoming):
     return groups
 
 
+def glossary_to_list(val):
+    """Normalize glossary to the runtime format: a list of "术语：释义" strings.
+
+    Accepts the list format and the {"术语": "释义"} object format (older SOP); the
+    runtime (prompt_builder / browser_engine) drops anything that is not a list.
+    """
+    if isinstance(val, dict):
+        items = []
+        for k, v in val.items():
+            ks, vs = str(k).strip(), str(v).strip()
+            if ks and vs:
+                items.append(f"{ks}：{vs}")
+            elif ks:
+                items.append(ks)
+        return items
+    if isinstance(val, list):
+        return [str(x).strip() for x in val if str(x).strip()]
+    return []
+
+
+def _glossary_head(item):
+    for sep in ("：", ":"):
+        if sep in item:
+            h = item.split(sep, 1)[0].strip().lstrip("- ").lower()
+            if h:
+                return h
+    return item.strip().lstrip("- ").lower()
+
+
+def merge_glossary(existing, incoming, max_items=80):
+    """Merge by term head (the text before "："); a longer definition replaces a shorter one."""
+    out, head_idx = [], {}
+    for item in glossary_to_list(existing) + glossary_to_list(incoming):
+        if len(item) > 240:
+            continue
+        h = _glossary_head(item)
+        if h in head_idx:
+            if len(item) > len(out[head_idx[h]]):
+                out[head_idx[h]] = item
+            continue
+        head_idx[h] = len(out)
+        out.append(item)
+    return out[:max_items]
+
+
+def scene_text(texts_data, nid):
+    """tree_texts.json values are {"text": ..., ...} records (older builds stored plain strings)."""
+    rec = texts_data.get(nid)
+    if isinstance(rec, dict):
+        return rec.get("text")
+    return rec
+
+
 def apply_meta_file(index_data, corpus_cfg, meta_path):
     meta = load_json(meta_path)
     if not isinstance(meta, dict):
@@ -82,11 +135,12 @@ def apply_meta_file(index_data, corpus_cfg, meta_path):
         if aid and aid in arc_updates:
             val = arc_updates[aid]
             if isinstance(val, str) and val.strip():
-                arc["summary"] = val.strip()
+                arc["description"] = val.strip()
                 arc_hits += 1
             elif isinstance(val, dict):
-                if str(val.get("summary") or "").strip():
-                    arc["summary"] = str(val["summary"]).strip()
+                desc = str(val.get("summary") or val.get("description") or "").strip()
+                if desc:
+                    arc["description"] = desc
                 if isinstance(val.get("characters"), list):
                     arc["characters"] = [str(x).strip() for x in val["characters"] if str(x).strip()]
                 arc_hits += 1
@@ -113,10 +167,21 @@ def apply_meta_file(index_data, corpus_cfg, meta_path):
             if not sc.get("_llm_done"):
                 all_done = False
 
+        scene_chars = []
+        for sc in scenes:
+            for c in sc.get("characters") or []:
+                if c not in scene_chars:
+                    scene_chars.append(c)
+        if scene_chars and not (isinstance(arc_updates.get(aid), dict) and arc_updates[aid].get("characters")):
+            arc["characters"] = list(dict.fromkeys(scene_chars + list(arc.get("characters") or [])))[:8]
+
         if all_done and scenes:
             arc["_llm_done"] = True
-            if not str(arc.get("summary") or "").strip():
-                arc["summary"] = str(scenes[0].get("summary") or "").strip()
+            # Single-scene arcs: the scene summary is the arc description (same as build_novel.py --upgrade).
+            if len(scenes) == 1 and aid not in arc_updates:
+                arc["description"] = str(scenes[0].get("summary") or "").strip() or arc.get("description", "")
+                if scenes[0].get("characters"):
+                    arc["characters"] = list(scenes[0]["characters"])[:8]
 
     if isinstance(series_updates, dict) and series_updates:
         ss = index_data.setdefault("series_summaries", {})
@@ -134,17 +199,16 @@ def apply_meta_file(index_data, corpus_cfg, meta_path):
         corpus_cfg["aliases"] = merged_aliases
         index_data["aliases"] = merged_aliases
 
-    if isinstance(glossary_updates, dict) and glossary_updates:
-        gl = dict(corpus_cfg.get("glossary") or index_data.get("glossary") or {})
-        for k, v in glossary_updates.items():
-            ks = str(k).strip()
-            vs = str(v).strip()
-            if ks and vs:
-                gl[ks] = vs
+    if glossary_to_list(glossary_updates):
+        gl = merge_glossary(corpus_cfg.get("glossary") or index_data.get("glossary") or [], glossary_updates)
         corpus_cfg["glossary"] = gl
         index_data["glossary"] = gl
 
-    return scene_hits, arc_hits
+    known_scenes = {str(sc.get("node_id")) for a in index_data.get("arcs") or [] for sc in a.get("scenes") or []}
+    known_arcs = {str(a.get("arc_id")) for a in index_data.get("arcs") or []}
+    unknown_scenes = [k for k in scene_updates if str(k) not in known_scenes]
+    unknown_arcs = [k for k in arc_updates if str(k) not in known_arcs]
+    return scene_hits, arc_hits, unknown_scenes, unknown_arcs
 
 
 def recompute_stats(index_data, texts_data):
@@ -165,7 +229,7 @@ def recompute_stats(index_data, texts_data):
         for sc in scenes:
             total_scenes += 1
             nid = str(sc.get("node_id") or "")
-            txt = texts_data.get(nid)
+            txt = scene_text(texts_data, nid)
             if txt is None:
                 missing_texts.append(nid)
                 chars = int(sc.get("chars") or 0)
@@ -242,17 +306,36 @@ def main():
 
     total_scene_hits = 0
     total_arc_hits = 0
+    unknown_total = 0
     for mp in args.apply_meta:
-        sh, ah = apply_meta_file(index_data, corpus_cfg, mp)
+        sh, ah, bad_sc, bad_arc = apply_meta_file(index_data, corpus_cfg, mp)
         total_scene_hits += sh
         total_arc_hits += ah
         print(f"[pack_lorepack] applied {mp}: scenes={sh}, arcs={ah}")
+        if bad_sc or bad_arc:
+            unknown_total += len(bad_sc) + len(bad_arc)
+            print(
+                f"[pack_lorepack] WARN: {mp} has ids not in tree_index.json (ignored): "
+                f"node_ids={bad_sc[:8]} arc_ids={bad_arc[:8]}",
+                file=sys.stderr,
+            )
 
     summary = recompute_stats(index_data, texts_data)
 
     if args.apply_meta:
         save_json(idx_path, index_data, compact=False)
         save_json(cfg_path, corpus_cfg, compact=False)
+        manifest_path = os.path.join(cdir, "batches", "manifest.json")
+        if os.path.exists(manifest_path):
+            # Keep slice_batches.py progress in sync with the summaries just applied.
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from slice_batches import refresh_manifest_status, print_status
+
+            manifest = refresh_manifest_status(load_json(manifest_path), index_data)
+            save_json(manifest_path, manifest)
+            print_status(manifest)
+        if unknown_total and args.strict:
+            sys.exit(4)
 
     if summary["missing_texts"]:
         msg = f"[pack_lorepack] WARN: {len(summary['missing_texts'])} scene(s) missing in tree_texts.json: {summary['missing_texts'][:5]}"

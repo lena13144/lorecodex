@@ -756,7 +756,71 @@ with zipfile.ZipFile(epub_path, "w") as zf:
       Array.isArray(packedObj.config.aliases) && packedObj.config.aliases.some((g) => g.includes('Zero-7')),
       'pack_lorepack must merge aliases into corpus config'
     );
-    assert.strictEqual(packedObj.config.glossary['灰烬星港'], '边缘轨道补给站', 'pack_lorepack must merge glossary');
+    assert(
+      Array.isArray(packedObj.config.glossary) && packedObj.config.glossary.includes('灰烬星港：边缘轨道补给站'),
+      'pack_lorepack must normalize an object glossary into the runtime "术语：释义" list'
+    );
+    assert.strictEqual(
+      packedObj.indexData.arcs[0].scenes[0].chars,
+      String(JSON.parse(fs.readFileSync(path.join(outDir, 'epub-smoke', 'tree_texts.json'), 'utf8'))[firstSceneId].text).length,
+      'pack_lorepack must count chars from the text inside each tree_texts record'
+    );
+
+    // Cloud Builder Kit: slice_batches.py -> per-batch meta -> pack_lorepack --apply-meta updates the manifest.
+    {
+      const kitDir = path.join(tmpDir, 'kit-corpus');
+      fs.cpSync(path.join(ROOT, 'corpora', 'demo-chronicles'), kitDir, { recursive: true });
+      const kitIdx0 = JSON.parse(fs.readFileSync(path.join(kitDir, 'tree_index.json'), 'utf8'));
+      for (const a of kitIdx0.arcs) for (const sc of a.scenes) { delete sc._llm_done; sc.summary = ''; }
+      delete kitIdx0.stats.llm_scenes;
+      fs.writeFileSync(path.join(kitDir, 'tree_index.json'), JSON.stringify(kitIdx0));
+      const slicePy = path.join(ROOT, 'builders', 'slice_batches.py');
+      const packPy = path.join(ROOT, 'builders', 'pack_lorepack.py');
+      await execFileAsync(PYTHON_BIN, [slicePy, '--corpus-dir', kitDir, '--batch-chars', '2000']);
+      const manifestPath = path.join(kitDir, 'batches', 'manifest.json');
+      let manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      const allIds = kitIdx0.arcs.flatMap((a) => a.scenes.map((sc) => String(sc.node_id)));
+      assert(manifest.total_batches >= 2, 'demo corpus must be cut into several batches at 2000 chars');
+      assert.deepStrictEqual(manifest.batches.flatMap((b) => b.node_ids), allIds, 'every scene must appear exactly once, in reading order');
+      assert(manifest.batches.every((b) => b.chars <= 2000 || b.node_ids.length === 1), 'batches must respect --batch-chars');
+      const b1 = manifest.batches[0];
+      const b1Md = fs.readFileSync(path.join(kitDir, 'batches', b1.file), 'utf8');
+      assert(b1.node_ids.every((id) => b1Md.includes(`## [node_id=${id}]`)), 'batch file must carry a node_id heading per scene');
+      assert.strictEqual(manifest.next_batch, 'batch_001');
+
+      const kitPack = path.join(tmpDir, 'kit.lorepack.json');
+      const runPack = (metaFile) =>
+        execFileAsync(PYTHON_BIN, [packPy, '--corpus-dir', kitDir, '--apply-meta', metaFile, '--out', kitPack, '--strict']);
+      const meta1 = path.join(kitDir, 'batches', b1.meta_file);
+      fs.writeFileSync(
+        meta1,
+        JSON.stringify({
+          scene_summaries: Object.fromEntries(b1.node_ids.map((id) => [id, { summary: `第${id}幕摘要`, characters: ['林渊'] }])),
+          arc_summaries: Object.fromEntries(b1.multi_scene_arcs_complete.map((id) => [id, `篇章${id}摘要`])),
+          glossary: ['霜刃：林渊的战术目镜代号'],
+        })
+      );
+      await runPack(meta1);
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      assert.strictEqual(manifest.batches[0].status, 'done', 'applying a full batch meta must mark it done');
+      assert.strictEqual(manifest.next_batch, 'batch_002', 'next_batch must advance');
+      const kitIdx1 = JSON.parse(fs.readFileSync(path.join(kitDir, 'tree_index.json'), 'utf8'));
+      const firstArc = kitIdx1.arcs.find((a) => String(a.arc_id) === String(b1.arcs_complete[0]));
+      assert(firstArc.description && /摘要$/.test(firstArc.description), 'arc summary must land in arc.description (read by the agents)');
+      assert(firstArc.characters.includes('林渊'), 'scene characters must roll up to the arc');
+
+      // An invented node_id is reported and fails --strict.
+      const metaBad = path.join(kitDir, 'batches', 'meta_bad.json');
+      fs.writeFileSync(metaBad, JSON.stringify({ scene_summaries: { 'X-404': { summary: '编造' } } }));
+      let badErr = null;
+      try {
+        await runPack(metaBad);
+      } catch (e) {
+        badErr = e;
+      }
+      assert(badErr && /X-404/.test(String(badErr.stderr)), 'unknown node_ids must be reported and fail --strict');
+      console.log(`  PASS: slice_batches.py cut ${manifest.total_batches} batches; per-batch apply advanced the manifest`);
+    }
 
     console.log(`  PASS: EPUB, web-novel, Character Card V2, in-place LLM --upgrade, and pack_lorepack verified via ${PYTHON_BIN}`);
   } finally {
