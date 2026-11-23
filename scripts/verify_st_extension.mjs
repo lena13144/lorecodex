@@ -169,6 +169,11 @@ export async function testStExtension() {
     assert(!/查原文|追查/.test(injected.text), 'injection must not carry the follow-up marker hint');
     assert.strictEqual(injected.depth, 1);
     assert.strictEqual(p.sessionRecall, undefined, 'bare AM ids (content lives in world info) must not be forwarded');
+    assert.strictEqual(p.maxTurns, 8, 'retrieval turn limit defaults to 8');
+    settings.maxTurns = 20;
+    await run([userMsg('轮数上限测试')]);
+    assert.strictEqual(lc.payloads[0].maxTurns, 12, 'maxTurns is clamped to 12');
+    settings.maxTurns = 8;
 
     // 1b) Database recall in the real wrapper format: keep only "id(summary)" items, drop bare ids and <supplement>.
     await run([
@@ -272,7 +277,7 @@ export async function testStExtension() {
         seenDuring = chip.querySelector('.lorecodex-progress-text').textContent;
       };
       try {
-        await run([userMsg('雷达室那晚')]);
+        await run([userMsg('雷达室那晚的信号')]);
       } finally {
         lc.onSearch = null;
         delete globalThis.document;
@@ -281,7 +286,39 @@ export async function testStExtension() {
       assert(!formSheld.kids.length && !formSheld.cls.size, 'progress chip and host class must be removed after the search');
     }
 
-    console.log('  PASS: interceptor retrieval uses literal user text only; stale injections cleared; quiet/depth handled; progress chip shown/removed');
+    // 9) Reroll / continue with the same user message reuses the last injection instead of searching again.
+    {
+      const u = userMsg('塔顶那一夜发生了什么');
+      await run([u, aiMsg('第一次回复')]);
+      assert.strictEqual(lc.payloads.length, 1, 'first generation searches');
+      const firstText = lc.prompts.filter((x) => x.text).pop()?.text;
+      await run([u]); // swipe: ST pops the old reply, same user message
+      assert.strictEqual(lc.payloads.length, 0, 'reroll with the same user message must not search again');
+      assert.strictEqual(lc.prompts.filter((x) => x.text).pop()?.text, firstText, 'reroll re-injects the same block');
+      await run([u, aiMsg('第二次回复')], 'continue');
+      assert.strictEqual(lc.payloads.length, 0, 'continue reuses too');
+      await run([{ ...u, mes: '塔顶那一夜发生了什么？说详细点' }]);
+      assert.strictEqual(lc.payloads.length, 1, 'an edited user message searches again');
+      settings.maxOrder = 3;
+      await run([{ ...u, mes: '塔顶那一夜发生了什么？说详细点' }]);
+      assert.strictEqual(lc.payloads.length, 1, 'changing retrieval settings searches again');
+      settings.maxOrder = 0;
+      settings.reuseOnReroll = false;
+      await run([u]);
+      await run([u]);
+      assert.strictEqual(lc.payloads.length, 1, 'reuseOnReroll=false searches every time');
+      settings.reuseOnReroll = true;
+      // A failed search leaves nothing to reuse.
+      const okResult = lc.searchResult;
+      lc.searchResult = () => { throw new Error('boom'); };
+      const v = userMsg('失败之后再重roll');
+      await run([v]);
+      lc.searchResult = okResult;
+      await run([v]);
+      assert.strictEqual(lc.payloads.length, 1, 'a failed retrieval must not be cached');
+    }
+
+    console.log('  PASS: interceptor retrieval uses literal user text only; stale injections cleared; quiet/depth handled; progress chip shown/removed; reroll reuses the last retrieval');
   } finally {
     fs.rmSync(stRoot, { recursive: true, force: true });
     delete globalThis.__lc;

@@ -1669,7 +1669,7 @@ export async function openStSettingsModal() {
         <details class="adv-details">
           <summary>高级 / 开发者选项（检索深度、外部服务端与注入正则）</summary>
           <div class="adv-details-body">
-            <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;">
+            <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;">
               <div class="fld-group">
                 <label class="fld">对话轮数</label>
                 <input id="stRecentTurns" type="number" min="1" max="15" value="${Number(st.recentTurns) || 5}" />
@@ -1679,10 +1679,18 @@ export async function openStSettingsModal() {
                 <input id="stMaxScenes" type="number" min="0" max="12" value="${Number(st.maxScenes) || 0}" />
               </div>
               <div class="fld-group">
+                <label class="fld">检索轮数上限 (2–12)</label>
+                <input id="stMaxTurns" type="number" min="2" max="12" value="${Number(st.maxTurns) || 8}" />
+              </div>
+              <div class="fld-group">
                 <label class="fld">注入深度</label>
                 <input id="stDepth" type="number" min="0" max="10" value="${Number(st.depth) ?? 1}" />
               </div>
             </div>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;">
+              <input id="stReuseOnReroll" type="checkbox" ${st.reuseOnReroll !== false ? 'checked' : ''} style="width:auto;" />
+              <span><b>重roll 时复用上次检索</b>（用户消息没变就不再调用旁路模型）</span>
+            </label>
             <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;">
               <input id="stLocalMode" type="checkbox" ${st.localMode !== false ? 'checked' : ''} style="width:auto;" />
               <span><b>使用纯前端免后台引擎</b>（取消勾选则连接下方外部 Node 服务端）</span>
@@ -1733,8 +1741,10 @@ export async function openStSettingsModal() {
           pov: $('#stPov').value.trim(),
           recentTurns: Math.max(1, Math.floor(Number($('#stRecentTurns').value) || 5)),
           maxScenes: Math.max(0, Math.floor(Number($('#stMaxScenes').value) || 0)),
+          maxTurns: Math.min(12, Math.max(2, Math.floor(Number($('#stMaxTurns').value) || 8))),
           depth: Math.max(0, Math.floor(Number($('#stDepth').value) || 0)),
           localMode: $('#stLocalMode').checked,
+          reuseOnReroll: $('#stReuseOnReroll').checked,
           ragServer: $('#stRagServer').value.trim() || 'http://127.0.0.1:5240',
           customXmlTag: $('#stXmlTag').value.trim(),
           customHeader: $('#stHeader').value,

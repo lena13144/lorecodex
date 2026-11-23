@@ -1853,7 +1853,7 @@ export function createBrowserTreeAgent(pack) {
     async function search(payload, apiCfg, { onProgress = null } = {}) {
         const t0 = Date.now();
         const maxOrder = normalizeOrder(payload.maxOrder) ?? corpusConfig.spoiler_gate?.default_max_order ?? null;
-        const maxTurns = 8;
+        const maxTurns = Math.min(Math.max(Number(payload.maxTurns) || 8, 2), 12);
         const rawMaxScenes = Number(payload.maxScenes);
         const maxScenes = rawMaxScenes > 0 ? Math.min(rawMaxScenes, 12) : 10;
 
@@ -1957,8 +1957,9 @@ ${corpusConfig.world_premise || ''}
 1. 跳过判定：纯无关闲聊或未收录原创设定直接输出 {"skip":true,"reason":"..."}；涉及过往经历、设定或台词细节时主动检索。
 2. 高效寻路：首轮可并发调用目录工具与 grep_scenes（自动展开别名）；read_scene 尽量一次批量传入多个纯编号 scene_node_ids（最多 10 个，如 ["0080","0601"]）。
 3. 按跨度选幕：定点查证读 1~3 幕；长跨度回顾、群像或组织/势力过往读 4~10 幕，结合词表与目录人物表跨阶段/全分支覆盖（如前任/新晋/分队），宏观梳理可填 selected_arcs。
-4. 事实核实：selected_nodes 须经 read_scene 核实；若前提与原文矛盾则在 guide 开头直接澄清，严禁编造。
-5. 严格输出 JSON：
+4. 事实核实：selected_nodes 须经 read_scene 核实，严禁编造。
+5. 原作未载的事：对话提到的往事可能来自同人设定、角色卡前情或本局经历，原作里没有不代表没发生过。grep_scenes 搜索最多两轮：两轮后仍找不到这件事本身，就停止搜索这件事，不要再换关键词、换情绪标签重搜；下一轮最多 read_scene 一次，只补其中原作人物、地点、组织的相关原文作背景，然后直接输出；连背景也没有就 skip。guide 只写“此事原作未载”和原作里能对上的部分，不要否定、纠正或要求澄清用户的说法。
+6. 严格输出 JSON：
 {"skip":false,"selected_nodes":["经read_scene核实的node_id"],"selected_arcs":["可选宏观arc_id"],"timeline_note":"时间线阶段","guide":"结构化记忆导读并标注[node_id]"}`;
 
         const userParts = [];

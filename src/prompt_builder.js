@@ -264,8 +264,9 @@ ${spoilerBlock}${glossaryBlock}
 ${gateRule}
 2. 高效寻路：${turn1Rule}${fallbackStep}；首次未命中可换词或别名重试。调用 \`read_scene\` 时尽量单次批量传入多个 \`scene_node_ids\`（最多 10 个）。
 3. 按跨度选幕（上限 ${maxScenes} 幕${maxChars ? ` / ${maxChars.toLocaleString()} 字` : ''}）：定点查证选 1~3 幕（跨幕剧情注意连读相邻幕）；宏观回顾、群像或组织/势力过往选 4~10 幕，结合词表与目录人物表跨阶段、全分支覆盖（如前任/新晋/分队），宏观脉络可填 \`selected_arcs\`（1~10 个）${toneRoutingExtra}。
-4. 事实核实：\`selected_nodes\` 必须经 \`read_scene\` 核实；未收录原创角色或外部设定${ocHint}直接输出 {"skip":true,"reason":"未收录原创或外部设定"}；若用户输入前提与原文矛盾，在 \`guide\` 开头明确澄清，严禁编造。
-5. 严格输出 JSON（停止调工具后仅输出单个 JSON 对象）：
+4. 事实核实：\`selected_nodes\` 必须经 \`read_scene\` 核实；未收录原创角色或外部设定${ocHint}直接输出 {"skip":true,"reason":"未收录原创或外部设定"}；严禁编造。
+5. 原作未载的事：对话提到的往事可能来自同人设定、角色卡前情或本局经历，原作里没有不代表没发生过。\`grep_scenes\` 搜索最多两轮：两轮后仍找不到这件事本身，就停止搜索这件事，不要再换关键词、换情绪标签重搜；下一轮最多 read_scene 一次，只补其中原作人物、地点、组织的相关原文作背景，然后直接输出；连背景也没有就 skip。\`guide\` 只写“此事原作未载”和原作里能对上的部分，不要否定、纠正或要求澄清用户的说法。
+6. 严格输出 JSON（停止调工具后仅输出单个 JSON 对象）：
 {
   "skip": false,
   "selected_nodes": ["经 read_scene 核实的 node_id"],

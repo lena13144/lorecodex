@@ -55,6 +55,7 @@ const defaultSettings = {
     maxOrder: 0,
     recentTurns: 5,
     maxScenes: 0,
+    maxTurns: 8,
     pov: '',
     depth: 1,
     chatBase: '',
@@ -64,6 +65,7 @@ const defaultSettings = {
     temperature: '',
     reasoningEffort: '',
     llmStream: true,
+    reuseOnReroll: true,
     customXmlTag: '',
     customHeader: '',
     customPriorityRule: '',
@@ -79,6 +81,30 @@ const localAgentsCache = new Map();
 let serverDefaultCorpus = '';
 let lastHealthInfo = null;
 let lastInjectionSnapshot = null;
+// 重roll / 继续时复用上一次检索：同一聊天、同一条用户消息、同一组检索设置就不再翻一遍书。
+let lastRetrievalCache = null;
+
+function retrievalCacheKey(cfg, ctx, msgs) {
+    let idx = -1;
+    for (let i = (msgs || []).length - 1; i >= 0; i--) {
+        const m = msgs[i];
+        if (m && m.is_user && !m.is_system && m.mes) { idx = i; break; }
+    }
+    if (idx < 0) return '';
+    return JSON.stringify([
+        ctx?.chatId ?? '',
+        idx,
+        String(msgs[idx].mes),
+        (cfg.corpus || serverDefaultCorpus || '').trim(),
+        normalizeMaxOrder(cfg.maxOrder),
+        normalizeMaxScenes(cfg.maxScenes),
+        normalizeMaxTurns(cfg.maxTurns),
+        cfg.pov || '',
+        cfg.customXmlTag || '',
+        cfg.customHeader || '',
+        cfg.customPriorityRule || '',
+    ]);
+}
 
 // ---- 聊天输入框上方的检索进度条：检索期间显示，结束即消失 ----
 const TOOL_LABELS = {
@@ -160,6 +186,11 @@ function escHtml(s) {
 function normalizeMaxScenes(val) {
     const n = Number(val);
     return Number.isFinite(n) ? Math.min(Math.max(Math.round(n), 0), 12) : 0;
+}
+
+function normalizeMaxTurns(val) {
+    const n = Number(val);
+    return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.round(n), 2), 12) : 8;
 }
 
 function normalizeMaxOrder(val) {
@@ -573,7 +604,7 @@ function renderLastPreview(cfg) {
     const snap = lastInjectionSnapshot;
     const statusPill = snap.skip
         ? `<span class="lorecodex-pill skip">跳过注入</span>`
-        : `<span class="lorecodex-pill ok">命中 ${snap.scenes.length} 幕${snap.outlines?.length ? ` · ${snap.outlines.length}大纲` : ''}</span>`;
+        : `<span class="lorecodex-pill ok">命中 ${snap.scenes.length} 幕${snap.outlines?.length ? ` · ${snap.outlines.length}大纲` : ''}</span>${snap.reused ? '<span class="lorecodex-pill" title="用户消息未变，沿用上次检索结果">复用</span>' : ''}`;
     const orderPill = snap.max_order ? `<span class="lorecodex-pill accent">序≤${snap.max_order}</span>` : '';
     const scenesHtml = (snap.scenes || []).map(s => `
         <div class="lorecodex-scene-item">
@@ -630,7 +661,7 @@ async function executeTreeSearchRequest(cfg, payload, { onProgress = null } = {}
     return await resp.json();
 }
 
-async function runTreeRetrieval(cfg, ctx, chat, { query, onDemand, sessionRecall, clear }) {
+async function runTreeRetrieval(cfg, ctx, chat, { query, onDemand, sessionRecall, clear, cacheKey = '' }) {
     const depth = normalizeDepth(cfg.depth);
     const recentChat = collectRecentChat(chat, cfg.recentTurns || 5);
     const corpusId = (cfg.corpus || serverDefaultCorpus || '').trim();
@@ -651,6 +682,7 @@ async function runTreeRetrieval(cfg, ctx, chat, { query, onDemand, sessionRecall
                 pov: cfg.pov || '',
             },
             maxScenes: normalizeMaxScenes(cfg.maxScenes),
+            maxTurns: normalizeMaxTurns(cfg.maxTurns),
             maxOrder: maxOrder || undefined,
             pov: cfg.pov || '',
             apiConfig: buildApiConfig(cfg),
@@ -751,6 +783,7 @@ async function runTreeRetrieval(cfg, ctx, chat, { query, onDemand, sessionRecall
         prompt_chars: promptText.length,
     };
     renderLastPreview(cfg);
+    lastRetrievalCache = cacheKey ? { key: cacheKey, promptText, snapshot: lastInjectionSnapshot } : null;
 
     console.log(`[LoreCodex] Injected [${data.corpus_id}] ${scenes.length} scenes, ${outlines.length} outlines (${data.took_ms}ms, turns=${data.turns})`, data.trace);
     setExtensionPrompt(PROMPT_TAG, promptText, extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
@@ -797,10 +830,21 @@ async function runLoreRetrieval(chat) {
         const msgs = Array.isArray(ctx?.chat) && ctx.chat.length ? ctx.chat : (Array.isArray(chat) ? chat : []);
         const { query, onDemand, sessionRecall } = buildRetrievalInput(msgs);
         if (!query) { clear(); return; }
+        const cacheKey = retrievalCacheKey(cfg, ctx, msgs);
+        if (cfg.reuseOnReroll !== false && cacheKey && lastRetrievalCache?.key === cacheKey) {
+            // 用户消息没变（重roll、继续、删掉回复后重发）：沿用上次注入，不再调用旁路模型。
+            lastInjectionSnapshot = { ...lastRetrievalCache.snapshot, reused: true };
+            renderLastPreview(cfg);
+            setExtensionPrompt(PROMPT_TAG, lastRetrievalCache.promptText, extension_prompt_types.IN_CHAT, normalizeDepth(cfg.depth), false, extension_prompt_roles.SYSTEM);
+            console.log('[LoreCodex] Reused the previous retrieval (same user message)');
+            return;
+        }
+        lastRetrievalCache = null;
         startRetrievalProgress(cfg);
-        await runTreeRetrieval(cfg, ctx, msgs, { query, onDemand, sessionRecall, clear });
+        await runTreeRetrieval(cfg, ctx, msgs, { query, onDemand, sessionRecall, clear, cacheKey });
     } catch (err) {
         console.warn('[LoreCodex] retrieval failed:', err);
+        lastRetrievalCache = null;
         clear();
         const cid = (cfg.corpus || serverDefaultCorpus || '').trim();
         lastInjectionSnapshot = {
@@ -852,9 +896,11 @@ jQuery(async () => {
             corpus: cfg.corpus || '',
             maxOrder: normalizeMaxOrder(cfg.maxOrder),
             maxScenes: normalizeMaxScenes(cfg.maxScenes),
+            maxTurns: normalizeMaxTurns(cfg.maxTurns),
             recentTurns: Math.max(1, Number(cfg.recentTurns) || 5),
             depth: normalizeDepth(cfg.depth),
             pov: cfg.pov || '',
+            reuseOnReroll: cfg.reuseOnReroll !== false,
             customXmlTag: cfg.customXmlTag || '',
             customHeader: cfg.customHeader || '',
             customPriorityRule: cfg.customPriorityRule || '',
@@ -1459,9 +1505,11 @@ jQuery(async () => {
             if (p.ragServer !== undefined) cfg.ragServer = String(p.ragServer || '').trim() || 'http://127.0.0.1:5240';
             if (p.maxOrder !== undefined) cfg.maxOrder = normalizeMaxOrder(p.maxOrder);
             if (p.maxScenes !== undefined) cfg.maxScenes = normalizeMaxScenes(p.maxScenes);
+            if (p.maxTurns !== undefined) cfg.maxTurns = normalizeMaxTurns(p.maxTurns);
             if (p.recentTurns !== undefined) cfg.recentTurns = Math.max(1, Number(p.recentTurns) || 5);
             if (p.depth !== undefined) cfg.depth = Math.max(0, Number(p.depth) || 0);
             if (p.pov !== undefined) cfg.pov = String(p.pov || '').trim();
+            if (p.reuseOnReroll !== undefined) cfg.reuseOnReroll = Boolean(p.reuseOnReroll);
             if (p.customXmlTag !== undefined) cfg.customXmlTag = String(p.customXmlTag || '');
             if (p.customHeader !== undefined) cfg.customHeader = String(p.customHeader || '');
             if (p.customPriorityRule !== undefined) cfg.customPriorityRule = String(p.customPriorityRule || '');
