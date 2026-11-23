@@ -4,9 +4,12 @@ import http from 'http';
 import path from 'path';
 import { spawn, execFile, execFileSync, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
+import { testStExtension } from './verify_st_extension.mjs';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -942,6 +945,65 @@ async function testMcpAndBrowserEngine() {
     browserMockSrv.close();
   }
 
+  // Retrieval input is literal-only: world-info state hints / DB scrubber / follow-up marker hint are gone
+  // from both engines' prompts and from normalized corpus configs.
+  {
+    const legacyCfg = {
+      name: 'Legacy',
+      db_scrubber: { boilerplate_patterns: ['x'], summary_priority_patterns: ['y'] },
+      prompt_framing: { follow_up_hint: '附带【查原文：…】' },
+    };
+    const bCfg = browserMod.normalizeCorpusConfig(legacyCfg, 'legacy');
+    const sCfg = require('../src/prompt_builder.js').normalizeCorpusConfig(legacyCfg, 'legacy');
+    for (const [label, c] of [['browser', bCfg], ['server', sCfg]]) {
+      assert(!('db_scrubber' in c), `${label} normalizeCorpusConfig must drop db_scrubber`);
+      assert(!('follow_up_hint' in c.prompt_framing), `${label} normalizeCorpusConfig must drop follow_up_hint`);
+    }
+    const userMsgText = require('../src/prompt_builder.js').buildUserMessage({
+      query: '雷达室那晚',
+      recentChat: [],
+      sceneAnchor: { charName: '灰烬星港', userName: '旅人' },
+      activeStateHints: 'WORLDINFO-LEAK',
+      sessionRecall: ['AM0022 芙拉米尔交代委托规则'],
+      onDemand: '',
+      corpusConfig: sCfg,
+      maxOrder: null,
+    });
+    assert(!userMsgText.includes('WORLDINFO-LEAK') && !userMsgText.includes('当前世界书'), 'server user prompt must ignore activeStateHints');
+    assert(
+      userMsgText.includes('【本局记忆召回】') && userMsgText.includes('AM0022 芙拉米尔交代委托规则'),
+      'server user prompt must carry session recall in its own section'
+    );
+
+    let seenUserPrompt = '';
+    const searchMockSrv = http.createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        seenUserPrompt = String(body.messages?.find((m) => m.role === 'user')?.content || '');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ choices: [{ message: { content: '{"skip":true,"reason":"test"}' } }] }));
+      });
+    });
+    await new Promise((r) => searchMockSrv.listen(0, '127.0.0.1', r));
+    try {
+      const port = searchMockSrv.address().port;
+      await localAgent.search(
+        { query: '雷达室那晚', onDemand: '', recentChat: [], activeStateHints: 'WORLDINFO-LEAK', sessionRecall: ['AM0022 芙拉米尔交代委托规则'], sceneAnchor: { charName: '灰烬星港', userName: '旅人' } },
+        { chatBase: `http://127.0.0.1:${port}/v1`, chatKey: 'mock-key', chatModel: 'mock-model' }
+      );
+    } finally {
+      searchMockSrv.close();
+    }
+    assert(seenUserPrompt.includes('雷达室那晚'), 'In-Browser search must send the literal query');
+    assert(!seenUserPrompt.includes('WORLDINFO-LEAK') && !seenUserPrompt.includes('状态线索'), 'In-Browser search must ignore activeStateHints');
+    assert(
+      seenUserPrompt.includes('【本局记忆召回】') && seenUserPrompt.includes('AM0022 芙拉米尔交代委托规则'),
+      'In-Browser search must carry session recall in its own section'
+    );
+  }
+
   // 2. Test src/mcp_server.js over stdio JSON-RPC 2.0
   const mcpProc = spawn('node', [path.join(ROOT, 'src', 'mcp_server.js'), '--corpora-dir', path.join(ROOT, 'corpora')], {
     cwd: ROOT,
@@ -1228,6 +1290,8 @@ async function main() {
     console.log(`  PASS: demo-chronicles Zero-7=${gAliasDemo.data.took_ms}ms/${gAliasDemo.data.total} hits, cameo=${gCameoDemo.data.hits[0].cameo}`);
 
     await testMcpAndBrowserEngine();
+
+    await testStExtension();
 
     testHygieneAndSyntax();
 

@@ -152,7 +152,6 @@ export async function fetchCorpora() {
       tone_tags: agent.toneTags,
       spoiler_gate: p.config?.spoiler_gate || {},
       prompt_framing: p.config?.prompt_framing || {},
-      db_scrubber: p.config?.db_scrubber || {},
     };
   });
   return {

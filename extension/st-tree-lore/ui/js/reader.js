@@ -62,8 +62,6 @@ function buildInjectionPreview(out) {
   const priority =
     pf.priority_rule ||
     '【事实优先级】若原作片段细节与当前世界书/角色卡设定或本局对话已确认的新发展存在冲突，一律以本局当前时间线为准。';
-  const followUp =
-    pf.follow_up_hint || '如仍需追查其他特定过往台词或细节，可在回复末尾附带【查原文：具体问题或人物事件】。';
 
   const parts = [`<${tag}>`, header, priority];
   if (out.max_order) {
@@ -96,7 +94,7 @@ function buildInjectionPreview(out) {
   if (out.relations?.length) {
     parts.push(`\n【实体关系图谱】\n${out.relations.slice(0, 8).join('\n')}`);
   }
-  parts.push(`\n${followUp}\n</${tag}>`);
+  parts.push(`</${tag}>`);
   return parts.join('\n');
 }
 

@@ -5,6 +5,7 @@
   "optional": [],
   "js": "index.js",
   "css": "style.css",
+  "generate_interceptor": "loreCodexGenerateInterceptor",
   "author": "LoreCodex",
   "version": "2.2.0",
   "homePage": "https://github.com/lena13144/lorecodex"

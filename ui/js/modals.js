@@ -674,8 +674,6 @@ export async function openCorpusModal(initialTab = 'basic') {
     const aliasesText = (c.aliases || []).map((g) => g.join(', ')).join('\n');
     const glossaryText = (c.glossary || []).join('\n');
     const stageText = (c.stage_card_patterns || []).join('\n');
-    const boilerText = (c.db_scrubber?.boilerplate_patterns || []).join('\n');
-    const sumPriText = (c.db_scrubber?.summary_priority_patterns || []).join('\n');
 
     const seriesList = Array.isArray(state.index?.series) ? state.index.series : [];
     const totalScenes = Number(state.index?.stats?.scenes || detail.stats?.scenes || 0);
@@ -746,11 +744,6 @@ export async function openCorpusModal(initialTab = 'basic') {
           </div>
           <div class="fld-group"><label class="fld">注入导语 Header</label><textarea id="ccHeader" rows="2">${esc(c.prompt_framing?.header || '')}</textarea></div>
           <div class="fld-group"><label class="fld">事实优先级规则</label><textarea id="ccPriority" rows="2">${esc(c.prompt_framing?.priority_rule || '')}</textarea></div>
-          <div class="fld-group"><label class="fld">追查指令尾注</label><input id="ccFollowUp" type="text" value="${esc(c.prompt_framing?.follow_up_hint || '')}" /></div>
-          <div class="fld-row-2">
-            <div class="fld-group"><label class="fld">数据库样板跳过正则（每行一条）</label><textarea id="ccBoiler" rows="2">${esc(boilerText)}</textarea></div>
-            <div class="fld-group"><label class="fld">优先摘要正则（每行一条）</label><textarea id="ccSumPri" rows="2">${esc(sumPriText)}</textarea></div>
-          </div>
         </div>
 
         <div id="ctab-upgrade" class="ctab-pane" style="display:none;flex-direction:column;gap:10px;">
@@ -963,11 +956,6 @@ export async function openCorpusModal(initialTab = 'basic') {
             xml_tag: $('#ccXmlTag').value.trim(),
             header: $('#ccHeader').value.trim(),
             priority_rule: $('#ccPriority').value.trim(),
-            follow_up_hint: $('#ccFollowUp').value.trim(),
-          },
-          db_scrubber: {
-            boilerplate_patterns: splitLines($('#ccBoiler').value),
-            summary_priority_patterns: splitLines($('#ccSumPri').value),
           },
         });
 
@@ -1594,18 +1582,6 @@ export async function openStSettingsModal() {
               <label class="fld">事实优先级规则</label>
               <textarea id="stPriorityRule" rows="2" placeholder="留空使用当前语料默认">${esc(st.customPriorityRule || '')}</textarea>
             </div>
-            <div class="fld-group">
-              <label class="fld">追查指令尾注</label>
-              <input id="stFollowupHint" type="text" value="${esc(st.customFollowUpHint || '')}" placeholder="留空使用当前语料默认" />
-            </div>
-            <div class="fld-group">
-              <label class="fld">跳过样板条目正则（每行一条）</label>
-              <textarea id="stBoilerRe" rows="2" placeholder="留空使用默认">${esc(st.customBoilerplateRegex || '')}</textarea>
-            </div>
-            <div class="fld-group">
-              <label class="fld">优先保留摘要正则（每行一条）</label>
-              <textarea id="stSummaryRe" rows="2" placeholder="留空使用默认">${esc(st.customSummaryPriorityRegex || '')}</textarea>
-            </div>
           </div>
         </details>
       </div>
@@ -1642,9 +1618,6 @@ export async function openStSettingsModal() {
           customXmlTag: $('#stXmlTag').value.trim(),
           customHeader: $('#stHeader').value,
           customPriorityRule: $('#stPriorityRule').value,
-          customFollowUpHint: $('#stFollowupHint').value,
-          customBoilerplateRegex: $('#stBoilerRe').value,
-          customSummaryPriorityRegex: $('#stSummaryRe').value,
         };
         await requestStParent('lorecodex:st-save-settings', { patch }, 'lorecodex:st-settings-saved');
         showToast('已同步保存到酒馆扩展', 'ok');

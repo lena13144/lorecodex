@@ -247,11 +247,6 @@ function main() {
         '以下为《星港编年史》中检索并核实的章节原文与技术档案。请将其作为角色回忆或世界常识自然融入扮演，严禁剧透超出当前进度的新章内容。',
       priority_rule:
         '【事实优先级】若原著细节与本局当前对话已确认的发展存在冲突，以本局当前时间线为准。',
-      follow_up_hint: '如仍需追查特定细节，可在回复末尾附带【查原文：具体问题或人物事件】。',
-    },
-    db_scrubber: {
-      boilerplate_patterns: [],
-      summary_priority_patterns: [],
     },
     ui: {
       subtitle: '星港编年史 · 通用树检索示范集',
@@ -267,7 +262,6 @@ function main() {
           query: '苏璃的真正身份和苍穹之心是什么？',
           onDemand: '',
           recent: '',
-          hints: '',
         },
         {
           label: '全解锁+技术档',
@@ -278,7 +272,6 @@ function main() {
           query: '',
           onDemand: '苏璃的真正身份以及银鸢号推进器参数',
           recent: '',
-          hints: '',
         },
         {
           label: '别名/客串查证',
@@ -289,7 +282,6 @@ function main() {
           query: 'Zero-7 和老铁匠卡伦提过什么？',
           onDemand: '',
           recent: '',
-          hints: '',
         },
       ],
     },

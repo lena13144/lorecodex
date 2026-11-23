@@ -121,7 +121,6 @@ function createCorpusManager(corporaDir, { fallbackSearchFn = null } = {}) {
       series: d.series,
       spoiler_gate: d.config.spoiler_gate,
       prompt_framing: d.config.prompt_framing,
-      db_scrubber: d.config.db_scrubber,
       ui: d.config.ui,
       loaded: agentCache.has(d.id),
     }));
@@ -210,7 +209,6 @@ function createCorpusManager(corporaDir, { fallbackSearchFn = null } = {}) {
       'hierarchy',
       'grep',
       'prompt_framing',
-      'db_scrubber',
       'ui',
     ];
 

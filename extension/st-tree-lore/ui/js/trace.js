@@ -22,7 +22,7 @@ export function renderPresets() {
       $('#qText').value = p.query ?? '';
       $('#qOnDemand').value = p.onDemand ?? '';
       $('#qRecent').value = p.recent ?? '';
-      $('#qHints').value = p.hints ?? '';
+      $('#qRecall').value = Array.isArray(p.sessionRecall) ? p.sessionRecall.join('\n') : '';
     });
   });
 }
@@ -265,7 +265,7 @@ export async function executeSearch() {
       query: $('#qText').value.trim(),
       onDemand: $('#qOnDemand').value.trim(),
       recentChat,
-      activeStateHints: $('#qHints').value.trim(),
+      sessionRecall: ($('#qRecall')?.value || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
       maxScenes: Number.isFinite(maxScenesVal) && maxScenesVal >= 0 ? maxScenesVal : 0,
       maxOrder: Number.isFinite(maxOrderVal) && maxOrderVal > 0 ? maxOrderVal : 0,
       sceneAnchor: { charName: $('#qChar').value.trim(), userName: $('#qUser').value.trim() },

@@ -14,7 +14,6 @@ function normalizeCorpusConfig(raw, corpusId) {
   const ug = cfg.user_identity_guard && typeof cfg.user_identity_guard === 'object' ? cfg.user_identity_guard : {};
   const hier = cfg.hierarchy && typeof cfg.hierarchy === 'object' ? cfg.hierarchy : {};
   const grep = cfg.grep && typeof cfg.grep === 'object' ? cfg.grep : {};
-  const scrub = cfg.db_scrubber && typeof cfg.db_scrubber === 'object' ? cfg.db_scrubber : {};
   const ui = cfg.ui && typeof cfg.ui === 'object' ? cfg.ui : {};
 
   return {
@@ -64,13 +63,6 @@ function normalizeCorpusConfig(raw, corpusId) {
       priority_rule:
         String(pf.priority_rule || '').trim() ||
         '【事实优先级】若原作片段细节与当前世界书/角色卡设定或本局对话已确认的新发展存在冲突，一律以本局当前时间线为准；早期阶段片段仅作回忆对照，请留意章节与时间标记，勿误当成当下未解开的旧态度。',
-      follow_up_hint:
-        String(pf.follow_up_hint || '').trim() ||
-        '如仍需追查其他特定过往台词或细节，可在回复末尾附带【查原文：具体问题或人物事件】。',
-    },
-    db_scrubber: {
-      boilerplate_patterns: Array.isArray(scrub.boilerplate_patterns) ? scrub.boilerplate_patterns : [],
-      summary_priority_patterns: Array.isArray(scrub.summary_priority_patterns) ? scrub.summary_priority_patterns : [],
     },
     ui: {
       subtitle: String(ui.subtitle || '典籍阅读与树检索工作台').trim(),
@@ -283,7 +275,22 @@ ${gateRule}
 }`;
 }
 
-function buildUserMessage({ query, recentChat, sceneAnchor, activeStateHints, onDemand, corpusConfig, maxOrder }) {
+/** 本局记忆召回：数据库插件附在用户消息里的「编号(摘要)」条目，由扩展端提取后传入。 */
+function normalizeSessionRecall(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const out = [];
+  let total = 0;
+  for (const item of list) {
+    const line = String(item || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    if (!line) continue;
+    if (total + line.length > 1200 || out.length >= 30) break;
+    out.push(line);
+    total += line.length;
+  }
+  return out;
+}
+
+function buildUserMessage({ query, recentChat, sceneAnchor, sessionRecall, onDemand, corpusConfig, maxOrder }) {
   const parts = [];
   const anchorBits = [];
 
@@ -313,8 +320,9 @@ function buildUserMessage({ query, recentChat, sceneAnchor, activeStateHints, on
     parts.push(`【当前对话锚点】\n${anchorBits.join(' | ')}`);
   }
 
-  if (activeStateHints && String(activeStateHints).trim()) {
-    parts.push(`【当前世界书 / 数据库轻量线索】\n${String(activeStateHints).trim().slice(0, 1200)}`);
+  const recall = normalizeSessionRecall(sessionRecall);
+  if (recall.length) {
+    parts.push(`【本局记忆召回】（本局已发生的事，不是原作内容；只用于理解对话里的指代，不要据此去原作里找本局独有的事件）\n${recall.join('\n')}`);
   }
 
   if (Array.isArray(recentChat) && recentChat.length) {
@@ -343,6 +351,7 @@ function buildUserMessage({ query, recentChat, sceneAnchor, activeStateHints, on
 }
 
 module.exports = {
+  normalizeSessionRecall,
   normalizeCorpusConfig,
   isStageCardName,
   buildTools,

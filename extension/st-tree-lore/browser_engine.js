@@ -72,7 +72,6 @@ export function normalizeCorpusConfig(raw, corpusId) {
     const ug = cfg.user_identity_guard && typeof cfg.user_identity_guard === 'object' ? cfg.user_identity_guard : {};
     const hier = cfg.hierarchy && typeof cfg.hierarchy === 'object' ? cfg.hierarchy : {};
     const grep = cfg.grep && typeof cfg.grep === 'object' ? cfg.grep : {};
-    const scrub = cfg.db_scrubber && typeof cfg.db_scrubber === 'object' ? cfg.db_scrubber : {};
 
     return {
         id: String(cfg.id || corpusId || 'default').trim(),
@@ -121,13 +120,6 @@ export function normalizeCorpusConfig(raw, corpusId) {
             priority_rule:
                 String(pf.priority_rule || '').trim() ||
                 '【事实优先级】若原作片段细节与当前世界书/角色卡设定或本局对话已确认的新发展存在冲突，一律以本局当前时间线为准。',
-            follow_up_hint:
-                String(pf.follow_up_hint || '').trim() ||
-                '如仍需追查其他特定过往台词或细节，可在回复末尾附带【查原文：具体问题或人物事件】。',
-        },
-        db_scrubber: {
-            boilerplate_patterns: Array.isArray(scrub.boilerplate_patterns) ? scrub.boilerplate_patterns : [],
-            summary_priority_patterns: Array.isArray(scrub.summary_priority_patterns) ? scrub.summary_priority_patterns : [],
         },
     };
 }
@@ -1033,6 +1025,21 @@ export function inspectCorpusStructure(pack) {
 }
 
 // In-Browser Tree Agent & Grep Runtime
+/** 本局记忆召回：数据库插件附在用户消息里的「编号(摘要)」条目，由扩展端提取后传入。 */
+export function normalizeSessionRecall(raw) {
+    const list = Array.isArray(raw) ? raw : [];
+    const out = [];
+    let total = 0;
+    for (const item of list) {
+        const line = String(item || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+        if (!line) continue;
+        if (total + line.length > 1200 || out.length >= 30) break;
+        out.push(line);
+        total += line.length;
+    }
+    return out;
+}
+
 export function createBrowserTreeAgent(pack) {
     const corpusId = pack.id;
     const corpusConfig = normalizeCorpusConfig(pack.config, corpusId);
@@ -1523,7 +1530,8 @@ ${corpusConfig.world_premise || ''}
 
         const userParts = [];
         if (payload.sceneAnchor?.charName) userParts.push(`当前角色：${payload.sceneAnchor.charName} | 用户：${payload.sceneAnchor.userName || '旅人'}`);
-        if (payload.activeStateHints) userParts.push(`【状态线索】\n${payload.activeStateHints}`);
+        const sessionRecall = normalizeSessionRecall(payload.sessionRecall);
+        if (sessionRecall.length) userParts.push(`【本局记忆召回】（本局已发生的事，不是原作内容；只用于理解对话里的指代，不要据此去原作里找本局独有的事件）\n${sessionRecall.join('\n')}`);
         if (Array.isArray(payload.recentChat) && payload.recentChat.length) {
             userParts.push(`【最近对话】\n` + payload.recentChat.map((m) => `[${m.name || m.role}]: ${m.text}`).join('\n'));
         }

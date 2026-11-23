@@ -249,7 +249,7 @@ function recordTreeRun(payload, out) {
       maxOrder: payload?.maxOrder ?? null,
       recentCount: Array.isArray(payload?.recentChat) ? payload.recentChat.length : 0,
       recentChat: Array.isArray(payload?.recentChat) ? payload.recentChat.slice(-6) : [],
-      activeStateHints: String(payload?.activeStateHints || '').slice(0, 600),
+      sessionRecall: Array.isArray(payload?.sessionRecall) ? payload.sessionRecall.slice(0, 30) : [],
       maxScenes: payload?.maxScenes ?? 0,
     },
     output: out,

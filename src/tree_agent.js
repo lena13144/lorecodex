@@ -925,7 +925,6 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     const onDemand = String(payload.onDemand || '').trim();
     const recentChat = Array.isArray(payload.recentChat) ? payload.recentChat : [];
     const sceneAnchor = payload.sceneAnchor || {};
-    const activeStateHints = String(payload.activeStateHints || '').trim();
     const pov = String(sceneAnchor.pov || payload.pov || '').trim();
     const maxTurns = Math.min(Math.max(Number(payload.maxTurns) || 8, 2), 12);
     const rawMaxScenes = payload.maxScenes;
@@ -976,7 +975,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       query,
       recentChat,
       sceneAnchor: { ...sceneAnchor, pov },
-      activeStateHints,
+      sessionRecall: payload.sessionRecall,
       onDemand,
       corpusConfig,
       maxOrder,

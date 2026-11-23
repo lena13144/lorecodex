@@ -1810,8 +1810,7 @@ def main():
             "prompt_framing": {
                 "xml_tag": "lore_source_reference",
                 "header": f"以下为《{args.name}》典籍中检索并核实的原文片段与设定。请将其作为既有经历或背景常识自然融入扮演，不要机械复读。",
-                "priority_rule": "【事实优先级】若原作片段细节与本局当前设定或新发展存在冲突，一律以本局当前时间线为准。",
-                "follow_up_hint": "如需继续追查其他细节，可在回复末尾附带【查原文：具体问题或人物事件】。",
+                "priority_rule": "【事实优先级】若原作片段细节与本局当前设定或新发展存在冲突，一律以本局当前时间线为准。"
             },
             "ui": {
                 "subtitle": f"{args.name} · 典籍与树检索工作台",

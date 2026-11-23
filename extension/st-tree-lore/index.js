@@ -66,9 +66,6 @@ const defaultSettings = {
     customXmlTag: '',
     customHeader: '',
     customPriorityRule: '',
-    customFollowUpHint: '',
-    customBoilerplateRegex: '',
-    customSummaryPriorityRegex: '',
     charBindings: {},
     uiTheme: 'lamp',
 };
@@ -157,11 +154,30 @@ function cleanMessage(mes) {
         .trim();
 }
 
-function extractDbRecallHints(mes) {
-    if (!mes) return '';
-    const m = String(mes).match(/# 记忆召回([\s\S]*)/);
-    if (!m) return '';
-    return cleanMessage(m[1]).replace(/\s+/g, ' ').trim().slice(0, 450);
+/**
+ * 从用户消息里的数据库「# 记忆召回」块提取本局记忆。
+ * 只保留自带括号摘要的条目，例如 AM0022(芙拉米尔交代委托规则)；纯编号（AM0057）的正文在世界书里，
+ * 检索模型看不懂，直接丢弃。<supplement> 等其余部分不读。
+ * @returns {string[]}
+ */
+function extractSessionRecall(mes) {
+    const s = String(mes || '');
+    const start = s.indexOf('# 记忆召回');
+    if (start < 0) return [];
+    const rest = s.slice(start);
+    const end = rest.search(/<\/recall>|\n-{3,}|合计[：:]|<supplement>/);
+    const block = end >= 0 ? rest.slice(0, end) : rest.slice(0, 4000);
+    const out = [];
+    let total = 0;
+    const re = /\b(AM\d{2,})\s*[（(]([^()（）]{2,200})[)）]/g;
+    let m;
+    while ((m = re.exec(block))) {
+        const line = `${m[1]} ${m[2].trim().slice(0, 100)}`;
+        if (total + line.length > 1200) break;
+        out.push(line);
+        total += line.length;
+    }
+    return out;
 }
 
 function collectRecentChat(chat, maxTurns) {
@@ -189,74 +205,6 @@ function buildApiConfig(cfg) {
     const re = normalizeReasoningEffort(cfg.reasoningEffort);
     if (re) out.reasoningEffort = re;
     return out;
-}
-
-function collectActivatedEntries(loreData) {
-    const texts = [];
-    const push = (x) => {
-        if (!x) return;
-        if (typeof x === 'string' && x.trim()) texts.push(x);
-        else if (x.content && typeof x.content === 'string') texts.push(x.content);
-    };
-    const walk = (obj) => {
-        if (!obj) return;
-        if (Array.isArray(obj)) { obj.forEach(push); return; }
-        if (obj instanceof Set || obj instanceof Map) { walk([...obj]); return; }
-        if (typeof obj === 'object') {
-            if (Array.isArray(obj.entries)) obj.entries.forEach(walk);
-            else if (obj.entries instanceof Set || obj.entries instanceof Map) walk([...obj.entries]);
-            if (Array.isArray(obj.allActivatedEntries)) obj.allActivatedEntries.forEach(walk);
-            else if (obj.allActivatedEntries instanceof Set) walk([...obj.allActivatedEntries]);
-        }
-    };
-    for (const key of ['globalLore', 'characterLore', 'charLore', 'chatLore', 'personaLore', 'entries']) walk(loreData?.[key]);
-    if (!texts.length) walk(loreData);
-    return texts;
-}
-
-function compilePatternList(patterns) {
-    const out = [];
-    for (const p of patterns || []) {
-        if (!p || !String(p).trim()) continue;
-        try {
-            out.push(new RegExp(String(p).trim(), 'i'));
-        } catch (e) {
-            console.warn('[LoreCodex] invalid regex skipped:', p, e);
-        }
-    }
-    return out;
-}
-
-function buildActiveStateHints(entryTexts, dbRecallHints, corpusMeta, cfg) {
-    const boilerSources = cfg.customBoilerplateRegex && cfg.customBoilerplateRegex.trim()
-        ? cfg.customBoilerplateRegex.split(/\n+/).map(s => s.trim()).filter(Boolean)
-        : (corpusMeta?.db_scrubber?.boilerplate_patterns || []);
-
-    const summarySources = cfg.customSummaryPriorityRegex && cfg.customSummaryPriorityRegex.trim()
-        ? cfg.customSummaryPriorityRegex.split(/\n+/).map(s => s.trim()).filter(Boolean)
-        : (corpusMeta?.db_scrubber?.summary_priority_patterns || []);
-
-    const boilerRegexes = compilePatternList(boilerSources);
-    const summaryRegexes = compilePatternList(summarySources);
-
-    const isBoilerplate = (raw) => boilerRegexes.some(re => re.test(raw));
-    const isDbSummary = (raw) => summaryRegexes.some(re => re.test(raw));
-
-    const dbPriority = [];
-    const charOrOther = [];
-    if (dbRecallHints) dbPriority.push('[DB召回] ' + dbRecallHints);
-
-    for (const raw of (entryTexts || [])) {
-        const s = String(raw || '');
-        if (!s.trim() || isBoilerplate(s)) continue;
-        const cleaned = cleanMessage(s).replace(/\s+/g, ' ').trim();
-        if (!cleaned) continue;
-        if (isDbSummary(s)) dbPriority.push(cleaned.slice(0, 260));
-        else charOrOther.push(cleaned.slice(0, 180));
-    }
-
-    const ordered = [...dbPriority.slice(-6), ...charOrOther.slice(0, 4)];
-    return ordered.join('\n').slice(0, 1200);
 }
 
 let resolvedServerBase = '';
@@ -522,7 +470,6 @@ async function fetchCorporaAndHealth(cfg) {
                 name: `${p.config?.name || p.id}`,
                 stats: st,
                 prompt_framing: p.config?.prompt_framing,
-                db_scrubber: p.config?.db_scrubber,
                 isLocal: true,
             });
         }
@@ -543,8 +490,7 @@ function getEffectiveFraming(corpusMeta, cfg) {
     const xmlTag = rawTag.replace(/[^a-zA-Z0-9_-]/g, '') || 'lore_source_reference';
     const header = (cfg.customHeader || pf.header || `以下为《${cName}》中检索并核实的过往剧情原文与设定片段。请将其作为角色回忆或既有经历自然融入扮演，不要机械复读旁白。`).trim();
     const priorityRule = (cfg.customPriorityRule || pf.priority_rule || '【事实优先级】若原作片段细节与当前世界书/角色卡设定或本局对话已确认的新发展存在冲突，一律以本局当前时间线为准。').trim();
-    const followUpHint = (cfg.customFollowUpHint || pf.follow_up_hint || '如仍需追查其他特定过往台词或细节，可在回复末尾附带【查原文：具体问题或人物事件】。').trim();
-    return { xmlTag, header, priorityRule, followUpHint };
+    return { xmlTag, header, priorityRule };
 }
 
 function renderLastPreview(cfg) {
@@ -614,12 +560,11 @@ async function executeTreeSearchRequest(cfg, payload) {
     return await resp.json();
 }
 
-async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, dbRecallHints, clear }) {
-    const depth = Number.isFinite(Number(cfg.depth)) ? Number(cfg.depth) : 1;
+async function runTreeRetrieval(cfg, ctx, chat, { query, onDemand, sessionRecall, clear }) {
+    const depth = normalizeDepth(cfg.depth);
     const recentChat = collectRecentChat(chat, cfg.recentTurns || 5);
     const corpusId = (cfg.corpus || serverDefaultCorpus || '').trim();
     const corpusMeta = corporaMap.get(corpusId) || null;
-    const activeStateHints = buildActiveStateHints(entryTexts, dbRecallHints, corpusMeta, cfg);
     const maxOrder = normalizeMaxOrder(cfg.maxOrder);
 
     let data;
@@ -628,13 +573,13 @@ async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, d
             corpus: corpusId || undefined,
             query,
             onDemand,
+            sessionRecall: sessionRecall?.length ? sessionRecall : undefined,
             recentChat,
             sceneAnchor: {
                 charName: ctx?.name2 || '',
                 userName: ctx?.name1 || '旅人',
                 pov: cfg.pov || '',
             },
-            activeStateHints,
             maxScenes: normalizeMaxScenes(cfg.maxScenes),
             maxOrder: maxOrder || undefined,
             pov: cfg.pov || '',
@@ -683,8 +628,7 @@ async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, d
         return;
     }
 
-    const wbText = (entryTexts || []).join('\n');
-    const profLines = (data.profiles || []).filter(p => !(p.tag && wbText.includes(String(p.tag).slice(0, 30)))).slice(0, 3);
+    const profLines = (data.profiles || []).slice(0, 3);
     const profBlock = profLines.length
         ? `\n\n【角色档案参考】\n` + profLines.map(p => `《${p.tag}》\n${String(p.text || '').slice(0, 700)}`).join('\n\n')
         : '';
@@ -721,7 +665,7 @@ async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, d
     const framing = getEffectiveFraming(activeMeta, cfg);
     const spoilerNote = data.max_order ? `\n【防剧透进度锁定】当前仅解锁至进度序 <= ${data.max_order} 的已知章节，请严守角色当下认知边界。` : '';
 
-    const promptText = `<${framing.xmlTag}>\n${framing.header}\n${framing.priorityRule}${spoilerNote}${guideBlock}${outlineBlock}${profBlock}${sceneBlock}${chunkBlock}${relBlock}\n\n${framing.followUpHint}\n</${framing.xmlTag}>`;
+    const promptText = `<${framing.xmlTag}>\n${framing.header}\n${framing.priorityRule}${spoilerNote}${guideBlock}${outlineBlock}${profBlock}${sceneBlock}${chunkBlock}${relBlock}\n</${framing.xmlTag}>`;
 
     lastInjectionSnapshot = {
         corpus_id: data.corpus_id || corpusId,
@@ -742,35 +686,47 @@ async function runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, d
     setExtensionPrompt(PROMPT_TAG, promptText, extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
 }
 
+/** 用户原话里明确要求引用原文时，按精确查原文处理。 */
+const USER_QUOTE_RE = /原话|台词|原文|说过什么|那句|那句话|怎么说的|引文|还记得.*说|ta当时说|具体说了/;
+
+function normalizeDepth(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 1;
+}
+
+function clearInjection(cfg) {
+    setExtensionPrompt(PROMPT_TAG, '', extension_prompt_types.IN_CHAT, normalizeDepth(cfg?.depth), false, extension_prompt_roles.SYSTEM);
+}
+
+/**
+ * 只用字面内容构造检索输入：最后一条用户消息（清理后）。
+ * @returns {{ query: string, onDemand: string, sessionRecall: string[] }}
+ */
+function buildRetrievalInput(chat) {
+    const lastUserMsg = (chat || []).filter(m => m && m.is_user && !m.is_system && m.mes).slice(-1)[0];
+    const query = lastUserMsg ? cleanMessage(lastUserMsg.mes).slice(0, 500) : '';
+    const onDemand = query && USER_QUOTE_RE.test(query) ? query : '';
+    const sessionRecall = lastUserMsg ? extractSessionRecall(lastUserMsg.mes) : [];
+    return { query, onDemand, sessionRecall };
+}
+
 let loreRagRunning = false;
-async function runLoreRetrieval(loreData) {
+async function runLoreRetrieval(chat) {
     const cfg = getSettings();
-    if (!cfg.enabled || loreRagRunning) return;
+    if (!cfg.enabled) { clearInjection(cfg); return; }
+    if (loreRagRunning) {
+        // 上一轮还没结束：不要让旧注入跟着这次生成走。
+        clearInjection(cfg);
+        return;
+    }
     loreRagRunning = true;
-    const clear = () => setExtensionPrompt(
-        PROMPT_TAG,
-        '',
-        extension_prompt_types.IN_CHAT,
-        Number.isFinite(Number(cfg.depth)) ? Number(cfg.depth) : 1,
-        false,
-        extension_prompt_roles.SYSTEM
-    );
+    const clear = () => clearInjection(cfg);
     try {
         const ctx = getContext();
-        const chat = ctx?.chat || [];
-        const lastUserMsg = chat.filter(m => m.is_user && m.mes).slice(-1)[0];
-        const query = lastUserMsg ? cleanMessage(lastUserMsg.mes).slice(0, 500) : '';
+        const msgs = Array.isArray(chat) && chat.length ? chat : (ctx?.chat || []);
+        const { query, onDemand, sessionRecall } = buildRetrievalInput(msgs);
         if (!query) { clear(); return; }
-
-        const lastAiMsg = chat.filter(m => !m.is_user && m.mes).slice(-1)[0];
-        const entryTexts = collectActivatedEntries(loreData);
-        const markerSource = (lastAiMsg ? String(lastAiMsg.mes) : '') + '\n' + entryTexts.join('\n');
-        const marker = markerSource.match(/【(?:查原文|翻目录|读场景)[：:](.+?)】|<lore_query>([\s\S]*?)<\/lore_query>|<rag_query>([\s\S]*?)<\/rag_query>/i);
-        const userWantsQuote = /原话|台词|原文|说过什么|那句|那句话|怎么说的|引文|还记得.*说|ta当时说|具体说了/.test(query);
-        const onDemand = (marker ? (marker[1] || marker[2] || marker[3] || '').trim().slice(0, 300) : '') || (userWantsQuote ? query : '');
-        const dbRecallHints = lastUserMsg ? extractDbRecallHints(lastUserMsg.mes) : '';
-
-        await runTreeRetrieval(cfg, ctx, chat, entryTexts, { query, onDemand, dbRecallHints, clear });
+        await runTreeRetrieval(cfg, ctx, msgs, { query, onDemand, sessionRecall, clear });
     } catch (err) {
         console.warn('[LoreCodex] retrieval failed:', err);
         clear();
@@ -793,16 +749,14 @@ async function runLoreRetrieval(loreData) {
     }
 }
 
-let pendingGeneration = false;
-eventSource.on(event_types.GENERATION_STARTED, (type, _opts, dryRun) => {
-    if (!dryRun && type !== 'quiet') pendingGeneration = true;
-});
-eventSource.on(event_types.WORLDINFO_ENTRIES_LOADED, async (loreData) => {
-    if (!pendingGeneration) return;
-    pendingGeneration = false;
-    try { await runLoreRetrieval(loreData); }
+// ST generate_interceptor（见 manifest.json）：在用户消息写入之后、提示词组装之前执行，dry run 不会调用。
+globalThis.loreCodexGenerateInterceptor = async function (chat, _contextSize, _abort, type) {
+    if (type === 'quiet') return;
+    try { await runLoreRetrieval(chat); }
     catch (e) { console.warn('[LoreCodex]', e); }
-});
+};
+// 仅供离线测试（scripts/verify_st_extension.mjs）在不挂载设置面板时加载书库。
+globalThis.__loreCodexTestHooks = { refreshCorpora: () => fetchCorporaAndHealth(getSettings()) };
 
 function getActiveCharKey() {
     const ctx = getContext();
@@ -826,14 +780,11 @@ jQuery(async () => {
             maxOrder: normalizeMaxOrder(cfg.maxOrder),
             maxScenes: normalizeMaxScenes(cfg.maxScenes),
             recentTurns: Math.max(1, Number(cfg.recentTurns) || 5),
-            depth: Math.max(0, Number(cfg.depth) || 1),
+            depth: normalizeDepth(cfg.depth),
             pov: cfg.pov || '',
             customXmlTag: cfg.customXmlTag || '',
             customHeader: cfg.customHeader || '',
             customPriorityRule: cfg.customPriorityRule || '',
-            customFollowUpHint: cfg.customFollowUpHint || '',
-            customBoilerplateRegex: cfg.customBoilerplateRegex || '',
-            customSummaryPriorityRegex: cfg.customSummaryPriorityRegex || '',
             charKey,
             charBinding: charKey ? (cfg.charBindings?.[charKey] || null) : null,
         };
@@ -1438,9 +1389,6 @@ jQuery(async () => {
             if (p.customXmlTag !== undefined) cfg.customXmlTag = String(p.customXmlTag || '');
             if (p.customHeader !== undefined) cfg.customHeader = String(p.customHeader || '');
             if (p.customPriorityRule !== undefined) cfg.customPriorityRule = String(p.customPriorityRule || '');
-            if (p.customFollowUpHint !== undefined) cfg.customFollowUpHint = String(p.customFollowUpHint || '');
-            if (p.customBoilerplateRegex !== undefined) cfg.customBoilerplateRegex = String(p.customBoilerplateRegex || '');
-            if (p.customSummaryPriorityRegex !== undefined) cfg.customSummaryPriorityRegex = String(p.customSummaryPriorityRegex || '');
             saveSettingsDebounced();
             if (prevLocalMode !== cfg.localMode || prevServer !== cfg.ragServer) {
                 resolvedServerBase = '';
