@@ -41,9 +41,10 @@ function renderWaterfall(out) {
       const sumMs = llmMs + toolMs;
       const llmPct = Math.max(2, (llmMs / totalMs) * 100);
       const toolPct = toolMs > 0 ? Math.max(1.5, (toolMs / totalMs) * 100) : 0;
+      const turnNum = Number(st.turn) || 0;
       const callNames = (st.calls || []).map((c) => c.name).join('+') || (st.kind === 'final' ? 'JSON终裁' : '终裁');
-      return `<div class="wf-row" title="T${st.turn}: ${esc(callNames)} (LLM ${llmMs}ms${toolMs ? ', Tool ' + toolMs + 'ms' : ''})">
-        <span class="wf-label">T${st.turn}</span>
+      return `<div class="wf-row" title="T${turnNum}: ${esc(callNames)} (LLM ${llmMs}ms${toolMs ? ', Tool ' + toolMs + 'ms' : ''})">
+        <span class="wf-label">T${turnNum}</span>
         <div class="wf-track">
           <div class="wf-llm" style="width:${llmPct.toFixed(1)}%"></div>
           ${toolPct ? `<div class="wf-tool" style="width:${toolPct.toFixed(1)}%"></div>` : ''}
@@ -74,7 +75,7 @@ export function renderTrace(out) {
   const tr = out.traversal || {};
   const statusStr = out.skip
     ? `<strong style="color:var(--ochre);">判定跳过</strong>（${esc(out.reason || '')}）`
-    : `<strong style="color:var(--seal);">入选 ${(out.scenes || []).length} 幕</strong>${out.max_order ? ` · 序<=${out.max_order}` : ''}`;
+    : `<strong style="color:var(--seal);">入选 ${(out.scenes || []).length} 幕</strong>${out.max_order ? ` · 序<=${Number(out.max_order) || 0}` : ''}`;
 
   const summary = `
     <div class="ledger-summary">
@@ -83,7 +84,7 @@ export function renderTrace(out) {
         目录 ${(tr.listed_arcs || []).length} 卷 → 展开 ${(tr.expanded_arcs || []).length} 卷 → 读正文 ${(tr.read_scenes || []).length} 幕 → 选中 ${(tr.selected_nodes || []).length} 幕
       </div>
       <div style="color:var(--ink-muted);font-family:var(--mono);font-size:10.5px;margin-top:2px;">
-        ${out.took_ms} ms · ${out.turns} 轮 · tokens ${(out.usage?.prompt || 0)}+${(out.usage?.completion || 0)}
+        ${Number(out.took_ms) || 0} ms · ${Number(out.turns) || 0} 轮 · tokens ${Number(out.usage?.prompt) || 0}+${Number(out.usage?.completion) || 0}
       </div>
       ${!out.skip ? `<button type="button" class="btn-seal btn-sm mobile-only-inline trace-open-dossier" style="margin-top:7px;">查看选段卷宗与导读 →</button>` : ''}
     </div>
@@ -145,7 +146,7 @@ export function renderTrace(out) {
         <div class="tool-row">
           <div class="tool-head">
             <span class="tool-name">${esc(c.name)}</span>
-            <span style="font-family:var(--mono);font-size:10.5px;color:var(--ink-muted);">${c.result_chars} 字</span>
+            <span style="font-family:var(--mono);font-size:10.5px;color:var(--ink-muted);">${Number(c.result_chars) || 0} 字</span>
           </div>
           <div class="tool-args">${esc(JSON.stringify(c.args))}</div>
           <div class="tool-outcome">${esc(c.summary)}</div>
@@ -169,8 +170,8 @@ export function renderTrace(out) {
       return `
       <div class="turn-card">
         <div class="turn-head">
-          <span class="turn-title">第 ${st.turn} 轮 · ${kindText}</span>
-          <span class="turn-stat">LLM ${st.llm_ms}ms${st.tool_ms ? ` · Tool ${st.tool_ms}ms` : ''}</span>
+          <span class="turn-title">第 ${Number(st.turn) || 0} 轮 · ${kindText}</span>
+          <span class="turn-stat">LLM ${Number(st.llm_ms) || 0}ms${st.tool_ms ? ` · Tool ${Number(st.tool_ms) || 0}ms` : ''}</span>
         </div>
         ${reasoningHtml}
         ${calls || '<div style="font-size:11.5px;color:var(--ink-muted);">模型未再调用工具，直接输出最终 JSON。</div>'}
@@ -199,10 +200,10 @@ export function renderRunsList() {
       const label = r.input?.onDemand || r.input?.query || '（仅依上下文触发）';
       const tag = r.output?.skip ? '跳过' : `入选 ${(r.output?.scenes || []).length} 幕`;
       const cTag = r.corpus_id ? `[${r.corpus_id}] ` : '';
-      const oTag = r.max_order ? ` 序<=${r.max_order}` : '';
+      const oTag = r.max_order ? ` 序<=${Number(r.max_order) || 0}` : '';
       return `<div class="run-card ${state.activeRunId === r.id ? 'active' : ''}" data-rid="${esc(r.id)}">
       <div class="run-q">${esc(label)}</div>
-      <div class="run-m">${esc(cTag)}${tag}${oTag} · ${r.output?.took_ms || 0}ms</div>
+      <div class="run-m">${esc(cTag)}${tag}${oTag} · ${Number(r.output?.took_ms) || 0}ms</div>
     </div>`;
     })
     .join('');

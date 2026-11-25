@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { normalizeCorpusConfig } = require('./prompt_builder');
 const { createTreeAgent, resolveCorpusFiles } = require('./tree_agent');
+const { writeJsonAtomic } = require('./utils');
 
 function readCorpusDescriptor(corpusId, corpusDir) {
   const { indexPath, textsPath } = resolveCorpusFiles(corpusDir);
@@ -108,6 +109,22 @@ function createCorpusManager(corporaDir, { fallbackSearchFn = null } = {}) {
     agentCache.clear();
     scan();
     return listCorpora();
+  }
+
+  function reloadCorpus(id) {
+    const key = String(id || '').trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(key)) return null;
+    agentCache.delete(key);
+    const dir = path.join(corporaDir, key);
+    if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+      const desc = readCorpusDescriptor(key, dir);
+      if (desc) {
+        descriptors.set(key, desc);
+        return getCorpusMeta(key);
+      }
+    }
+    descriptors.delete(key);
+    return null;
   }
 
   function listCorpora() {
@@ -223,7 +240,7 @@ function createCorpusManager(corporaDir, { fallbackSearchFn = null } = {}) {
     }
 
     const normalized = normalizeCorpusConfig(merged, key);
-    fs.writeFileSync(cfgPath, JSON.stringify(normalized, null, 2) + '\n', 'utf8');
+    writeJsonAtomic(cfgPath, normalized);
 
     agentCache.delete(key);
     const refreshed = readCorpusDescriptor(key, desc.dir);
@@ -241,6 +258,7 @@ function createCorpusManager(corporaDir, { fallbackSearchFn = null } = {}) {
     getAgent,
     updateCorpusConfig,
     reload,
+    reloadCorpus,
   };
 }
 

@@ -223,11 +223,11 @@ function renderSplitPreviewHtml(report, estimate, { autoUncheckedLlm = false } =
   if (!report) return '';
   const badgeCls = report.severity === 'error' ? 'err' : report.severity === 'warn' ? 'warn' : 'ok';
   const badgeText = report.severity === 'error' ? '高危异常' : report.severity === 'warn' ? '建议检查' : '切分正常';
-  const volLabel = report.hasNamedSeries ? `${report.seriesCount} 卷` : (report.isLorePack ? '设定集' : '未分卷');
-  const statsText = `${volLabel} · ${report.arcCount} 章 · ${report.sceneCount} 幕 · ${report.totalChars.toLocaleString()} 字 · 均章 ${report.avgArcChars.toLocaleString()} 字`;
+  const volLabel = report.hasNamedSeries ? `${Number(report.seriesCount) || 0} 卷` : (report.isLorePack ? '设定集' : '未分卷');
+  const statsText = `${volLabel} · ${Number(report.arcCount) || 0} 章 · ${Number(report.sceneCount) || 0} 幕 · ${(Number(report.totalChars) || 0).toLocaleString()} 字 · 均章 ${(Number(report.avgArcChars) || 0).toLocaleString()} 字`;
 
   const estHtml = estimate && estimate.totalArcs > 0
-    ? `<div class="pane-sub" style="margin:0;">若勾选下方 LLM 构建：预计 ${estimate.totalCalls} 次请求（并发 ${estimate.effectiveWorkers}）· 参考耗时约 ${formatDurationZh(estimate.estMinMs)} ~ ${formatDurationZh(estimate.estMaxMs)}</div>`
+    ? `<div class="pane-sub" style="margin:0;">若勾选下方 LLM 构建：预计 ${Number(estimate.totalCalls) || 0} 次请求（并发 ${Number(estimate.effectiveWorkers) || 1}）· 参考耗时约 ${formatDurationZh(estimate.estMinMs)} ~ ${formatDurationZh(estimate.estMaxMs)}</div>`
     : '';
 
   const blockNotice = autoUncheckedLlm
@@ -243,7 +243,7 @@ function renderSplitPreviewHtml(report, estimate, { autoUncheckedLlm = false } =
   const cs = report.cleanedSummary;
   const cleanedHtml = cs && cs.items.length
     ? `<details class="split-clean">
-        <summary>清洗删除：${cs.items.map((it) => `${esc(it.label)} ${it.count.toLocaleString()} ${it.unit}`).join(' · ')}</summary>
+        <summary>清洗删除：${cs.items.map((it) => `${esc(it.label)} ${(Number(it.count) || 0).toLocaleString()} ${esc(it.unit)}`).join(' · ')}</summary>
         ${cs.samples.length ? `<div class="split-clean-samples">${cs.samples.map((x) => `<div class="split-clean-row"><span class="split-chip">${esc(x.kind)}</span><code>${esc(x.text)}</code></div>`).join('')}</div>` : ''}
       </details>`
     : '';
@@ -251,7 +251,7 @@ function renderSplitPreviewHtml(report, estimate, { autoUncheckedLlm = false } =
   const seriesHtml = report.seriesBreakdown.length
     ? `<div class="split-series-row">${report.seriesBreakdown
         .slice(0, 16)
-        .map((s) => `<span class="split-chip">${esc(s.name)} (${s.arcs}章/${s.scenes}幕)</span>`)
+        .map((s) => `<span class="split-chip">${esc(s.name)} (${Number(s.arcs) || 0}章/${Number(s.scenes) || 0}幕)</span>`)
         .join('')}${report.seriesBreakdown.length > 16 ? `<span class="split-chip">…共 ${report.seriesBreakdown.length} 卷</span>` : ''}</div>`
     : '';
 
@@ -259,9 +259,9 @@ function renderSplitPreviewHtml(report, estimate, { autoUncheckedLlm = false } =
     ? `<div class="split-samples">${report.sampleArcs
         .map((item) => {
           if (item.separator) {
-            return `<div class="split-sep">··· 省略中间 ${item.omittedCount} 章 ···</div>`;
+            return `<div class="split-sep">··· 省略中间 ${Number(item.omittedCount) || 0} 章 ···</div>`;
           }
-          const meta = `${item.series ? esc(item.series) + ' · ' : ''}${item.sceneCount}幕 / ${item.chars.toLocaleString()}字`;
+          const meta = `${item.series ? esc(item.series) + ' · ' : ''}${Number(item.sceneCount) || 0}幕 / ${(Number(item.chars) || 0).toLocaleString()}字`;
           return `<div class="split-sample-row">
             <div class="split-sample-head">
               <span>[${esc(item.arc_id)}] ${esc(item.title)}</span>
@@ -296,6 +296,18 @@ function renderSplitPreviewHtml(report, estimate, { autoUncheckedLlm = false } =
 }
 
 let activeModalPoll = null;
+let modalSeq = 0;
+
+function getExpectedParentOrigin() {
+  try {
+    if (document.referrer) {
+      const origin = new URL(document.referrer).origin;
+      if (origin && origin !== 'null') return origin;
+    }
+  } catch (_) {}
+  return window.location.origin;
+}
+
 function clearModalPoll() {
   if (activeModalPoll) {
     clearInterval(activeModalPoll);
@@ -330,9 +342,14 @@ function startModalJobPoll({
     };
   }
 
+  let consecutiveErrors = 0;
+  let inFlight = false;
   activeModalPoll = setInterval(async () => {
+    if (inFlight) return;
+    inFlight = true;
     try {
       const jr = await fetchJob(jobId);
+      consecutiveErrors = 0;
       const job = jr.job;
       if (progPrefix) {
         renderJobProgressUi(progPrefix, job, fallbackStartMs);
@@ -358,11 +375,24 @@ function startModalJobPoll({
       } else if (statusEl) {
         statusEl.textContent = runningText ? runningText(job) : `正在运行 (${job.kind})...`;
       }
-    } catch (_) {}
+    } catch (e) {
+      consecutiveErrors += 1;
+      const msg = e?.message || String(e || '轮询任务状态失败');
+      const isNotFound = /404|not found/i.test(msg);
+      if (isNotFound || consecutiveErrors >= 5) {
+        clearModalPoll();
+        if (stopBtnEl) stopBtnEl.style.display = 'none';
+        if (statusEl) statusEl.textContent = `任务轮询失败: ${msg}`;
+        if (onError) await onError({ id: jobId, status: 'error', error: msg });
+      }
+    } finally {
+      inFlight = false;
+    }
   }, 500);
 }
 
 export function closeModal() {
+  ++modalSeq;
   clearModalPoll();
   $('#modalBackdrop').classList.remove('open');
   $('#modalDialog').className = 'modal-dialog';
@@ -370,15 +400,17 @@ export function closeModal() {
 }
 
 function openDialog(html, extraClass = '') {
+  const seq = ++modalSeq;
   const dlg = $('#modalDialog');
   dlg.className = `modal-dialog ${extraClass}`.trim();
   dlg.innerHTML = html;
   $('#modalBackdrop').classList.add('open');
   dlg.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', closeModal));
+  return seq;
 }
 
 export async function openSettingsModal() {
-  openDialog(`
+  const seq = openDialog(`
     <div class="modal-head">
       <span class="modal-title">服务与旁路模型配置 (config.json)</span>
       <button class="btn-ghost" data-close-modal>✕</button>
@@ -388,6 +420,7 @@ export async function openSettingsModal() {
 
   try {
     const cfg = await fetchConfig();
+    if (seq !== modalSeq) return;
     const corpusOptions = state.corpora
       .map((c) => `<option value="${esc(c.id)}" ${c.id === cfg.defaultCorpus ? 'selected' : ''}>${esc(c.name)} (${esc(c.id)})</option>`)
       .join('');
@@ -437,7 +470,7 @@ export async function openSettingsModal() {
           </div>
           <div class="fld-group">
             <label class="fld">采样温度 Temperature（留空 = 不传）</label>
-            <input id="cfgTemperature" type="number" min="0" max="2" step="0.1" value="${cfg.temperature !== null && cfg.temperature !== undefined && cfg.temperature !== '' ? cfg.temperature : ''}" placeholder="沿用模型默认（留空不传）" />
+            <input id="cfgTemperature" type="number" min="0" max="2" step="0.1" value="${cfg.temperature !== null && cfg.temperature !== undefined && cfg.temperature !== '' && Number.isFinite(Number(cfg.temperature)) ? Number(cfg.temperature) : ''}" placeholder="沿用模型默认（留空不传）" />
           </div>
         </div>
         <label class="fld-check" style="display:flex;align-items:center;gap:8px;margin-top:8px;">
@@ -531,7 +564,9 @@ export async function openSettingsModal() {
       }
     });
   } catch (e) {
-    $('#settingsBody').textContent = '加载配置失败: ' + e.message;
+    if (seq !== modalSeq) return;
+    const body = $('#settingsBody');
+    if (body) body.textContent = '加载配置失败: ' + e.message;
   }
 }
 
@@ -545,6 +580,7 @@ async function confirmAndDeleteCorpus(corpus, { onDeleted } = {}) {
   if (!ok) return false;
   try {
     const res = await deleteCorpus(cid);
+    state.sceneCache.clear();
     state.corpora = res.corpora || [];
     showToast(`已删除书库「${cname}」`, 'ok');
     if (state.corpusId === cid) {
@@ -564,7 +600,7 @@ async function confirmAndDeleteCorpus(corpus, { onDeleted } = {}) {
 }
 
 export async function openLibraryModal() {
-  openDialog(`
+  const seq = openDialog(`
     <div class="modal-head">
       <span class="modal-title">书库管理</span>
       <button class="btn-ghost" data-close-modal>✕</button>
@@ -572,9 +608,12 @@ export async function openLibraryModal() {
     <div class="modal-body" id="libModalBody"><div style="color:var(--ink-muted);">正在载入书库列表...</div></div>
   `, 'wide');
 
+  let libSeq = 0;
   const renderList = async (forceReload = false) => {
+    const myLibSeq = ++libSeq;
     try {
       const listRes = forceReload ? await reloadCorpora() : await fetchCorpora();
+      if (seq !== modalSeq || myLibSeq !== libSeq) return;
       state.corpora = listRes.corpora || [];
       const rows = state.corpora;
 
@@ -582,9 +621,9 @@ export async function openLibraryModal() {
         ? rows
             .map((c) => {
               const st = c.stats || {};
-              const arcs = st.arcs || 0;
-              const scenes = st.scenes || 0;
-              const llmScenes = st.llm_scenes || 0;
+              const arcs = Number(st.arcs) || 0;
+              const scenes = Number(st.scenes) || 0;
+              const llmScenes = Number(st.llm_scenes) || 0;
               const isCur = c.id === state.corpusId;
               const llmBadge =
                 scenes === 0
@@ -664,6 +703,7 @@ export async function openLibraryModal() {
         });
       });
     } catch (e) {
+      if (seq !== modalSeq || myLibSeq !== libSeq) return;
       const body = $('#libModalBody');
       if (body) body.textContent = '加载书库列表失败: ' + e.message;
     }
@@ -674,7 +714,7 @@ export async function openLibraryModal() {
 
 export async function openCorpusModal(initialTab = 'basic') {
   if (!state.corpusId) return showToast('请先选择一个书库', 'err');
-  openDialog(`
+  const seq = openDialog(`
     <div class="modal-head">
       <span class="modal-title">编辑书库配置 · ${esc(state.corpusId)}</span>
       <button class="btn-ghost" data-close-modal>✕</button>
@@ -684,6 +724,7 @@ export async function openCorpusModal(initialTab = 'basic') {
 
   try {
     const detail = await fetchCorpusDetail(state.corpusId);
+    if (seq !== modalSeq) return;
     const c = detail.config;
     const aliasesText = (c.aliases || []).map((g) => g.join(', ')).join('\n');
     const glossaryText = (c.glossary || []).join('\n');
@@ -695,7 +736,7 @@ export async function openCorpusModal(initialTab = 'basic') {
     const seriesOptions = [
       '<option value="">全部卷宗</option>',
       ...seriesList.map(
-        (s) => `<option value="${esc(s.series)}">${esc(s.series)} (${s.arcs}卷 / ${s.scenes}幕)</option>`
+        (s) => `<option value="${esc(s.series)}">${esc(s.series)} (${Number(s.arcs) || 0}卷 / ${Number(s.scenes) || 0}幕)</option>`
       ),
     ].join('');
 
@@ -726,7 +767,7 @@ export async function openCorpusModal(initialTab = 'basic') {
           <details class="adv-details">
             <summary>高级检索与世界观调优（开发者）</summary>
             <div class="adv-details-body">
-              <div class="fld-group"><label class="fld">3层自动折叠阈值 (卷)</label><input id="ccThreshold" type="number" min="20" value="${c.hierarchy?.auto_series_threshold || 250}" /></div>
+              <div class="fld-group"><label class="fld">3层自动折叠阈值 (卷)</label><input id="ccThreshold" type="number" min="20" value="${Math.max(20, Number(c.hierarchy?.auto_series_threshold) || 250)}" /></div>
               <div class="fld-group"><label class="fld">世界观前提 (world_premise)</label><textarea id="ccPremise" rows="3">${esc(c.world_premise || '')}</textarea></div>
               <div class="fld-group"><label class="fld">主动触发召回条件</label><textarea id="ccTriggers" rows="2">${esc(c.active_recall_triggers || '')}</textarea></div>
               <div class="fld-group"><label class="fld">日常跳过判据</label><textarea id="ccSkip" rows="2">${esc(c.skip_criteria || '')}</textarea></div>
@@ -861,12 +902,14 @@ export async function openCorpusModal(initialTab = 'basic') {
     const stopBtn = $('#ccUpgStopBtn');
 
     const refreshAfterUpg = async (isAborted = false) => {
+      state.sceneCache.clear();
       const [listRes, freshDetail] = await Promise.all([
         fetchCorpora(),
         fetchCorpusDetail(c.id).catch(() => null),
       ]);
       state.corpora = listRes.corpora || [];
       await actions.switchCorpus?.(c.id, { keepRun: true });
+      if (seq !== modalSeq) return;
       if (freshDetail?.config) {
         const fc = freshDetail.config;
         if ($('#ccAliases')) $('#ccAliases').value = (fc.aliases || []).map((g) => g.join(', ')).join('\n');
@@ -874,9 +917,11 @@ export async function openCorpusModal(initialTab = 'basic') {
       }
       const newLlm = state.index?.stats?.llm_scenes || 0;
       const newTot = state.index?.stats?.scenes || totalScenes;
-      $('#ccUpgCoverage').innerHTML = isAborted
-        ? `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已暂停并保存断点，可随时点击「开始原地补全 LLM 目录」续传）`
-        : `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已完成本轮补全并重载，新增别名与设定已同步至左侧标签页）`;
+      if ($('#ccUpgCoverage')) {
+        $('#ccUpgCoverage').innerHTML = isAborted
+          ? `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已暂停并保存断点，可随时点击「开始原地补全 LLM 目录」续传）`
+          : `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已完成本轮补全并重载，新增别名与设定已同步至左侧标签页）`;
+      }
       updateUpgEstimate();
     };
 
@@ -983,7 +1028,9 @@ export async function openCorpusModal(initialTab = 'basic') {
       }
     });
   } catch (e) {
-    $('#corpusModalLoading').textContent = '加载失败: ' + e.message;
+    if (seq !== modalSeq) return;
+    const el = $('#corpusModalLoading');
+    if (el) el.textContent = '加载失败: ' + e.message;
   }
 }
 
@@ -1089,11 +1136,6 @@ export function openImportModal() {
     </div>
   `);
 
-  const cleanupClose = () => {
-    closeModal();
-  };
-  $('#modalDialog').querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', cleanupClose));
-
   const updateModeUi = () => {
     const isLore = $('#impKind').value === 'lore';
     $('#impLoreOpts').style.display = isLore ? 'grid' : 'none';
@@ -1131,7 +1173,7 @@ export function openImportModal() {
             <input type="checkbox" data-lore-uid="${esc(e.uid)}" ${loreChecked.has(e.uid) ? 'checked' : ''} />
             <span class="lore-state lore-state-${e.state}">${LORE_STATE_LABEL[e.state]}</span>
             <span class="lore-title">${esc(e.title)}</span>
-            <span class="lore-meta">${e.noise ? esc(e.noise) + ' · ' : ''}${e.chars.toLocaleString()} 字</span>
+            <span class="lore-meta">${e.noise ? esc(e.noise) + ' · ' : ''}${(Number(e.chars) || 0).toLocaleString()} 字</span>
           </label>`).join('')}
       </div>`;
     wrap.style.display = 'flex';
@@ -1357,6 +1399,7 @@ export function openImportModal() {
             return `正在执行 LLM 建立目录 (${j.kind})...`;
           },
           onDone: async (j) => {
+            state.sceneCache.clear();
             $('#impJobStatus').textContent = `LLM 目录构建完成（耗时 ${formatDurationZh(j?.progress?.elapsedMs)}）！书库 "${targetId}" 已就绪`;
             const listRes = await fetchCorpora();
             state.corpora = listRes.corpora || [];
@@ -1365,6 +1408,7 @@ export function openImportModal() {
             switchBtn.style.display = 'inline-flex';
           },
           onAborted: async () => {
+            state.sceneCache.clear();
             const listRes = await fetchCorpora();
             state.corpora = listRes.corpora || [];
             $('#impJobStatus').textContent = `已暂停 LLM 建立目录并保存断点，可随时点击「继续 LLM 建立目录」续传`;
@@ -1391,6 +1435,7 @@ export function openImportModal() {
         stopBtnEl: $('#impStopBtn'),
         runningText: (job) => `正在离线切分入库 (${job.kind})...`,
         onDone: async (job) => {
+          state.sceneCache.clear();
           const wrap = $('#impSplitPreviewWrap');
           if (wrap && !wrap.innerHTML.trim() && job?.structureReport) {
             wrap.innerHTML = renderSplitPreviewHtml(job.structureReport, null);
@@ -1415,7 +1460,7 @@ export function openImportModal() {
           switchBtn.style.display = 'inline-flex';
           switchBtn.onclick = async () => {
             await actions.switchCorpus?.(targetId);
-            cleanupClose();
+            closeModal();
           };
           if (startLlmBtn && canManualLlm) {
             startLlmBtn.style.display = 'inline-flex';
@@ -1439,6 +1484,7 @@ export function openImportModal() {
           }
         },
         onAborted: async () => {
+          state.sceneCache.clear();
           const listRes = await fetchCorpora();
           state.corpora = listRes.corpora || [];
           showToast(`书库「${targetId}」已保存断点，打开后可在语料配置继续补全`, 'ok');
@@ -1446,7 +1492,7 @@ export function openImportModal() {
           switchBtn.style.display = 'inline-flex';
           switchBtn.onclick = async () => {
             await actions.switchCorpus?.(targetId);
-            cleanupClose();
+            closeModal();
           };
           startBtn.disabled = false;
         },
@@ -1478,7 +1524,7 @@ export function openCommandPalette() {
   for (const c of state.corpora) {
     items.push({
       kind: '书库',
-      label: `切换到书库：${c.name} (${c.stats.arcs}卷)`,
+      label: `切换到书库：${c.name} (${Number(c.stats?.arcs) || 0}卷)`,
       run: () => actions.switchCorpus?.(c.id),
     });
   }
@@ -1575,12 +1621,13 @@ function requestStParent(type, extra = {}, expectedReplyType = '', timeoutMs = 2
       reject(new Error('当前未在酒馆内嵌模式下运行'));
       return;
     }
+    const expectedOrigin = getExpectedParentOrigin();
     const timer = setTimeout(() => {
       window.removeEventListener('message', onMsg);
       reject(new Error('与酒馆扩展通信超时'));
     }, timeoutMs);
     const onMsg = (ev) => {
-      if (ev.source !== window.parent) return;
+      if (ev.source !== window.parent || ev.origin !== expectedOrigin) return;
       const d = ev.data;
       if (!d || typeof d !== 'object') return;
       if (expectedReplyType && d.type !== expectedReplyType) return;
@@ -1589,12 +1636,12 @@ function requestStParent(type, extra = {}, expectedReplyType = '', timeoutMs = 2
       resolve(d);
     };
     window.addEventListener('message', onMsg);
-    window.parent.postMessage({ type, ...extra }, '*');
+    window.parent.postMessage({ type, ...extra }, expectedOrigin);
   });
 }
 
 export async function openStSettingsModal() {
-  openDialog(`
+  const seq = openDialog(`
     <div class="modal-head">
       <span class="modal-title">酒馆联动设置</span>
       <button class="btn-ghost" data-close-modal>✕</button>
@@ -1604,6 +1651,7 @@ export async function openStSettingsModal() {
 
   try {
     const reply = await requestStParent('lorecodex:st-get-settings', {}, 'lorecodex:st-settings');
+    if (seq !== modalSeq) return;
     const st = reply.settings || {};
     const arcs = state.index?.arcs || [];
     const maxAvail = state.index?.stats?.max_order || state.corpusMeta?.stats?.max_order || 0;
@@ -1684,7 +1732,7 @@ export async function openStSettingsModal() {
               </div>
               <div class="fld-group">
                 <label class="fld">注入深度</label>
-                <input id="stDepth" type="number" min="0" max="10" value="${Number(st.depth) ?? 1}" />
+                <input id="stDepth" type="number" min="0" max="10" value="${st.depth !== null && st.depth !== undefined && st.depth !== '' && Number.isFinite(Number(st.depth)) ? Number(st.depth) : 1}" />
               </div>
             </div>
             <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;">
@@ -1760,6 +1808,7 @@ export async function openStSettingsModal() {
       }
     });
   } catch (e) {
+    if (seq !== modalSeq) return;
     $('#modalDialog').innerHTML = `
       <div class="modal-head"><span class="modal-title">酒馆联动设置</span><button class="btn-ghost" data-close-modal>✕</button></div>
       <div class="modal-body" style="color:var(--seal);">${esc(e.message)}</div>`;

@@ -155,7 +155,12 @@ def _is_structural_heading(s, h1_is_volume=False, clean_ads=True):
     if len(s) <= 65 and not re.search(r"[。！？；]$", s) and not (clean_ads and VOL_TEASER_EXCLUDE_RE.search(s)):
         if VOL_RE.match(s) or (h1_is_volume and H1_VOL_RE.match(s)):
             return True
-    if len(s) <= 60 and not re.search(r"[。！？；，,:：]$", s) and not (clean_ads and FAKE_CHAP_NOTE_RE.search(s)):
+    if (
+        len(s) <= 60
+        and not re.search(r"[。！？；，,:：”」』’\"…]$", s)
+        and not re.search(r"[，,:：]“", s)
+        and not (clean_ads and FAKE_CHAP_NOTE_RE.search(s))
+    ):
         if CHAP_RE.match(s):
             return True
     return False
@@ -576,7 +581,7 @@ def read_epub_lines(epub_path):
             href = manifest.get(sid)
             if not href:
                 continue
-            clean_href = urllib.parse.unquote(href.split("#", 1)[0]).lstrip("./")
+            clean_href = urllib.parse.unquote(href.split("#", 1)[0]).lstrip("/")
             raw_joined = posixpath.join(opf_dir, clean_href) if opf_dir else clean_href
             norm_joined = posixpath.normpath(raw_joined)
             member = exact_map.get(norm_joined) or lower_map.get(norm_joined.lower())
@@ -676,16 +681,20 @@ def parse_structure(
     cur_title = None
     cur_buf = []
 
-    def flush_chapter():
+    def flush_chapter(is_eof=False):
         nonlocal cur_title, cur_buf
         body_lines = [x for x in cur_buf if x.strip()]
         if body_lines:
             if cur_title is None:
                 joined = "\n".join(body_lines)
-                if clean_ads and (len(joined) < 400 or re.search(r"推荐一本书|作者[:：]|状态[:：]|内容简介", joined[:300])):
+                if (
+                    not (is_eof and not cur_chapters)
+                    and clean_ads
+                    and (len(joined) < 400 or re.search(r"推荐一本书|作者[:：]|状态[:：]|内容简介", joined[:300]))
+                ):
                     cur_buf = []
                     return
-                title = "序章"
+                title = "正文" if (is_eof and not cur_chapters) else "序章"
             else:
                 title = cur_title
                 if clean_ads:
@@ -719,11 +728,15 @@ def parse_structure(
             continue
 
         cm = CHAP_RE.match(s)
-        if (
-            cm
-            and len(s) <= 60
-            and not re.search(r"[。！？；，,:：]$", s)
-            and not (clean_ads and FAKE_CHAP_NOTE_RE.search(s))
+        is_md_chap = bool(cm and cm.group(1))
+        if cm and (
+            is_md_chap
+            or (
+                len(s) <= 60
+                and not re.search(r"[。！？；，,:：”」』’\"…]$", s)
+                and not re.search(r"[，,:：]“", s)
+                and not (clean_ads and FAKE_CHAP_NOTE_RE.search(s))
+            )
         ):
             chap_num = parse_cn_or_int(cm.group(2) or cm.group(3) or cm.group(4))
             # Ignore stray index lines jumping far backwards mid-chapter unless resetting at Chapter 1
@@ -756,7 +769,7 @@ def parse_structure(
         explicit_vol_just_set = False
         cur_buf.append(s)
 
-    flush_chapter()
+    flush_chapter(is_eof=True)
 
     # Fallback if text had no chapter markers at all
     if len(cur_chapters) == 1 and sum(len(x) for x in cur_chapters[0]["lines"]) > 16000:
@@ -1561,10 +1574,14 @@ def main():
     ckpt = {}
     if not args.no_llm and os.path.exists(ckpt_path):
         with open(ckpt_path, "r", encoding="utf-8") as f:
-            for l in f:
-                if l.strip():
+            for lineno, l in enumerate(f, 1):
+                if not l.strip():
+                    continue
+                try:
                     rec = json.loads(l)
                     ckpt[rec["key"]] = rec
+                except (ValueError, KeyError) as err:
+                    print(f"[build_novel] warn ignoring corrupt checkpoint line {lineno}: {err}", file=sys.stderr)
     ckpt_lock = threading.Lock()
     usage_stats = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "reused_single_arcs": 0}
 
@@ -1760,6 +1777,8 @@ def main():
                         print(f"[build_novel] arc progress: {arc_done}/{len(todo_arcs)}")
 
         if not args.skip_meta and target_arcs:
+            graph_path = os.path.join(out_corpus_dir, "graph.json")
+            has_existing_graph = os.path.exists(graph_path)
             grouped = collections.OrderedDict()
             for a in target_arcs:
                 ser_name = str(a.get("series") or a.get("category") or "正文卷").strip()
@@ -1767,7 +1786,8 @@ def main():
 
             for ser_name, ser_arcs in grouped.items():
                 meta_key = f"series_meta:{ser_name}:{len(ser_arcs)}"
-                if not args.force and meta_key in ckpt:
+                from_ckpt = not args.force and meta_key in ckpt
+                if from_ckpt:
                     rec = ckpt[meta_key]
                 else:
                     digest_text, top_chars = build_series_digest(ser_arcs)
@@ -1808,7 +1828,7 @@ def main():
                         extracted_aliases.extend(rec["aliases"])
                     if rec.get("glossary"):
                         extracted_glossary.extend(rec["glossary"])
-                    if rec.get("relations"):
+                    if rec.get("relations") and (not from_ckpt or not has_existing_graph):
                         extracted_relations.extend(rec["relations"])
 
         for a in arcs:

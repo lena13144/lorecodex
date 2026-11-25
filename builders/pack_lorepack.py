@@ -30,36 +30,53 @@ def load_json(path, default=None):
 
 
 def save_json(path, obj, compact=False):
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    abs_path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    tmp_path = abs_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         if compact:
             json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
         else:
             json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, abs_path)
 
 
 def merge_alias_groups(existing, incoming):
     groups = []
-    for g in (existing or []):
-        if isinstance(g, list):
-            cleaned = [str(x).strip() for x in g if str(x).strip()]
-            if len(cleaned) >= 2:
-                groups.append(list(dict.fromkeys(cleaned)))
-    for g in (incoming or []):
+
+    def _absorb(g):
         if not isinstance(g, list):
-            continue
-        cleaned = [str(x).strip() for x in g if str(x).strip()]
+            return
+        cleaned = list(dict.fromkeys(str(x).strip() for x in g if str(x).strip()))
         if len(cleaned) < 2:
-            continue
-        cset = set(cleaned)
-        merged = False
-        for idx, eg in enumerate(groups):
-            if cset.intersection(eg):
-                groups[idx] = list(dict.fromkeys(eg + cleaned))
-                merged = True
-                break
-        if not merged:
-            groups.append(list(dict.fromkeys(cleaned)))
+            return
+        cset = {x.lower() for x in cleaned}
+        hit_indices = [idx for idx, eg in enumerate(groups) if any(x.lower() in cset for x in eg)]
+        if not hit_indices:
+            groups.append(cleaned)
+            return
+        primary = hit_indices[0]
+        combined = []
+        seen_lower = set()
+        for idx in hit_indices:
+            for t in groups[idx]:
+                tl = t.lower()
+                if tl not in seen_lower:
+                    seen_lower.add(tl)
+                    combined.append(t)
+        for t in cleaned:
+            tl = t.lower()
+            if tl not in seen_lower:
+                seen_lower.add(tl)
+                combined.append(t)
+        groups[primary] = combined
+        for idx in reversed(hit_indices[1:]):
+            groups.pop(idx)
+
+    for g in (existing or []):
+        _absorb(g)
+    for g in (incoming or []):
+        _absorb(g)
     return groups
 
 

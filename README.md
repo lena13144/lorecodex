@@ -123,10 +123,10 @@ LoreCodex 的做法是：
 
 | 发行包 | 适用场景 | 包含内容 |
 | :--- | :--- | :--- |
-| `lorecodex-sillytavern-tauritavern-extension-v2.2.0.zip` | SillyTavern / TauriTavern 玩家（免后台） | `st-tree-lore` 酒馆扩展、IndexedDB 前端引擎、内嵌工作台 UI、前端建库与 LLM 目录升级器、`demo-chronicles.lorepack.json` |
-| `lorecodex-cloud-builder-kit-v2.2.0.zip` | 用云端 AI 建库（Gemini / Claude / Grok / Qoder / WorkBuddy 等） | 零依赖 Python 脚本（`build_novel.py`、`build_lore.py`、`pack_lorepack.py`）和 `AGENT_INSTRUCTIONS.md`，连同小说发给云端 AI 即可生成 `.lorepack.json`，无需另配 API Key |
-| `lorecodex-agent-dsh-mcp-plugin-v2.2.0.zip` | AI Agent 集成（DeepSeek Harness `dsh` / Claude Code / Cursor / Antigravity） | DeepSeek Harness (`@deepseek-ai/cordis`) 插件、MCP stdio 服务端、Agent Skill 与核心树引擎（不含酒馆和 Web UI） |
-| `lorecodex-full-server-workbench-v2.2.0.zip` | 独立运行桌面工作台 / 本地命令行建库 | 完整 Node HTTP 服务端（`127.0.0.1:5240`，也可绕过部分中转站的浏览器 CORS 限制）、独立 Web UI、Python 批量建树脚本、酒馆扩展与 Agent 插件 |
+| `lorecodex-sillytavern-tauritavern-extension-v2.4.1.zip` | SillyTavern / TauriTavern 玩家（免后台） | `st-tree-lore` 酒馆扩展、IndexedDB 前端引擎、内嵌工作台 UI、前端建库与 LLM 目录升级器、`demo-chronicles.lorepack.json` |
+| `lorecodex-cloud-builder-kit-v2.4.1.zip` | 用云端 AI 建库（Gemini / Claude / Grok / Qoder / WorkBuddy 等） | 零依赖 Python 脚本（`build_novel.py`、`build_lore.py`、`slice_batches.py`、`pack_lorepack.py`）和 `AGENT_INSTRUCTIONS.md`，连同小说发给云端 AI 即可生成 `.lorepack.json`，无需另配 API Key |
+| `lorecodex-agent-dsh-mcp-plugin-v2.4.1.zip` | AI Agent 集成（DeepSeek Harness `dsh` / Claude Code / Cursor / Antigravity） | DeepSeek Harness (`@deepseek-ai/cordis`) 插件、MCP stdio 服务端、Agent Skill 与核心树引擎（不含酒馆和 Web UI） |
+| `lorecodex-full-server-workbench-v2.4.1.zip` | 独立运行桌面工作台 / 本地命令行建库 | 完整 Node HTTP 服务端（`127.0.0.1:5240`，也可绕过部分中转站的浏览器 CORS 限制）、独立 Web UI、Python 批量建树脚本、酒馆扩展与 Agent 插件 |
 
 ---
 

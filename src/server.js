@@ -3,9 +3,10 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { createCorpusManager } = require('./corpus_manager');
-const { detectPythonBin } = require('./utils');
+const { detectPythonBin, writeJsonAtomic } = require('./utils');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const UI_DIR = path.resolve(ROOT_DIR, 'ui');
@@ -25,14 +26,15 @@ const MIME_TYPES = {
 };
 
 function parseArgs(argv) {
-  const out = { treeOnly: true };
+  const out = {};
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--tree-only') out.treeOnly = true;
+    if (a === '--tree-only') continue;
     else if (a === '--port' && argv[i + 1]) out.port = Number(argv[++i]);
     else if (a === '--host' && argv[i + 1]) out.host = String(argv[++i]);
     else if (a === '--corpora-dir' && argv[i + 1]) out.corporaDir = path.resolve(argv[++i]);
     else if (a === '--corpus' && argv[i + 1]) out.defaultCorpus = String(argv[++i]);
+    else if (a === '--token' && argv[i + 1]) out.apiToken = String(argv[++i]);
   }
   return out;
 }
@@ -96,6 +98,26 @@ if (cli.defaultCorpus) runtimeCfg.defaultCorpus = cli.defaultCorpus;
 
 const PORT = Number(runtimeCfg.port) || 5240;
 const HOST = String(cli.host || process.env.HOST || runtimeCfg.host || '127.0.0.1').trim() || '127.0.0.1';
+const API_TOKEN = String(cli.apiToken || process.env.API_TOKEN || '').trim();
+
+function isLoopbackHost(host) {
+  const h = String(host || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
+  return h === 'localhost' || h === '::1' || /^127\.\d+\.\d+\.\d+$/.test(h);
+}
+
+function isAuthorized(req) {
+  if (!API_TOKEN) return true;
+  const auth = String(req.headers.authorization || '').trim();
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (!m) return false;
+  const provided = Buffer.from(m[1].trim(), 'utf8');
+  const expected = Buffer.from(API_TOKEN, 'utf8');
+  if (provided.length !== expected.length) return false;
+  return crypto.timingSafeEqual(provided, expected);
+}
 
 function cleanApiBaseUrl(u) {
   return String(u || '')
@@ -127,8 +149,9 @@ function isPrivateOrLocalHostname(hostname) {
 }
 
 function isLocalOrAllowedOrigin(origin, req = null) {
-  if (!origin || origin === 'null') return true;
+  if (!origin) return true;
   const o = String(origin).trim();
+  if (!o || o === 'null') return false;
   const extra = String(process.env.ALLOWED_ORIGINS || '')
     .split(',')
     .map((s) => s.trim())
@@ -144,6 +167,17 @@ function isLocalOrAllowedOrigin(origin, req = null) {
   } catch (_) {
     return false;
   }
+}
+
+function getCorsHeaders(req) {
+  const origin = req?.headers?.origin;
+  if (origin && isLocalOrAllowedOrigin(origin, req)) {
+    return {
+      'Access-Control-Allow-Origin': String(origin).trim(),
+      Vary: 'Origin',
+    };
+  }
+  return {};
 }
 
 function saveCfg(patch) {
@@ -176,7 +210,7 @@ function saveCfg(patch) {
   delete runtimeCfg.max_tokens;
   delete runtimeCfg.reasoning_effort;
   try {
-    fs.writeFileSync(CFG_FILE, JSON.stringify(runtimeCfg, null, 2) + '\n', 'utf8');
+    writeJsonAtomic(CFG_FILE, runtimeCfg);
   } catch (err) {
     console.warn('[server] failed to write config.json:', err.message);
   }
@@ -486,24 +520,39 @@ const server = http.createServer(async (req, res) => {
   const send = (obj, code = 200) => {
     res.writeHead(code, {
       'Content-Type': 'application/json; charset=utf-8',
-      'Access-Control-Allow-Origin': '*',
+      ...getCorsHeaders(req),
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     });
     res.end(JSON.stringify(obj));
   };
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-    });
-    return res.end();
-  }
+  try {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        ...getCorsHeaders(req),
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+      });
+      return res.end();
+    }
 
-  const parsedUrl = new URL(req.url, 'http://localhost');
-  const pathname = parsedUrl.pathname;
+    const parsedUrl = new URL(req.url, 'http://localhost');
+    const pathname = parsedUrl.pathname;
+
+    if (
+      API_TOKEN &&
+      (req.method === 'POST' ||
+        req.method === 'PUT' ||
+        req.method === 'PATCH' ||
+        req.method === 'DELETE' ||
+        pathname === '/models' ||
+        pathname === '/tree-search')
+    ) {
+      if (!isAuthorized(req)) {
+        return send({ error: 'unauthorized' }, 401);
+      }
+    }
 
   if (req.method === 'GET' && (pathname === '/ui' || pathname === '/ui/')) {
     res.writeHead(302, { Location: '/' + parsedUrl.search });
@@ -579,6 +628,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && pathname === '/corpora/reload') {
+    if (!isLocalOrAllowedOrigin(req.headers.origin, req)) {
+      return send({ error: 'origin not allowed' }, 403);
+    }
     const list = corpusManager.reload();
     return send({ ok: true, defaultCorpus: resolveDefaultCorpusId(), corpora: list });
   }
@@ -601,6 +653,10 @@ const server = http.createServer(async (req, res) => {
       }
       if (kind === 'lore' && mergeInto && !corpusManager.hasCorpus(mergeInto)) {
         return send({ error: `目标合并书库 "${mergeInto}" 不存在` }, 404);
+      }
+      const targetId = kind === 'lore' && mergeInto ? mergeInto : corpusId;
+      if (importJobs.some((j) => j.status === 'running' && j.corpusId === targetId)) {
+        return send({ error: `书库 "${targetId}" 已有运行中的导入/升级任务，请等待完成后再试` }, 409);
       }
       const rawB64 = String(payload.contentBase64 || '').replace(/^data:[^;]+;base64,/i, '').trim();
       if (!rawB64) {
@@ -668,6 +724,9 @@ const server = http.createServer(async (req, res) => {
       if (!runtimeCfg.chatBase || !runtimeCfg.chatKey) {
         return send({ error: '请先在服务配置中填好 chatBase 与 chatKey 后再执行 LLM 目录补全' }, 400);
       }
+      if (importJobs.some((j) => j.status === 'running' && j.corpusId === cid)) {
+        return send({ error: `书库 "${cid}" 已有运行中的导入/升级任务，请等待完成后再试` }, 409);
+      }
       const payload = await readJsonBody(req);
       const job = startUpgradeJob({
         corpusId: cid,
@@ -715,7 +774,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
       'Content-Disposition': `attachment; filename="${cid}.lorepack.json"`,
-      'Access-Control-Allow-Origin': '*',
+      ...getCorsHeaders(req),
     });
     return res.end(JSON.stringify(pack));
   }
@@ -823,6 +882,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && pathname === '/tree-search') {
+    if (!isLocalOrAllowedOrigin(req.headers.origin, req)) {
+      return send({ error: 'origin not allowed' }, 403);
+    }
     try {
       const payload = await readJsonBody(req);
       const cid = pickCorpusId(payload.corpus);
@@ -876,6 +938,15 @@ const server = http.createServer(async (req, res) => {
       }
       const k = hasExplicitKey ? apiKey.trim() : runtimeCfg.chatKey;
       if (!b || !k) return send({ ok: false, error: '请先填写 API Base URL 与 API Key' }, 400);
+      let parsedBase;
+      try {
+        parsedBase = new URL(b);
+      } catch (_) {
+        return send({ ok: false, error: 'API Base URL 格式不合法' }, 400);
+      }
+      if (parsedBase.protocol !== 'http:' && parsedBase.protocol !== 'https:') {
+        return send({ ok: false, error: 'API Base URL 仅支持 http: 或 https: 协议' }, 400);
+      }
       const r = await fetch(b + '/models', { headers: { Authorization: 'Bearer ' + k } });
       if (!r.ok) {
         const errTxt = await r.text().catch(() => '');
@@ -898,8 +969,18 @@ const server = http.createServer(async (req, res) => {
   }
 
   send({ error: 'not found' }, 404);
+  } catch (e) {
+    if (!res.headersSent) {
+      send({ error: e?.message || String(e) }, e instanceof URIError ? 400 : (e?.statusCode || 500));
+    }
+  }
 });
 
 server.listen(PORT, HOST, () => {
   console.log(`[lorecodex] listening on http://${HOST}:${PORT} (active=${bootAgent ? bootCorpus : 'none'})`);
+  if (!isLoopbackHost(HOST) && !API_TOKEN) {
+    console.error(
+      `[lorecodex] WARNING: listening on non-loopback host "${HOST}" without API_TOKEN (--token / API_TOKEN env). Mutating routes, /models, and /tree-search are unauthenticated!`
+    );
+  }
 });

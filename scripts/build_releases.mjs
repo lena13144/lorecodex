@@ -42,7 +42,7 @@ function copyRecursive(src, dest) {
   if (st.isDirectory()) {
     fs.mkdirSync(dest, { recursive: true });
     for (const ent of fs.readdirSync(src)) {
-      if (ent === '__pycache__' || ent.endsWith('.pyc') || ent.endsWith('.ckpt.jsonl') || ent === 'ARCHITECTURE-V3-DESIGN.md') continue;
+      if (ent === '__pycache__' || ent.endsWith('.pyc') || ent.endsWith('.ckpt.jsonl') || ent === 'ARCHITECTURE-V3-DESIGN.md' || /^migrate_.*\.mjs$/i.test(ent)) continue;
       copyRecursive(path.join(src, ent), path.join(dest, ent));
     }
   } else {
@@ -71,13 +71,26 @@ function buildDemoLorepack(outPath) {
   const demoDir = path.join(ROOT, 'corpora', 'demo-chronicles');
   const indexData = JSON.parse(fs.readFileSync(path.join(demoDir, 'tree_index.json'), 'utf8'));
   const textsData = JSON.parse(fs.readFileSync(path.join(demoDir, 'tree_texts.json'), 'utf8'));
+  const configPath = path.join(demoDir, 'corpus.json');
+  const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
+  const graphPath = path.join(demoDir, 'graph.json');
+  let graphData = [];
+  if (fs.existsSync(graphPath)) {
+    const parsedGraph = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+    if (Array.isArray(parsedGraph)) graphData = parsedGraph;
+  }
+  const nowIso = new Date().toISOString();
   const pack = {
     format: 'lorecodex-pack-v2',
-    exported_at: new Date().toISOString(),
+    id: 'demo-chronicles',
     corpus_id: 'demo-chronicles',
-    corpus_name: indexData.corpus_name || '苍穹残响·灰烬星港编年史',
+    corpus_name: config.name || indexData.corpus_name || '苍穹残响·灰烬星港编年史',
+    config,
     indexData,
     textsData,
+    graphData,
+    exportedAt: nowIso,
+    exported_at: nowIso,
   };
   fs.writeFileSync(outPath, JSON.stringify(pack, null, 2), 'utf8');
   return pack;
@@ -95,7 +108,7 @@ function main() {
   fs.rmSync(extUiDir, { recursive: true, force: true });
   copyRecursive(path.join(ROOT, 'ui'), extUiDir);
   fs.copyFileSync(lorepackPath, path.join(extUiDir, 'demo-chronicles.lorepack.json'));
-  console.log(`[1/4] Built ${path.relative(ROOT, lorepackPath)} & synced extension/st-tree-lore/ui/`);
+  console.log(`[1/5] Built ${path.relative(ROOT, lorepackPath)} & synced extension/st-tree-lore/ui/`);
 
   // 2. Build SillyTavern & TauriTavern pure-frontend extension zip
   const stStage = path.join(STAGE_ROOT, 'st-extension');
@@ -127,7 +140,7 @@ function main() {
   );
   const stZipPath = path.join(OUT_DIR, `lorecodex-sillytavern-tauritavern-extension-${TAG}.zip`);
   createZipFromDir(stStage, stZipPath);
-  console.log(`[2/4] Built ${path.relative(ROOT, stZipPath)}`);
+  console.log(`[2/5] Built ${path.relative(ROOT, stZipPath)}`);
 
   // 3. Build AI Agent (DeepSeek Harness `dsh` / Cordis + MCP + Agent Skill) standalone zip
   const agentStage = path.join(STAGE_ROOT, 'agent-plugin');
@@ -221,7 +234,7 @@ function main() {
   );
   const agentZipPath = path.join(OUT_DIR, `lorecodex-agent-dsh-mcp-plugin-${TAG}.zip`);
   createZipFromDir(agentStage, agentZipPath);
-  console.log(`[3/4] Built ${path.relative(ROOT, agentZipPath)}`);
+  console.log(`[3/5] Built ${path.relative(ROOT, agentZipPath)}`);
 
   // 4. Build Full Desktop Server + Archival Codex Workbench UI zip
   const fullStage = path.join(STAGE_ROOT, 'full-workbench');
@@ -315,7 +328,7 @@ function main() {
       "  ]",
       "}",
       "```",
-      "*(If the user explicitly supplied an external API key and asked to use it, you may instead run `python3 builders/build_novel.py --upgrade --corpus-id <slug> --out-dir ./out --api-base <url> --api-key <key> --model <model> --workers 8` and skip Steps 2–3.)*",
+      "*(If the user explicitly supplied an external API key and asked to use it, write `chatBase`, `chatKey`, and `chatModel` into a `config.json` file and run `python3 builders/build_novel.py --upgrade --corpus-id <slug> --out-dir ./out --config <config.json> --workers 8` to skip Steps 2–3.)*",
       "",
       "### Step 4: Final Export & Coverage Check",
       "After the last batch, export once more without new meta files:",

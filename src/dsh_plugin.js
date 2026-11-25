@@ -8,8 +8,6 @@
  * sidecar agent distillation, and corpus building tools into `ctx.tools`.
  */
 
-const { MCP_TOOLS, handleToolCall } = require('./mcp_server');
-
 const name = 'lorecodex';
 const inject = ['tools'];
 
@@ -36,7 +34,7 @@ function toDshParameters(inputSchema) {
 /**
  * Build a tool definition compatible with `@deepseek-ai/dsh-tools` `defineTool(...)`.
  */
-function buildDshToolSpec(mcpTool, pluginConfig = {}) {
+function buildDshToolSpec(mcpTool, pluginConfig = {}, handleToolCallFn = null) {
   return {
     name: mcpTool.name,
     description: mcpTool.description,
@@ -50,7 +48,8 @@ function buildDshToolSpec(mcpTool, pluginConfig = {}) {
       if (!mergedArgs.corpus && pluginConfig && pluginConfig.defaultCorpus) {
         mergedArgs.corpus = pluginConfig.defaultCorpus;
       }
-      return await handleToolCall(mcpTool.name, mergedArgs);
+      const callTool = handleToolCallFn || require('./mcp_server').handleToolCall;
+      return await callTool(mcpTool.name, mergedArgs);
     },
   };
 }
@@ -66,6 +65,8 @@ function apply(ctx, config = {}) {
     process.env.DEFAULT_CORPUS = String(config.defaultCorpus);
   }
 
+  const { MCP_TOOLS, handleToolCall } = require('./mcp_server');
+
   let defineToolFn = (spec) => spec;
   try {
     const dshTools = require('@deepseek-ai/dsh-tools');
@@ -79,7 +80,7 @@ function apply(ctx, config = {}) {
   const registered = [];
   if (ctx && ctx.tools && typeof ctx.tools.register === 'function') {
     for (const mcpTool of MCP_TOOLS) {
-      const spec = defineToolFn(buildDshToolSpec(mcpTool, config));
+      const spec = defineToolFn(buildDshToolSpec(mcpTool, config, handleToolCall));
       ctx.tools.register(spec);
       registered.push(mcpTool.name);
     }

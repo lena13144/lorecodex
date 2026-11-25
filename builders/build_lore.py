@@ -7,13 +7,11 @@ Zero external dependencies (Python 3.12 standard library only).
 
 import argparse
 import collections
-import concurrent.futures
 import json
 import os
 import re
 import sys
 import time
-import urllib.request
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -81,7 +79,7 @@ def load_lore_entries(input_path, filter_stats=False, include_disabled=False, se
         return entries
 
     if input_path.lower().endswith(".jsonl"):
-        with open(input_path, "r", encoding="utf-8") as f:
+        with open(input_path, "r", encoding="utf-8-sig") as f:
             for idx, line in enumerate(f, 1):
                 if not line.strip():
                     continue
@@ -90,19 +88,19 @@ def load_lore_entries(input_path, filter_stats=False, include_disabled=False, se
                 if not txt or (filter_stats and is_noise_entry(txt)):
                     continue
                 title = str(obj.get("title") or obj.get("comment") or f"条目{idx}").strip()
-                keys = obj.get("keys") or obj.get("key") or obj.get("characters") or []
+                keys = _parse_keys(obj.get("keys") or obj.get("key") or obj.get("characters") or [])
                 entries.append({
                     "id": str(obj.get("id") or f"L{idx:03d}"),
                     "bucket": str(obj.get("bucket") or obj.get("group") or "设定档案"),
                     "title": title,
-                    "keys": [str(k).strip() for k in keys if str(k).strip()],
+                    "keys": keys,
                     "order": obj.get("order"),
                     "text": txt,
                 })
         return entries
 
     # SillyTavern Worldbook JSON OR Character Card V2/V3 JSON (data.character_book.entries)
-    with open(input_path, "r", encoding="utf-8") as f:
+    with open(input_path, "r", encoding="utf-8-sig") as f:
         data = json.load(f)
     raw_list = []
     default_book_bucket = "世界观与技术档案"
@@ -226,7 +224,7 @@ def main():
 
     selected_uids = None
     if args.uids_file:
-        with open(args.uids_file, "r", encoding="utf-8") as f:
+        with open(args.uids_file, "r", encoding="utf-8-sig") as f:
             selected_uids = {str(x) for x in json.load(f)}
     entries = load_lore_entries(
         args.input,
@@ -250,9 +248,9 @@ def main():
     max_id_num = 0
 
     if args.merge_into and os.path.exists(index_path) and os.path.exists(texts_path):
-        with open(index_path, "r", encoding="utf-8") as f:
+        with open(index_path, "r", encoding="utf-8-sig") as f:
             old_idx = json.load(f)
-        with open(texts_path, "r", encoding="utf-8") as f:
+        with open(texts_path, "r", encoding="utf-8-sig") as f:
             old_texts = json.load(f)
 
         removed_node_ids = set()
@@ -336,23 +334,28 @@ def main():
     total_scenes = sum(len(a.get("scenes", [])) for a in all_arcs)
     total_chars = sum(a.get("total_chars", 0) for a in all_arcs)
 
-    out_idx = {
-        "version": 2,
-        "source": old_idx.get("source") or os.path.basename(os.path.normpath(args.input)),
-        "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "stats": {
-            "arcs": len(all_arcs),
-            "groups": total_scenes,
-            "scenes": total_scenes,
-            "total_chars": total_chars,
-        },
-        "arcs": all_arcs,
+    old_stats = dict(old_idx.get("stats") or {}) if isinstance(old_idx.get("stats"), dict) else {}
+    out_idx = dict(old_idx)
+    out_idx["version"] = 2
+    out_idx["source"] = old_idx.get("source") or os.path.basename(os.path.normpath(args.input))
+    out_idx["built_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    out_idx["stats"] = {
+        **old_stats,
+        "arcs": len(all_arcs),
+        "groups": total_scenes,
+        "scenes": total_scenes,
+        "total_chars": total_chars,
     }
+    out_idx["arcs"] = all_arcs
 
-    with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(out_idx, f, ensure_ascii=False, indent=2)
-    with open(texts_path, "w", encoding="utf-8") as f:
-        json.dump(existing_texts, f, ensure_ascii=False)
+    def atomic_write_json(path, obj, indent=None):
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=indent)
+        os.replace(tmp_path, path)
+
+    atomic_write_json(index_path, out_idx, indent=2)
+    atomic_write_json(texts_path, existing_texts)
 
     corpus_cfg_path = os.path.join(target_dir, "corpus.json")
     if not os.path.exists(corpus_cfg_path):

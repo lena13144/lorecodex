@@ -110,7 +110,7 @@ export async function fetchHealth() {
   return {
     ok: true,
     engine: 'lorecodex-browser',
-    version: '2.1.0',
+    version: '2.4.1',
     mode: 'browser-idb',
     boot_ms: 1,
     defaultCorpus: active?.id || 'demo-chronicles',
@@ -131,11 +131,7 @@ export async function fetchHealth() {
 
 export async function fetchCorpora() {
   if (!forceLocalMode) {
-    try {
-      return await reqJson('/corpora');
-    } catch (_) {
-      forceLocalMode = true;
-    }
+    return reqJson('/corpora');
   }
   const be = await getBrowserEngine();
   const rows = await ensureLocalDemoSeeded(be);
@@ -163,11 +159,7 @@ export async function fetchCorpora() {
 
 export async function reloadCorpora() {
   if (!forceLocalMode) {
-    try {
-      return await reqJson('/corpora/reload', { method: 'POST' });
-    } catch (_) {
-      forceLocalMode = true;
-    }
+    return reqJson('/corpora/reload', { method: 'POST' });
   }
   localAgentsCache.clear();
   const res = await fetchCorpora();
@@ -251,11 +243,7 @@ export async function fetchGrep(corpusId, { q, limit = 40, category = '', tone =
 
 export async function fetchRuns() {
   if (!forceLocalMode) {
-    try {
-      return await reqJson('/tree-runs');
-    } catch (_) {
-      forceLocalMode = true;
-    }
+    return reqJson('/tree-runs');
   }
   const be = await getBrowserEngine();
   const runs = await be.idbListRuns();

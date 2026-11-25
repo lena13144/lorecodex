@@ -116,9 +116,13 @@ export function normalizeCorpusConfig(raw, corpusId) {
 }
 
 // IndexedDB wrapper for local serverless corpora & runtime trace runs
+let cachedIdbPromise = null;
+
 function openIdb() {
-    return new Promise((resolve, reject) => {
+    if (cachedIdbPromise) return cachedIdbPromise;
+    cachedIdbPromise = new Promise((resolve, reject) => {
         if (typeof indexedDB === 'undefined') {
+            cachedIdbPromise = null;
             return reject(new Error('当前环境不支持 IndexedDB'));
         }
         const req = indexedDB.open(IDB_NAME, 2);
@@ -131,9 +135,28 @@ function openIdb() {
                 db.createObjectStore(IDB_META_STORE, { keyPath: 'key' });
             }
         };
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error || new Error('IndexedDB 打开失败'));
+        req.onsuccess = () => {
+            const db = req.result;
+            const reset = () => {
+                cachedIdbPromise = null;
+            };
+            db.onclose = reset;
+            db.onversionchange = () => {
+                reset();
+                try { db.close(); } catch (_) {}
+            };
+            resolve(db);
+        };
+        req.onerror = () => {
+            cachedIdbPromise = null;
+            reject(req.error || new Error('IndexedDB 打开失败'));
+        };
+        req.onblocked = () => {
+            cachedIdbPromise = null;
+            reject(new Error('IndexedDB 被其他连接阻塞'));
+        };
     });
+    return cachedIdbPromise;
 }
 
 export async function idbGetMeta(key, fallback = null) {
@@ -167,12 +190,13 @@ export async function idbSetMeta(key, value) {
 }
 
 export async function idbRecordRun(inputPayload, outputData) {
+    const { apiConfig: _omit, ...safeInput } = inputPayload || {};
     const run = {
         id: 'run_local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
         ts: new Date().toISOString(),
-        corpus_id: outputData.corpus_id || inputPayload.corpus || '',
+        corpus_id: outputData.corpus_id || safeInput.corpus || '',
         max_order: outputData.max_order ?? null,
-        input: inputPayload,
+        input: safeInput,
         output: outputData,
     };
     const runs = (await idbGetMeta('recent_runs', [])) || [];
@@ -1161,6 +1185,7 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
             chars: item.content.length,
             tone_tags: ['设定/档案'],
             summary: makeHeuristicSummary(item.content),
+            _llm_done: false,
         });
         textsData[nodeId] = {
             arc_id: arcId,
@@ -1184,6 +1209,7 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
             characters: [...allKeys].slice(0, 20),
             key_items: [...allKeys].slice(0, 20),
             tone_tags: ['设定/档案'],
+            _llm_done: false,
             scenes,
         });
     }
@@ -1204,6 +1230,8 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
             scenes: totalScenes,
             total_chars: totalChars,
             max_order: maxOrder,
+            llm_scenes: existingPack ? Number(existingPack.indexData?.stats?.llm_scenes || 0) : 0,
+            llm_arcs: existingPack ? Number(existingPack.indexData?.stats?.llm_arcs || 0) : 0,
         },
         series_summaries: existingPack?.indexData?.series_summaries || {},
         arcs: baseArcs,
@@ -1520,6 +1548,9 @@ export function createBrowserTreeAgent(pack) {
 
     const arcMap = new Map();
     const sceneMetaMap = new Map();
+    const arcBaseHayMap = new Map();
+    const arcFullHayMap = new Map();
+    const sceneSearchHayMap = new Map();
     const searchableScenes = [];
     const categorySet = new Set();
     const toneSet = new Set();
@@ -1584,6 +1615,9 @@ export function createBrowserTreeAgent(pack) {
         const arcMetaHay = [arc.title, arc.description, arcSeries, ...(arc.characters || []), ...(arc.key_items || [])]
             .join(' ')
             .toLowerCase();
+        const arcBaseHay = [arc.title, arc.description, ...(arc.characters || [])].join(' ').toLowerCase();
+        arcBaseHayMap.set(arc.arc_id, arcBaseHay);
+        const arcSceneHays = [];
 
         for (const sc of arc.scenes || []) {
             const scOrder = effectiveSceneOrder(sc, arc);
@@ -1592,6 +1626,9 @@ export function createBrowserTreeAgent(pack) {
             }
             const scTones = Array.isArray(sc.tone_tags) && sc.tone_tags.length ? sc.tone_tags : arcTones;
             scTones.forEach((t) => toneSet.add(t));
+            const scHay = `${sc.title || ''} ${sc.summary || ''}`.toLowerCase();
+            sceneSearchHayMap.set(sc.node_id, scHay);
+            arcSceneHays.push(scHay);
             sceneMetaMap.set(sc.node_id, {
                 ...sc,
                 arc_id: arc.arc_id,
@@ -1627,6 +1664,7 @@ export function createBrowserTreeAgent(pack) {
                 });
             }
         }
+        arcFullHayMap.set(arc.arc_id, `${arcBaseHay} ${arcSceneHays.join(' ')}`);
     }
 
     const stats = {
@@ -1655,6 +1693,53 @@ export function createBrowserTreeAgent(pack) {
         return normalizeOrder(rawMaxOrder);
     }
 
+    function seriesHasHiddenArcs(serKey, maxOrder) {
+        if (maxOrder === null || maxOrder === undefined) return false;
+        for (const arc of indexData.arcs || []) {
+            const k = String(arc.series || arc.category || '默认分卷').trim();
+            if (k !== serKey) continue;
+            if (!isOrderAllowed(arc.order, maxOrder)) return true;
+            if ((arc.scenes || []).some((s) => !isOrderAllowed(effectiveSceneOrder(s, arc), maxOrder))) return true;
+        }
+        return false;
+    }
+
+    function buildSeriesListFromVisible(visibleEntries, maxOrder) {
+        if (maxOrder === null || maxOrder === undefined) return seriesList;
+        const map = new Map();
+        for (const entry of visibleEntries) {
+            const arc = entry.arc || entry;
+            const scenes = entry.scenes || [];
+            const serKey = String(arc.series || arc.category || '默认分卷').trim();
+            if (!map.has(serKey)) {
+                map.set(serKey, {
+                    series: serKey,
+                    arcs: 0,
+                    scenes: 0,
+                    total_chars: 0,
+                    min_order: null,
+                    max_order: null,
+                    categories: new Set(),
+                });
+            }
+            const ss = map.get(serKey);
+            ss.arcs += 1;
+            ss.scenes += scenes.length;
+            ss.total_chars += scenes.reduce((acc, s) => acc + (Number(s.chars) || 0), 0) || Number(arc.total_chars) || 0;
+            if (arc.category) ss.categories.add(arc.category);
+            if (arc.order != null && Number.isFinite(Number(arc.order))) {
+                const ord = Number(arc.order);
+                ss.min_order = ss.min_order === null ? ord : Math.min(ss.min_order, ord);
+                ss.max_order = ss.max_order === null ? ord : Math.max(ss.max_order, ord);
+            }
+        }
+        return [...map.values()].map((s) => ({
+            ...s,
+            categories: [...s.categories],
+            summary: seriesHasHiddenArcs(s.series, maxOrder) ? '' : String(seriesSummaries[s.series] || '').trim(),
+        }));
+    }
+
     function getTreeIndex({ maxOrder: rawMaxOrder } = {}) {
         const maxOrder = resolveMaxOrder(rawMaxOrder);
         const visible = [];
@@ -1670,6 +1755,11 @@ export function createBrowserTreeAgent(pack) {
             (acc, a) => acc + (a.scenes || []).reduce((sAcc, s) => sAcc + (Number(s.chars) || 0), 0),
             0
         );
+        const visSeries = buildSeriesListFromVisible(visible, maxOrder);
+        const visSeriesSummaries =
+            maxOrder !== null
+                ? Object.fromEntries(visSeries.filter((s) => s.summary).map((s) => [s.series, s.summary]))
+                : seriesSummaries;
         return {
             corpus_id: corpusId,
             corpus_name: corpusConfig.name,
@@ -1689,8 +1779,8 @@ export function createBrowserTreeAgent(pack) {
                       }
                     : stats,
             categories,
-            series: seriesList,
-            series_summaries: seriesSummaries,
+            series: visSeries,
+            series_summaries: visSeriesSummaries,
             tone_tags: toneTags,
             arcs: visible,
             aliases: corpusConfig.aliases || [],
@@ -1843,10 +1933,20 @@ export function createBrowserTreeAgent(pack) {
             body.tool_choice = 'auto';
         }
         // stream=true: SSE assembled back into one message, idle timeout instead of a total timeout.
-        try {
-            return await postChatCompletion({ url: `${cleanBase}/chat/completions`, key, body, stream: stream !== false, idleMs: 90000, onDelta });
-        } catch (err) {
-            throw err && err.status ? new Error(`LLM ${err.message.slice(0, 170)}`) : err;
+        const maxAttempts = 2;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                return await postChatCompletion({ url: `${cleanBase}/chat/completions`, key, body, stream: stream !== false, idleMs: 90000, onDelta });
+            } catch (err) {
+                const status = Number(err?.status) || 0;
+                const isTransient = [429, 502, 503, 504].includes(status);
+                if (isTransient && attempt + 1 < maxAttempts) {
+                    const waitMs = err.retryAfterMs ? Math.min(5000, Math.max(500, err.retryAfterMs)) : 1500;
+                    await new Promise((r) => setTimeout(r, waitMs));
+                    continue;
+                }
+                throw err && err.status ? new Error(`LLM ${err.message.slice(0, 170)}`) : err;
+            }
         }
     }
 
@@ -1856,6 +1956,7 @@ export function createBrowserTreeAgent(pack) {
         const maxTurns = Math.min(Math.max(Number(payload.maxTurns) || 8, 2), 12);
         const rawMaxScenes = Number(payload.maxScenes);
         const maxScenes = rawMaxScenes > 0 ? Math.min(rawMaxScenes, 12) : 10;
+        const pov = String(payload.sceneAnchor?.pov || payload.pov || '').trim();
 
         if (!apiCfg?.chatBase || !apiCfg?.chatKey) {
             throw new Error('内置免服务端模式需要先在下方「旁路推理 Agent 模型配置」填写 API Base URL 与 API Key');
@@ -1868,8 +1969,9 @@ export function createBrowserTreeAgent(pack) {
                 scenes: (a.scenes || []).filter((s) => isOrderAllowed(effectiveSceneOrder(s, a), maxOrder)),
             }))
             .filter((x) => x.scenes.length > 0);
+        const visibleSeriesList = buildSeriesListFromVisible(visibleArcs, maxOrder);
 
-        const hasSeriesTool = seriesList.length >= 2;
+        const hasSeriesTool = visibleSeriesList.length >= 2;
         const tools = [];
         if (hasSeriesTool) {
             tools.push({
@@ -1963,7 +2065,10 @@ ${corpusConfig.world_premise || ''}
 {"skip":false,"selected_nodes":["经read_scene核实的node_id"],"selected_arcs":["可选宏观arc_id"],"timeline_note":"时间线阶段","guide":"结构化记忆导读并标注[node_id]"}`;
 
         const userParts = [];
-        if (payload.sceneAnchor?.charName) userParts.push(`当前角色：${payload.sceneAnchor.charName} | 用户：${payload.sceneAnchor.userName || '旅人'}`);
+        const anchorBits = [];
+        if (payload.sceneAnchor?.charName) anchorBits.push(`当前角色：${payload.sceneAnchor.charName} | 用户：${payload.sceneAnchor.userName || '旅人'}`);
+        if (pov) anchorBits.push(`检索视角(POV)：${pov}`);
+        if (anchorBits.length) userParts.push(anchorBits.join(' | '));
         const sessionRecall = normalizeSessionRecall(payload.sessionRecall);
         if (sessionRecall.length) userParts.push(`【本局记忆召回】（本局已发生的事，不是原作内容；只用于理解对话里的指代，不要据此去原作里找本局独有的事件）\n${sessionRecall.join('\n')}`);
         if (Array.isArray(payload.recentChat) && payload.recentChat.length) {
@@ -1990,9 +2095,9 @@ ${corpusConfig.world_premise || ''}
         const execTool = (fnName, args) => {
             if (fnName === 'list_series') {
                 const kw = String(args?.keyword || '').toLowerCase();
-                const rows = seriesList
-                    .filter((s) => !kw || s.series.toLowerCase().includes(kw) || String(seriesSummaries[s.series] || '').toLowerCase().includes(kw))
-                    .map((s) => `[${s.series}] ${s.arcs}卷 ${s.scenes}幕 (${formatCharCount(s.total_chars)})${seriesSummaries[s.series] ? ' | ' + seriesSummaries[s.series] : ''}`);
+                const rows = visibleSeriesList
+                    .filter((s) => !kw || s.series.toLowerCase().includes(kw) || s.summary.toLowerCase().includes(kw))
+                    .map((s) => `[${s.series}] ${s.arcs}卷 ${s.scenes}幕 (${formatCharCount(s.total_chars)})${s.summary ? ' | ' + s.summary : ''}`);
                 return {
                     text: rows.join('\n') || '无匹配分部',
                     summary: `列出 ${rows.length} 个分部`,
@@ -2004,14 +2109,29 @@ ${corpusConfig.world_premise || ''}
                 const cat = String(args?.category || '').toLowerCase();
                 const ch = String(args?.character || '').toLowerCase();
                 const kw = String(args?.keyword || '').toLowerCase();
+                const tone = String(args?.tone || '').trim().toLowerCase();
                 const chTerms = ch ? expandAliases(ch).map((x) => x.toLowerCase()) : [];
                 const kwTerms = kw ? expandAliases(kw).map((x) => x.toLowerCase()) : [];
+                const arcMatchesTerms = (arc, scenes, terms) => {
+                    if (maxOrder === null || scenes.length === (arc.scenes || []).length) {
+                        const fullHay = arcFullHayMap.get(arc.arc_id) || '';
+                        return terms.some((t) => fullHay.includes(t));
+                    }
+                    const baseHay = arcBaseHayMap.get(arc.arc_id) || '';
+                    return terms.some(
+                        (t) => baseHay.includes(t) || scenes.some((s) => (sceneSearchHayMap.get(s.node_id) || '').includes(t))
+                    );
+                };
                 const matched = visibleArcs.filter(({ arc, scenes }) => {
                     if (ser && !String(arc.series || arc.category || '').toLowerCase().includes(ser)) return false;
                     if (cat && !String(arc.category || '').toLowerCase().includes(cat)) return false;
-                    const hay = [arc.title, arc.description, ...(arc.characters || []), ...scenes.map((s) => `${s.title} ${s.summary}`)].join(' ').toLowerCase();
-                    if (chTerms.length && !chTerms.some((t) => hay.includes(t))) return false;
-                    if (kwTerms.length && !kwTerms.some((t) => hay.includes(t))) return false;
+                    if (tone) {
+                        const arcToneHit = (arc.tone_tags || []).some((t) => String(t).toLowerCase().includes(tone));
+                        const scToneHit = scenes.some((s) => (s.tone_tags || []).some((t) => String(t).toLowerCase().includes(tone)));
+                        if (!arcToneHit && !scToneHit) return false;
+                    }
+                    if (chTerms.length && !arcMatchesTerms(arc, scenes, chTerms)) return false;
+                    if (kwTerms.length && !arcMatchesTerms(arc, scenes, kwTerms)) return false;
                     return true;
                 });
                 const shown = matched.slice(0, 60);
@@ -2176,6 +2296,44 @@ ${corpusConfig.world_premise || ''}
             trace.push(`T${turn}(${reqMs}ms): ${callLogs.join(' ; ')}`);
         }
 
+        if (!rawAnswer) {
+            messages.push({
+                role: 'user',
+                content:
+                    '已达到最大工具轮次，请立即停止调用工具，直接输出最终严格 JSON 对象（若未查到匹配原文请输出 {"skip":true,"reason":"..."}）。',
+            });
+            const tFinal = Date.now();
+            const finalResp = await callChat({
+                base: apiCfg.chatBase,
+                key: apiCfg.chatKey,
+                model: apiCfg.chatModel || 'deepseek-chat',
+                messages,
+                tools: undefined,
+                maxTokens: apiCfg.maxTokens,
+                temperature: apiCfg.temperature,
+                reasoningEffort: apiCfg.reasoningEffort ?? apiCfg.reasoning_effort,
+                stream: apiCfg.llmStream !== false,
+                onDelta: onProgress ? (d) => onProgress({ turn: maxTurns + 1, ...d }) : null,
+            });
+            const finalMs = Date.now() - tFinal;
+            if (finalResp?.usage) {
+                promptTokens += Number(finalResp.usage.prompt_tokens) || 0;
+                completionTokens += Number(finalResp.usage.completion_tokens) || 0;
+            }
+            const fMsg = finalResp?.choices?.[0]?.message;
+            const fReasoning = String(fMsg?.reasoning_content || fMsg?.reasoning || '').trim();
+            rawAnswer = fMsg?.content || '';
+            finalTurn = maxTurns + 1;
+            steps.push({
+                turn: finalTurn,
+                kind: 'final_forced',
+                llm_ms: finalMs,
+                tool_ms: 0,
+                reasoning: fReasoning,
+                calls: [],
+            });
+        }
+
         const parsed = extractJsonObject(rawAnswer);
         const took_ms = Date.now() - t0;
         const baseTraversal = {
@@ -2212,35 +2370,71 @@ ${corpusConfig.world_premise || ''}
         }
 
         const wantedIds = Array.isArray(parsed?.selected_nodes)
-            ? parsed.selected_nodes.map((rawId) => String(rawId || '').replace(/^node:/i, '').split('|')[0].trim())
+            ? parsed.selected_nodes.map((rawId) => String(rawId || '').replace(/^(?:node_id=|node:)/i, '').split('|')[0].trim()).filter(Boolean)
             : [];
         const finalScenes = [];
+        const pickedIds = new Set();
+        const withPresent = (sc) => {
+            const chars = sc.characters || sceneMetaMap.get(sc.node_id)?.arc_characters || [];
+            const present = pov
+                ? sc.text.includes(pov) || chars.some((c) => c.includes(pov))
+                : null;
+            return { ...sc, present };
+        };
         for (const id of wantedIds) {
+            if (pickedIds.has(id)) continue;
             if (readScenesMap.has(id) && finalScenes.length < maxScenes) {
-                finalScenes.push(readScenesMap.get(id));
+                finalScenes.push(withPresent(readScenesMap.get(id)));
+                pickedIds.add(id);
             }
         }
         if (!finalScenes.length && readScenesMap.size > 0) {
-            for (const sc of readScenesMap.values()) {
+            for (const [id, sc] of readScenesMap.entries()) {
                 if (finalScenes.length >= Math.min(3, maxScenes)) break;
-                finalScenes.push(sc);
+                if (pickedIds.has(id)) continue;
+                finalScenes.push(withPresent(sc));
+                pickedIds.add(id);
             }
         }
         baseTraversal.selected_nodes = finalScenes.map((s) => s.node_id);
 
-        const wantedArcIds = Array.isArray(parsed?.selected_arcs) ? parsed.selected_arcs.map(String).slice(0, 10) : [];
+        const wantedArcIds = [...new Set(
+            (Array.isArray(parsed?.selected_arcs) ? parsed.selected_arcs : [])
+                .map((x) => String(x).trim())
+                .filter(Boolean)
+        )].slice(0, 10);
+        const allowedOutlineArcs = wantedArcIds
+            .map((aid) => visibleArcs.find((x) => x.arc.arc_id === aid))
+            .filter(Boolean);
         const finalOutlines = [];
-        for (const aid of wantedArcIds) {
-            const found = visibleArcs.find((x) => x.arc.arc_id === aid);
-            if (!found) continue;
-            finalOutlines.push({
-                arc_id: found.arc.arc_id,
-                title: found.arc.title,
-                category: found.arc.category || '',
-                description: found.arc.description || '',
-                scene_count: found.scenes.length,
-                outline_text: found.scenes.map((s) => `  - [${s.node_id}] 《${s.title}》: ${s.summary}`).join('\n'),
-            });
+        if (allowedOutlineArcs.length) {
+            const perArcBudget = Math.max(800, Math.floor(10000 / allowedOutlineArcs.length));
+            for (const found of allowedOutlineArcs) {
+                const scenes = found.scenes;
+                const lines = [];
+                let used = 0;
+                const sumCap = scenes.length > 18 ? 70 : 120;
+                for (let i = 0; i < scenes.length; i++) {
+                    const s = scenes[i];
+                    const sum = String(s.summary || '').replace(/\s+/g, ' ').trim();
+                    const shortSum = sum.length > sumCap ? sum.slice(0, sumCap) + '…' : sum;
+                    const line = `  - [${s.node_id}] 《${s.title}》${shortSum ? `: ${shortSum}` : ''}`;
+                    if (used + line.length > perArcBudget && lines.length >= 3) {
+                        lines.push(`  …（本卷共 ${scenes.length} 幕，后续 ${scenes.length - i} 幕从略）`);
+                        break;
+                    }
+                    lines.push(line);
+                    used += line.length + 1;
+                }
+                finalOutlines.push({
+                    arc_id: found.arc.arc_id,
+                    title: found.arc.title,
+                    category: found.arc.category || '',
+                    description: found.arc.description || '',
+                    scene_count: scenes.length,
+                    outline_text: lines.join('\n'),
+                });
+            }
         }
 
         const guide = (parsed && typeof parsed.guide === 'string' ? parsed.guide : rawAnswer).trim();
@@ -2498,7 +2692,8 @@ function sleepWithSignal(ms, signal) {
  *
  * Errors carry `.status` (HTTP code) and `.retryAfterMs` when the server sent Retry-After.
  */
-async function postChatCompletion({ url, key, body, stream = true, idleMs = 90000, totalMs = 0, signal = null, onDelta = null }) {
+async function postChatCompletion({ url, key, body, stream = true, idleMs = 90000, totalMs = 60000, signal = null, onDelta = null }) {
+    const effectiveTotalMs = Number(totalMs) > 0 ? Number(totalMs) : 60000;
     const attemptOnce = async (useStream) => {
         const ctrl = new AbortController();
         let timedOut = '';
@@ -2524,7 +2719,7 @@ async function postChatCompletion({ url, key, body, stream = true, idleMs = 9000
         }
         const idleWhy = `流式响应超过 ${Math.round(idleMs / 1000)} 秒没有收到数据`;
         if (useStream) arm(idleMs, idleWhy);
-        else arm(totalMs, `请求超过 ${Math.round(totalMs / 1000)} 秒未完成`);
+        else arm(effectiveTotalMs, `请求超过 ${Math.round(effectiveTotalMs / 1000)} 秒未完成`);
         try {
             const resp = await fetch(url, {
                 method: 'POST',

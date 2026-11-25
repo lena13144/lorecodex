@@ -16,7 +16,8 @@
  *
  * Errors carry `.status` (HTTP code) and `.retryAfterMs` when the server sent Retry-After.
  */
-async function postChatCompletion({ url, key, body, stream = true, idleMs = 90000, totalMs = 0, signal = null, onDelta = null }) {
+async function postChatCompletion({ url, key, body, stream = true, idleMs = 90000, totalMs = 60000, signal = null, onDelta = null }) {
+    const effectiveTotalMs = Number(totalMs) > 0 ? Number(totalMs) : 60000;
     const attemptOnce = async (useStream) => {
         const ctrl = new AbortController();
         let timedOut = '';
@@ -42,7 +43,7 @@ async function postChatCompletion({ url, key, body, stream = true, idleMs = 9000
         }
         const idleWhy = `流式响应超过 ${Math.round(idleMs / 1000)} 秒没有收到数据`;
         if (useStream) arm(idleMs, idleWhy);
-        else arm(totalMs, `请求超过 ${Math.round(totalMs / 1000)} 秒未完成`);
+        else arm(effectiveTotalMs, `请求超过 ${Math.round(effectiveTotalMs / 1000)} 秒未完成`);
         try {
             const resp = await fetch(url, {
                 method: 'POST',

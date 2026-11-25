@@ -11,6 +11,8 @@ import {
 } from './state.js';
 import { fetchSceneText } from './api.js';
 
+let stageRenderSeq = 0;
+
 function formatProse(rawText, highlightTerms = []) {
   const lines = String(rawText || '').split(/\r?\n/);
   const hitCounter = highlightTerms.length ? { count: 0 } : null;
@@ -172,6 +174,7 @@ export function navigateSceneDelta(delta) {
 }
 
 export async function renderStage() {
+  const seq = ++stageRenderSeq;
   const sheet = $('#bookSheet');
   if (state.stageMode === 'dossier') {
     $('#stageStatus').textContent = '检索选段卷宗';
@@ -197,7 +200,8 @@ export async function renderStage() {
   if (v.type === 'scene') {
     const arc = state.arcMap.get(v.arcId);
     $('#stageStatus').textContent = `精读单幕 · ${v.nodeId}`;
-    await renderSingleSceneSheet(sheet, v.nodeId, arc);
+    await renderSingleSceneSheet(sheet, v.nodeId, arc, seq);
+    if (seq !== stageRenderSeq) return;
     updateReadProgress();
     return;
   }
@@ -205,7 +209,8 @@ export async function renderStage() {
     const arc = state.arcMap.get(v.arcId);
     if (!arc) return renderCoverSheet(sheet);
     $('#stageStatus').textContent = `连读全卷 · ${arc.arc_id}`;
-    await renderContinuousArcSheet(sheet, arc);
+    await renderContinuousArcSheet(sheet, arc, seq);
+    if (seq !== stageRenderSeq) return;
     updateReadProgress();
   }
 }
@@ -272,10 +277,10 @@ function renderCoverSheet(sheet) {
       <div class="cover-ornament"></div>
 
       <div class="kpi-grid">
-        <div class="kpi-card"><div class="kpi-val">${st.arcs || 0}</div><div class="kpi-lbl">收录篇章卷宗</div></div>
-        <div class="kpi-card"><div class="kpi-val">${totalScenes}</div><div class="kpi-lbl">无截断原场景幕</div></div>
+        <div class="kpi-card"><div class="kpi-val">${Number(st.arcs) || 0}</div><div class="kpi-lbl">收录篇章卷宗</div></div>
+        <div class="kpi-card"><div class="kpi-val">${Number(totalScenes) || 0}</div><div class="kpi-lbl">无截断原场景幕</div></div>
         <div class="kpi-card"><div class="kpi-val">${fmtChars(st.total_chars || 0)}</div><div class="kpi-lbl">典籍总字数</div></div>
-        <div class="kpi-card"><div class="kpi-val">${llmScenes}/${totalScenes}</div><div class="kpi-lbl">LLM 智能目录覆盖</div></div>
+        <div class="kpi-card"><div class="kpi-val">${Number(llmScenes) || 0}/${Number(totalScenes) || 0}</div><div class="kpi-lbl">LLM 智能目录覆盖</div></div>
       </div>
 
       <div class="quick-actions">
@@ -317,7 +322,7 @@ function renderArcOverviewSheet(sheet, arc) {
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:4px;flex-wrap:wrap;">
           <span style="font-family:var(--heading-font);font-weight:700;font-size:14.5px;">第 ${i + 1} 幕 · ${esc(s.title || s.group_title)}</span>
           <span style="font-family:var(--mono);font-size:11px;color:var(--ink-muted);display:flex;gap:5px;align-items:center;">
-            ${tones}${stamp} ${esc(s.node_id)} · ${s.chars} 字
+            ${tones}${stamp} ${esc(s.node_id)} · ${Number(s.chars) || 0} 字
           </span>
         </div>
         <div style="font-size:12.5px;line-height:1.6;color:var(--ink-soft);">${esc(s.summary)}</div>
@@ -329,7 +334,7 @@ function renderArcOverviewSheet(sheet, arc) {
   sheet.innerHTML = `
     <div class="running-head">
       <span>${arc.series ? esc(arc.series) + ' · ' : ''}${esc(arc.category)} · 卷号 ${esc(arc.arc_id)}</span>
-      <span>共 ${arc.scenes.length} 幕 · ${(arc.total_chars || 0).toLocaleString()} 字${arc.order != null ? ` · 序 ${arc.order}` : ''}</span>
+      <span>共 ${(arc.scenes || []).length} 幕 · ${(Number(arc.total_chars) || 0).toLocaleString()} 字${arc.order != null ? ` · 序 ${esc(arc.order)}` : ''}</span>
     </div>
     <h1 class="book-h1">${esc(arc.title)}</h1>
     <div class="book-subtitle">档案键 ${esc(arc.arc_key || arc.arc_id)}</div>
@@ -359,16 +364,19 @@ function renderArcOverviewSheet(sheet, arc) {
   $('#readContinuousBtn')?.addEventListener('click', () => openArcRead(arc.arc_id));
 }
 
-async function renderSingleSceneSheet(sheet, nid, arc) {
+async function renderSingleSceneSheet(sheet, nid, arc, seq = ++stageRenderSeq) {
+  const reqCorpusId = state.corpusId;
   sheet.innerHTML = `<div style="padding:48px 0;text-align:center;color:var(--ink-muted);">正在展卷调取第 ${esc(nid)} 幕原文...</div>`;
   try {
     const mo = state.maxOrder > 0 ? state.maxOrder : 0;
-    const cacheKey = `${state.corpusId}:${mo}:${nid}`;
+    const cacheKey = `${reqCorpusId}:${mo}:${nid}`;
     let sc = state.sceneCache.get(cacheKey);
     if (!sc) {
-      sc = await fetchSceneText(state.corpusId, nid, mo);
+      sc = await fetchSceneText(reqCorpusId, nid, mo);
+      if (seq !== stageRenderSeq || state.corpusId !== reqCorpusId) return;
       state.sceneCache.set(cacheKey, sc);
     }
+    if (seq !== stageRenderSeq || state.corpusId !== reqCorpusId) return;
     const parentArc = arc || state.arcMap.get(sc.arc_id);
     const scenes = parentArc?.scenes || [];
     const idx = scenes.findIndex((x) => x.node_id === nid);
@@ -386,10 +394,10 @@ async function renderSingleSceneSheet(sheet, nid, arc) {
     sheet.innerHTML = `
       <div class="running-head">
         <span><a href="javascript:void(0)" id="crumbArc" style="color:var(--ink-soft);text-decoration:none;">${esc(sc.category)} · ${esc(sc.arc_title)}</a></span>
-        <span>${idx >= 0 ? `第 ${idx + 1} / ${scenes.length} 幕 · ` : ''}节点 ${esc(sc.node_id)} · ${sc.chars} 字</span>
+        <span>${idx >= 0 ? `第 ${idx + 1} / ${scenes.length} 幕 · ` : ''}节点 ${esc(sc.node_id)} · ${Number(sc.chars) || 0} 字</span>
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px;flex-wrap:wrap;">
-        <span style="font-family:var(--mono);font-size:11.5px;color:var(--ink-muted);">${sc.order != null ? `ORDER ${sc.order} · ` : ''}GROUP ${esc(sc.group)} ${sc.group_title && sc.group_title !== sc.group ? '· ' + esc(sc.group_title) : ''}</span>
+        <span style="font-family:var(--mono);font-size:11.5px;color:var(--ink-muted);">${sc.order != null ? `ORDER ${esc(sc.order)} · ` : ''}GROUP ${esc(sc.group)} ${sc.group_title && sc.group_title !== sc.group ? '· ' + esc(sc.group_title) : ''}</span>
         <div style="display:flex;gap:6px;align-items:center;">
           ${tones}${stamp}
           ${parentArc ? `<button id="switchContBtn" class="btn-sm">连读整卷</button>` : ''}
@@ -411,7 +419,7 @@ async function renderSingleSceneSheet(sheet, nid, arc) {
 
       <div class="page-turner">
         ${prev ? `<button class="turn-btn" id="prevSceneBtn" title="${esc(prev.title)}">← 上一幕：${esc(prev.title)}</button>` : `<button class="turn-btn" id="backArcBtn">← 返回本卷目录</button>`}
-        <span style="font-size:12px;color:var(--ink-muted);">${idx >= 0 ? `${idx + 1} / ${scenes.length}` : sc.node_id}</span>
+        <span style="font-size:12px;color:var(--ink-muted);">${idx >= 0 ? `${idx + 1} / ${scenes.length}` : esc(sc.node_id)}</span>
         ${next ? `<button class="turn-btn" id="nextSceneBtn" title="${esc(next.title)}">下一幕：${esc(next.title)} →</button>` : `<button class="turn-btn" id="endArcBtn">本卷已终 · 返回目录</button>`}
       </div>
     `;
@@ -441,23 +449,29 @@ async function renderSingleSceneSheet(sheet, nid, arc) {
     $('#backArcBtn')?.addEventListener('click', () => openArc(sc.arc_id));
     $('#endArcBtn')?.addEventListener('click', () => openArc(sc.arc_id));
   } catch (e) {
+    if (seq !== stageRenderSeq || state.corpusId !== reqCorpusId) return;
     sheet.innerHTML = `<div style="padding:36px;color:var(--seal);">读取失败：${esc(e.message)}</div>`;
   }
 }
 
-async function renderContinuousArcSheet(sheet, arc) {
-  sheet.innerHTML = `<div style="padding:48px 0;text-align:center;color:var(--ink-muted);">正在汇编《${esc(arc.title)}》全卷 ${arc.scenes.length} 幕正文...</div>`;
+async function renderContinuousArcSheet(sheet, arc, seq = ++stageRenderSeq) {
+  const reqCorpusId = state.corpusId;
+  const arcScenes = arc.scenes || [];
+  sheet.innerHTML = `<div style="padding:48px 0;text-align:center;color:var(--ink-muted);">正在汇编《${esc(arc.title)}》全卷 ${arcScenes.length} 幕正文...</div>`;
   try {
     const mo = state.maxOrder > 0 ? state.maxOrder : 0;
     const loaded = await Promise.all(
-      (arc.scenes || []).map(async (s) => {
-        const key = `${state.corpusId}:${mo}:${s.node_id}`;
+      arcScenes.map(async (s) => {
+        const key = `${reqCorpusId}:${mo}:${s.node_id}`;
         if (!state.sceneCache.has(key)) {
-          state.sceneCache.set(key, await fetchSceneText(state.corpusId, s.node_id, mo));
+          const fetched = await fetchSceneText(reqCorpusId, s.node_id, mo);
+          if (seq !== stageRenderSeq || state.corpusId !== reqCorpusId) return null;
+          state.sceneCache.set(key, fetched);
         }
         return state.sceneCache.get(key);
       })
     );
+    if (seq !== stageRenderSeq || state.corpusId !== reqCorpusId || loaded.some((x) => !x)) return;
     const { read, selected } = getMarks();
     const sections = loaded
       .map((sc, idx) => {
@@ -471,7 +485,7 @@ async function renderContinuousArcSheet(sheet, arc) {
           <div class="chapter-break-meta">
             <span>第 ${idx + 1} 幕</span>
             <span>节点 ${esc(sc.node_id)}</span>
-            <span>${sc.chars} 字</span>
+            <span>${Number(sc.chars) || 0} 字</span>
             ${stamp}
           </div>
           <h2 class="chapter-break-title">${esc(sc.title)}</h2>
@@ -484,7 +498,7 @@ async function renderContinuousArcSheet(sheet, arc) {
     sheet.innerHTML = `
       <div class="running-head">
         <span><a href="javascript:void(0)" id="contBackArc" style="color:var(--ink-soft);text-decoration:none;">← 返回《${esc(arc.title)}》目录页</a></span>
-        <span>全卷连读 · ${arc.scenes.length} 幕 · ${(arc.total_chars || 0).toLocaleString()} 字</span>
+        <span>全卷连读 · ${arcScenes.length} 幕 · ${(Number(arc.total_chars) || 0).toLocaleString()} 字</span>
       </div>
       <h1 class="book-h1">${esc(arc.title)}</h1>
       <div class="colophon-box">
@@ -506,6 +520,7 @@ async function renderContinuousArcSheet(sheet, arc) {
       $('#bookScroll').scrollTop = 0;
     });
   } catch (e) {
+    if (seq !== stageRenderSeq || state.corpusId !== reqCorpusId) return;
     sheet.innerHTML = `<div style="padding:36px;color:var(--seal);">汇编失败：${esc(e.message)}</div>`;
   }
 }
@@ -520,7 +535,7 @@ function renderDossierSheet(sheet) {
     sheet.innerHTML = `
       <div class="running-head">
         <span>检索判定卷宗 · ${esc(out.corpus_name || out.corpus_id || '')}</span>
-        <span>耗时 ${out.took_ms} ms · ${out.turns} 轮</span>
+        <span>耗时 ${Number(out.took_ms) || 0} ms · ${Number(out.turns) || 0} 轮</span>
       </div>
       <div class="guide-card" style="border-left-color:var(--ochre);">
         <div style="font-family:var(--heading-font);font-weight:700;font-size:16px;margin-bottom:8px;">本轮判定跳过记忆注入（skip = true）</div>
@@ -541,7 +556,7 @@ function renderDossierSheet(sheet) {
       return `
       <div class="excerpt-block" id="dossier-scene-${esc(s.node_id)}">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
-          <span style="font-family:var(--mono);font-size:11px;color:var(--ink-muted);">摘录 ${idx + 1} · 节点 ${esc(s.node_id)} · ${esc(s.category)}${s.order != null ? ` · 序${s.order}` : ''} · ${s.chars} 字 ${tones} ${povNote}</span>
+          <span style="font-family:var(--mono);font-size:11px;color:var(--ink-muted);">摘录 ${idx + 1} · 节点 ${esc(s.node_id)} · ${esc(s.category)}${s.order != null ? ` · 序${esc(s.order)}` : ''} · ${Number(s.chars) || 0} 字 ${tones} ${povNote}</span>
           <div style="display:flex;gap:6px;">
             <button class="dos-open-scene btn-sm" data-nid="${esc(s.node_id)}" data-aid="${esc(s.arc_id)}">单幕阅读</button>
             <button class="dos-open-arc btn-sm" data-aid="${esc(s.arc_id)}">连读整卷 →</button>
@@ -560,7 +575,7 @@ function renderDossierSheet(sheet) {
       (o) => `
     <div class="excerpt-block">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px;">
-        <span style="font-family:var(--mono);font-size:11px;color:var(--ochre);">宏观脉络大纲 · 卷 ${esc(o.arc_id)} · ${esc(o.category)} · ${o.scene_count} 幕</span>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--ochre);">宏观脉络大纲 · 卷 ${esc(o.arc_id)} · ${esc(o.category)} · ${Number(o.scene_count) || 0} 幕</span>
         <button class="dos-open-arc btn-sm" data-aid="${esc(o.arc_id)}">连读本卷正文 →</button>
       </div>
       <h2 class="chapter-break-title" style="margin-bottom:6px;">${esc(o.title)}</h2>
@@ -584,7 +599,7 @@ function renderDossierSheet(sheet) {
   sheet.innerHTML = `
     <div class="running-head">
       <span>检索选段与记忆导读卷宗 · ${esc(out.corpus_name || out.corpus_id || '')}</span>
-      <span>入选 ${(out.scenes || []).length} 幕${(out.outlines || []).length ? ` · ${out.outlines.length} 卷大纲` : ''} · ${totalChars.toLocaleString()} 字 · ${out.took_ms} ms${out.max_order ? ` · 序<=${out.max_order}` : ''}</span>
+      <span>入选 ${(out.scenes || []).length} 幕${(out.outlines || []).length ? ` · ${out.outlines.length} 卷大纲` : ''} · ${totalChars.toLocaleString()} 字 · ${Number(out.took_ms) || 0} ms${out.max_order ? ` · 序<=${Number(out.max_order) || 0}` : ''}</span>
     </div>
     <div class="guide-card">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:8px;flex-wrap:wrap;">

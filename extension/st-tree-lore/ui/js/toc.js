@@ -13,6 +13,48 @@ import {
 import { fetchGrep } from './api.js';
 
 let grepTimer = null;
+let grepSeq = 0;
+let tocListWired = false;
+
+function ensureTocDelegation() {
+  if (tocListWired) return;
+  const listEl = $('#tocList');
+  if (!listEl) return;
+  tocListWired = true;
+  listEl.addEventListener('click', (e) => {
+    const sceneEl = e.target.closest('.toc-scene');
+    if (sceneEl && listEl.contains(sceneEl)) {
+      e.stopPropagation();
+      actions.openScene?.(sceneEl.dataset.nid, sceneEl.dataset.aid);
+      return;
+    }
+    const seriesHead = e.target.closest('.series-head');
+    if (seriesHead && listEl.contains(seriesHead)) {
+      const grp = seriesHead.closest('.series-group');
+      const ser = grp?.dataset.series;
+      if (ser !== undefined) {
+        if (state.collapsedSeries.has(ser)) state.collapsedSeries.delete(ser);
+        else state.collapsedSeries.add(ser);
+        renderToc();
+      }
+      return;
+    }
+    if (state.searchMode === 'grep') {
+      const entry = e.target.closest('.arc-entry');
+      if (entry && listEl.contains(entry) && entry.dataset.nid) {
+        const q = state.searchTerm.trim();
+        const terms = state.grepTerms.length ? state.grepTerms : expandGrepQueryTerms(q);
+        actions.openScene?.(entry.dataset.nid, entry.dataset.aid, { highlightTerms: terms });
+      }
+      return;
+    }
+    const arcRow = e.target.closest('.arc-row');
+    if (arcRow && listEl.contains(arcRow)) {
+      const aid = arcRow.closest('.arc-entry')?.dataset.aid;
+      if (aid) actions.openArc?.(aid);
+    }
+  });
+}
 
 export function renderFilters() {
   const arcs = state.index?.arcs || [];
@@ -81,23 +123,26 @@ function renderArcCard(a, { listed, expanded, read, selected, selectedArcs, read
   else if (isExp) stamp = '<span class="stamp exp">翻幕</span>';
   else if (isList) stamp = '<span class="stamp list">候补</span>';
 
-  const ordBadge = a.order !== null && a.order !== undefined ? `<span class="tone-pill">序${a.order}</span>` : '';
+  const ordBadge = a.order !== null && a.order !== undefined ? `<span class="tone-pill">序${esc(a.order)}</span>` : '';
   const tones = (a.tone_tags || [])
     .slice(0, 2)
     .map((t) => `<span class="tone-pill">${esc(t)}</span>`)
     .join('');
 
-  const scenesHtml = (a.scenes || [])
-    .map((s) => {
-      const sSel = selected.has(s.node_id);
-      const sRead = read.has(s.node_id);
-      const scCls = sSel ? 'mark-selected' : sRead ? 'mark-read' : '';
-      return `<div class="toc-scene ${scCls} ${state.view.nodeId === s.node_id ? 'viewing' : ''}" data-nid="${esc(s.node_id)}" data-aid="${esc(a.arc_id)}">
+  const scenesList = a.scenes || [];
+  const scenesBlock = open
+    ? `<div class="toc-scenes">${scenesList
+        .map((s) => {
+          const sSel = selected.has(s.node_id);
+          const sRead = read.has(s.node_id);
+          const scCls = sSel ? 'mark-selected' : sRead ? 'mark-read' : '';
+          return `<div class="toc-scene ${scCls} ${state.view.nodeId === s.node_id ? 'viewing' : ''}" data-nid="${esc(s.node_id)}" data-aid="${esc(a.arc_id)}">
         <span class="toc-scene-t" title="${esc(s.title)}">${esc(s.node_id)} · ${esc(s.title || s.group_title)}</span>
-        <span class="toc-scene-c">${s.chars}</span>
+        <span class="toc-scene-c">${Number(s.chars) || 0}</span>
       </div>`;
-    })
-    .join('');
+        })
+        .join('')}</div>`
+    : '';
 
   return `<div class="arc-entry ${markCls} ${open ? 'open' : ''} ${isViewing ? 'viewing' : ''}" data-aid="${esc(a.arc_id)}">
     <div class="arc-row">
@@ -106,16 +151,17 @@ function renderArcCard(a, { listed, expanded, read, selected, selectedArcs, read
         <span class="arc-no">${esc(a.arc_id)}</span>
       </div>
       <div class="arc-line2">
-        <span>${esc(a.category)} · ${a.scenes.length} 幕 · ${(a.total_chars || 0).toLocaleString()} 字</span>
+        <span>${esc(a.category)} · ${scenesList.length} 幕 · ${(Number(a.total_chars) || 0).toLocaleString()} 字</span>
         <span style="display:flex;gap:3px;align-items:center;">${ordBadge}${tones}${stamp}</span>
       </div>
     </div>
-    <div class="toc-scenes">${scenesHtml}</div>
+    ${scenesBlock}
   </div>`;
 }
 
 export function renderToc() {
   if (!state.index) return;
+  ensureTocDelegation();
   const traceLegend = $('#tocTraceLegend');
   if (traceLegend) {
     traceLegend.style.display = state.activeRunData ? 'flex' : 'none';
@@ -206,36 +252,11 @@ export function renderToc() {
         </div>`;
       })
       .join('');
-
-    $('#tocList')
-      .querySelectorAll('.series-head')
-      .forEach((head) => {
-        head.addEventListener('click', () => {
-          const grp = head.closest('.series-group');
-          const ser = grp.dataset.series;
-          if (state.collapsedSeries.has(ser)) state.collapsedSeries.delete(ser);
-          else state.collapsedSeries.add(ser);
-          renderToc();
-        });
-      });
   }
-
-  $('#tocList')
-    .querySelectorAll('.arc-row')
-    .forEach((el) => {
-      el.addEventListener('click', () => actions.openArc?.(el.closest('.arc-entry').dataset.aid));
-    });
-  $('#tocList')
-    .querySelectorAll('.toc-scene')
-    .forEach((el) => {
-      el.addEventListener('click', (e) => {
-        e.stopPropagation();
-        actions.openScene?.(el.dataset.nid, el.dataset.aid);
-      });
-    });
 }
 
 export function renderGrepToc() {
+  ensureTocDelegation();
   const q = state.searchTerm.trim();
   const st = state.index?.stats || {};
   $('#seriesExpandBtns').style.display = 'none';
@@ -244,7 +265,7 @@ export function renderGrepToc() {
   if (!q) {
     $('#tocCount').textContent = `全文检索就绪（${fmtChars(st.total_chars || 0)}）`;
     $('#tocList').innerHTML = `<div style="padding:26px 12px;text-align:center;color:var(--ink-muted);font-size:12px;line-height:1.7;">
-      输入人物名、别称或任意一句原著台词，将在毫秒内扫描《${esc(corpusName())}》当前可见 ${st.scenes || 0} 幕正文（支持上方分类/氛围筛选与客串发现）。
+      输入人物名、别称或任意一句原著台词，将在毫秒内扫描《${esc(corpusName())}》当前可见 ${Number(st.scenes) || 0} 幕正文（支持上方分类/氛围筛选与客串发现）。
     </div>`;
     return;
   }
@@ -261,7 +282,7 @@ export function renderGrepToc() {
     $('#aliasNote').textContent = `展开扫描词：${terms.slice(0, 8).join(' / ')}`;
   }
 
-  $('#tocCount').textContent = `命中 ${d.total} 幕（客串 ${d.cameo_count} 幕 · ${d.took_ms}ms）`;
+  $('#tocCount').textContent = `命中 ${Number(d.total) || 0} 幕（客串 ${Number(d.cameo_count) || 0} 幕 · ${Number(d.took_ms) || 0}ms）`;
   const hits = d.hits || [];
   if (!hits.length) {
     $('#tocList').innerHTML = `<div style="padding:26px 12px;text-align:center;color:var(--ink-muted);font-size:12px;">当前筛选范围内未找到「${esc(q)}」</div>`;
@@ -279,7 +300,7 @@ export function renderGrepToc() {
         </div>
         <div class="arc-line2">
           <span>${esc(h.arc_title)}</span>
-          <span>${h.cameo ? '<span class="stamp exp">客串</span>' : ''} ${h.match_count}处</span>
+          <span>${h.cameo ? '<span class="stamp exp">客串</span>' : ''} ${Number(h.match_count) || 0}处</span>
         </div>
         <div style="font-size:11.5px;color:var(--ink-soft);line-height:1.55;margin-top:3px;">${highlightEscapedText(h.snippet, terms)}</div>
       </div>
@@ -287,35 +308,41 @@ export function renderGrepToc() {
   `
     )
     .join('');
-
-  $('#tocList')
-    .querySelectorAll('.arc-entry')
-    .forEach((el) => {
-      el.addEventListener('click', () => {
-        actions.openScene?.(el.dataset.nid, el.dataset.aid, { highlightTerms: terms });
-      });
-    });
 }
 
 export async function triggerGrep() {
   const q = state.searchTerm.trim();
   if (!q) {
+    ++grepSeq;
     state.grepData = null;
     state.grepTerms = [];
     renderToc();
     return;
   }
+  const seq = ++grepSeq;
+  const reqCorpusId = state.corpusId;
   state.grepTerms = expandGrepQueryTerms(q);
   try {
-    state.grepData = await fetchGrep(state.corpusId, {
+    const data = await fetchGrep(reqCorpusId, {
       q,
       limit: 40,
       category: state.category,
       tone: state.tone,
       maxOrder: state.maxOrder,
     });
+    if (seq !== grepSeq || state.corpusId !== reqCorpusId) return;
+    state.grepData = data;
     if (state.searchMode === 'grep') renderToc();
-  } catch (_) {}
+  } catch (e) {
+    if (seq !== grepSeq || state.corpusId !== reqCorpusId) return;
+    state.grepData = null;
+    if (state.searchMode === 'grep') {
+      $('#seriesExpandBtns').style.display = 'none';
+      $('#aliasNote').style.display = 'none';
+      $('#tocCount').textContent = '全文检索失败';
+      $('#tocList').innerHTML = `<div style="padding:26px 12px;text-align:center;color:var(--seal);font-size:12px;">全文扫描失败：${esc(e?.message || String(e))}</div>`;
+    }
+  }
 }
 
 export function scheduleGrep() {

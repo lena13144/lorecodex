@@ -20,19 +20,13 @@ const [
     {
         idbListCorpora,
         idbSaveCorpus,
-        idbDeleteCorpus,
         idbGetMeta,
         idbSetMeta,
         idbRecordRun,
-        decodeTextBufferAuto,
-        extractEpubTextInBrowser,
-        buildNovelCorpusInBrowser,
         buildLoreCorpusInBrowser,
         createBrowserTreeAgent,
-        isArcLlmDone,
         upgradeBrowserCorpusWithLLM,
         estimateBrowserLlmUpgradePlan,
-        inspectCorpusStructure,
         acquireCorpusBuildLock,
         formatDurationZh,
     },
@@ -560,11 +554,11 @@ async function fetchCorporaAndHealth(cfg) {
                 : (rawSt.llm_scenes === 0 ? 0 : sumArcs);
             const st = {
                 ...rawSt,
-                arcs: rawSt.arcs || arcs.length,
-                scenes: rawSt.scenes || totalScenes || Object.keys(p.textsData || {}).length,
-                llm_arcs: resolvedLlmArcs,
-                llm_scenes: resolvedLlmScenes,
-                total_chars: rawSt.total_chars || 0,
+                arcs: Number(rawSt.arcs) || arcs.length,
+                scenes: Number(rawSt.scenes) || totalScenes || Object.keys(p.textsData || {}).length,
+                llm_arcs: Number(resolvedLlmArcs) || 0,
+                llm_scenes: Number(resolvedLlmScenes) || 0,
+                total_chars: Number(rawSt.total_chars) || 0,
             };
             corporaMap.set(p.id, {
                 id: p.id,
@@ -605,11 +599,11 @@ function renderLastPreview(cfg) {
     const statusPill = snap.skip
         ? `<span class="lorecodex-pill skip">跳过注入</span>`
         : `<span class="lorecodex-pill ok">命中 ${snap.scenes.length} 幕${snap.outlines?.length ? ` · ${snap.outlines.length}大纲` : ''}</span>${snap.reused ? '<span class="lorecodex-pill" title="用户消息未变，沿用上次检索结果">复用</span>' : ''}`;
-    const orderPill = snap.max_order ? `<span class="lorecodex-pill accent">序≤${snap.max_order}</span>` : '';
+    const orderPill = snap.max_order ? `<span class="lorecodex-pill accent">序≤${escHtml(snap.max_order)}</span>` : '';
     const scenesHtml = (snap.scenes || []).map(s => `
         <div class="lorecodex-scene-item">
             <span><code>${escHtml(s.node_id)}</code> ${escHtml(s.arc_title)} · ${escHtml(s.title)}</span>
-            <span class="lorecodex-muted">${s.chars}字</span>
+            <span class="lorecodex-muted">${Number(s.chars) || 0}字</span>
         </div>
     `).join('');
 
@@ -621,7 +615,7 @@ function renderLastPreview(cfg) {
                     ${statusPill}
                     ${orderPill}
                 </span>
-                <span class="lorecodex-muted" style="flex-shrink:0;">${snap.took_ms ?? 0}ms · ${snap.turns ?? 0}轮</span>
+                <span class="lorecodex-muted" style="flex-shrink:0;">${Number(snap.took_ms) || 0}ms · ${Number(snap.turns) || 0}轮</span>
             </summary>
             <div class="lorecodex-last-body">
                 ${snap.skip
@@ -704,7 +698,7 @@ async function runTreeRetrieval(cfg, ctx, chat, { query, onDemand, sessionRecall
             outlines: [],
         };
         renderLastPreview(cfg);
-        if (typeof toastr !== 'undefined') toastr.warning(`LoreCodex 检索失败: ${errMsg}`);
+        if (typeof toastr !== 'undefined') toastr.warning(`LoreCodex 检索失败: ${escHtml(errMsg)}`);
         return;
     }
     const scenes = Array.isArray(data.scenes) ? data.scenes : [];
@@ -1074,7 +1068,7 @@ jQuery(async () => {
             sel.append(`<option value="${escHtml(cfg.corpus || '')}">${escHtml(cfg.corpus || '（暂无书库，点下方打开大面板导入）')}</option>`);
         } else {
             for (const c of entries) {
-                sel.append(`<option value="${escHtml(c.id)}">${escHtml(c.name)} (${c.stats?.arcs || 0}卷)</option>`);
+                sel.append(`<option value="${escHtml(c.id)}">${escHtml(c.name)} (${Number(c.stats?.arcs) || 0}卷)</option>`);
             }
             if (cfg.corpus && corporaMap.has(cfg.corpus)) sel.val(cfg.corpus);
         }
@@ -1083,7 +1077,6 @@ jQuery(async () => {
     };
 
     eventSource.on(event_types.CHAT_CHANGED, () => {
-        pendingGeneration = false;
         const charKey = getActiveCharKey();
         const b = charKey ? cfg.charBindings?.[charKey] : null;
         if (b) {
@@ -1124,7 +1117,7 @@ jQuery(async () => {
             $('#lorecodex_corpus').val(id);
             renderStaticLlmWidget();
             updateBindingButton();
-            toastr.info(`LoreCodex 已切换书库：${corporaMap.get(id)?.name || id}`);
+            toastr.info(`LoreCodex 已切换书库：${escHtml(corporaMap.get(id)?.name || id)}`);
             return id;
         },
         helpString: '切换当前挂载书库：/lorecorpus <corpus_id>',
@@ -1151,7 +1144,7 @@ jQuery(async () => {
             cfg.pov = String(value || '').trim();
             saveSettingsDebounced();
             syncUiFromCfg();
-            toastr.info(`LoreCodex 检索视角：${cfg.pov || '（无）'}`);
+            toastr.info(`LoreCodex 检索视角：${escHtml(cfg.pov || '（无）')}`);
             return cfg.pov;
         },
         helpString: '设置检索视角角色：/lorepov 角色名（空值清除）',
@@ -1310,7 +1303,7 @@ jQuery(async () => {
         const buildLock = acquireCorpusBuildLock(pack.id, '酒馆扩展侧边栏');
         if (!buildLock.ok) {
             const holderOwner = buildLock.holder?.owner || '其他窗口';
-            if (typeof toastr !== 'undefined') toastr.warning(`书库「${pack.config.name}」正在「${holderOwner}」执行 LLM 构建`);
+            if (typeof toastr !== 'undefined') toastr.warning(`书库「${escHtml(pack.config.name)}」正在「${escHtml(holderOwner)}」执行 LLM 构建`);
             return;
         }
 
@@ -1384,7 +1377,7 @@ jQuery(async () => {
                 isPaused ? '已暂停并保存断点，随时可继续' : `中断: ${errMsg}`
             );
             if (typeof toastr !== 'undefined') {
-                toastr.info(isPaused ? '已暂停 LLM 构建并保存断点' : `LLM 构建中断: ${errMsg}`);
+                toastr.info(isPaused ? '已暂停 LLM 构建并保存断点' : `LLM 构建中断: ${escHtml(errMsg)}`);
             }
         } finally {
             buildLock.release();
@@ -1427,7 +1420,7 @@ jQuery(async () => {
             delete cfg.charBindings[charKey];
             saveSettingsDebounced();
             updateBindingButton();
-            if (typeof toastr !== 'undefined') toastr.info(`已解除「${charKey}」的专属书库绑定`);
+            if (typeof toastr !== 'undefined') toastr.info(`已解除「${escHtml(charKey)}」的专属书库绑定`);
         } else {
             cfg.charBindings[charKey] = {
                 corpus: cfg.corpus || serverDefaultCorpus || '',
@@ -1436,7 +1429,7 @@ jQuery(async () => {
             };
             saveSettingsDebounced();
             updateBindingButton();
-            if (typeof toastr !== 'undefined') toastr.success(`已将当前书库绑定给「${charKey}」`);
+            if (typeof toastr !== 'undefined') toastr.success(`已将当前书库绑定给「${escHtml(charKey)}」`);
         }
     });
 
@@ -1493,9 +1486,10 @@ jQuery(async () => {
         if (!iframe || ev.source !== iframe.contentWindow) return;
         const msg = ev.data;
         if (!msg || typeof msg !== 'object') return;
+        const targetOrigin = ev.origin && ev.origin !== 'null' ? ev.origin : window.location.origin;
 
         if (msg.type === 'lorecodex:st-get-settings') {
-            ev.source.postMessage({ type: 'lorecodex:st-settings', settings: getStSettingsPayload() }, '*');
+            ev.source.postMessage({ type: 'lorecodex:st-settings', settings: getStSettingsPayload() }, targetOrigin);
         } else if (msg.type === 'lorecodex:st-save-settings' && msg.patch && typeof msg.patch === 'object') {
             const p = msg.patch;
             const prevLocalMode = cfg.localMode;
@@ -1521,7 +1515,7 @@ jQuery(async () => {
                 renderCorpusDropdown();
             }
             syncUiFromCfg();
-            ev.source.postMessage({ type: 'lorecodex:st-settings-saved', ok: true, settings: getStSettingsPayload() }, '*');
+            ev.source.postMessage({ type: 'lorecodex:st-settings-saved', ok: true, settings: getStSettingsPayload() }, targetOrigin);
         } else if (msg.type === 'lorecodex:st-corpus-changed' && msg.corpusId) {
             const cid = String(msg.corpusId).trim();
             if (cid) {

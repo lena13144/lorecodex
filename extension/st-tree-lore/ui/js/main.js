@@ -22,6 +22,20 @@ import {
   openStSettingsModal,
 } from './modals.js';
 
+let switchSeq = 0;
+let indexLoadSeq = 0;
+let tocSearchTimer = null;
+
+function getExpectedParentOrigin() {
+  try {
+    if (document.referrer) {
+      const origin = new URL(document.referrer).origin;
+      if (origin && origin !== 'null') return origin;
+    }
+  } catch (_) {}
+  return window.location.origin;
+}
+
 function renderCorpusSelect() {
   const sel = $('#corpusSelect');
   if (!state.corpora.length) {
@@ -85,7 +99,9 @@ function renderEmptyLibraryState() {
 }
 
 async function loadCorpusIndex(cid) {
+  const seq = ++indexLoadSeq;
   const idx = await fetchTreeIndex(cid, state.maxOrder);
+  if (seq !== indexLoadSeq || cid !== state.corpusId) return;
   state.index = idx;
   state.arcMap.clear();
   state.sceneMap.clear();
@@ -155,6 +171,7 @@ async function setMaxOrder(val, { reloadIndex = true } = {}) {
 }
 
 async function switchCorpus(cid, { keepRun = false } = {}) {
+  const seq = ++switchSeq;
   state.corpusId = cid;
   state.corpusMeta = state.corpora.find((c) => c.id === cid) || null;
   state.category = '全部';
@@ -163,6 +180,7 @@ async function switchCorpus(cid, { keepRun = false } = {}) {
   state.grepTerms = [];
   state.highlightTerms = [];
   state.collapsedSeries.clear();
+  state.sceneCache.clear();
   state.view = { type: 'cover', arcId: null, nodeId: null };
   if (!keepRun) {
     state.activeRunId = null;
@@ -181,10 +199,11 @@ async function switchCorpus(cid, { keepRun = false } = {}) {
   renderCorpusSelect();
   if (document.body.classList.contains('embed-mode') && window.parent !== window && cid) {
     try {
-      window.parent.postMessage({ type: 'lorecodex:st-corpus-changed', corpusId: cid }, '*');
+      window.parent.postMessage({ type: 'lorecodex:st-corpus-changed', corpusId: cid }, getExpectedParentOrigin());
     } catch (_) {}
   }
   await loadCorpusIndex(cid);
+  if (seq !== switchSeq) return;
   renderPresets();
 }
 
@@ -340,9 +359,7 @@ function wireEvents() {
       $('#mobileMenuPopover')?.classList.remove('open');
       const act = b.dataset.mobileAction;
       if (act === 'import') openImportModal();
-      else if (act === 'corpus') openCorpusModal();
       else if (act === 'settings') openSettingsModal();
-      else if (act === 'reload') $('#reloadCorporaBtn')?.click();
     });
   });
 
@@ -362,6 +379,7 @@ function wireEvents() {
       $$('[data-search-mode]').forEach((x) => x.classList.remove('active'));
       b.classList.add('active');
       state.searchMode = b.dataset.searchMode;
+      clearTimeout(tocSearchTimer);
       $('#tocSearch').placeholder =
         state.searchMode === 'grep'
           ? '全文扫描人物、台词原句（空格表同幕共现）...'
@@ -373,8 +391,12 @@ function wireEvents() {
 
   $('#tocSearch').addEventListener('input', (e) => {
     state.searchTerm = e.target.value;
-    if (state.searchMode === 'grep') scheduleGrep();
-    else renderToc();
+    clearTimeout(tocSearchTimer);
+    if (state.searchMode === 'grep') {
+      scheduleGrep();
+    } else {
+      tocSearchTimer = setTimeout(() => renderToc(), 120);
+    }
   });
 
   $('#expandAllSeriesBtn').addEventListener('click', () => {
@@ -392,7 +414,9 @@ function wireEvents() {
     if (e.target.value) switchCorpus(e.target.value);
   });
   $('#reloadCorporaBtn').addEventListener('click', async () => {
+    const beforeSwitch = switchSeq;
     const j = await reloadCorpora();
+    if (switchSeq !== beforeSwitch) return;
     state.corpora = j.corpora || [];
     const next = state.corpora.some((c) => c.id === state.corpusId)
       ? state.corpusId

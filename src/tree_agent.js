@@ -911,7 +911,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       scenes: finalScenes,
       chunks: finalChunks,
       profiles: [],
-      relations: graphEngine.lookup(graphQuery),
+      relations: maxOrder !== null ? [] : graphEngine.lookup(graphQuery),
     };
   }
 
@@ -1157,6 +1157,29 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         (acc, a) => acc + (a.scenes || []).reduce((sAcc, s) => sAcc + (Number(s.chars) || 0), 0),
         0
       );
+      let series = computeSeriesOverview(visible);
+      let visibleSeriesSummaries = seriesSummaries;
+      if (maxOrder !== null) {
+        const visibleSeriesSet = new Set(series.map((s) => s.series));
+        const hiddenSeriesSet = new Set();
+        for (const arc of indexData.arcs || []) {
+          const serKey = String(arc.series || arc.category || '默认分卷').trim();
+          const arcAllowed = isOrderAllowed(arc.order, maxOrder);
+          const allScenesAllowed = (arc.scenes || []).every((s) =>
+            isOrderAllowed(effectiveSceneOrder(s, arc), maxOrder)
+          );
+          if (!arcAllowed || !allScenesAllowed) {
+            hiddenSeriesSet.add(serKey);
+          }
+        }
+        series = series.map((s) => (hiddenSeriesSet.has(s.series) ? { ...s, summary: '' } : s));
+        visibleSeriesSummaries = {};
+        for (const [k, v] of Object.entries(seriesSummaries)) {
+          if (visibleSeriesSet.has(k) && !hiddenSeriesSet.has(k)) {
+            visibleSeriesSummaries[k] = v;
+          }
+        }
+      }
       return {
         corpus_id: corpusId,
         corpus_name: corpusConfig.name,
@@ -1176,8 +1199,8 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
               }
             : stats,
         categories,
-        series: seriesList,
-        series_summaries: seriesSummaries,
+        series,
+        series_summaries: visibleSeriesSummaries,
         tone_tags: toneTags,
         arcs,
         aliases: corpusConfig.aliases || [],

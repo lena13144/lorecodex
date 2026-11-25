@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const { spawnSync } = require('child_process');
 
 let cachedPythonBin = null;
@@ -101,6 +103,21 @@ function escapeRegExp(str) {
   return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function writeJsonAtomic(filePath, data) {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch (_) {}
+    throw err;
+  }
+}
+
 module.exports = {
   detectPythonBin,
   stripMarkup,
@@ -110,4 +127,5 @@ module.exports = {
   isOrderAllowed,
   formatCharCount,
   escapeRegExp,
+  writeJsonAtomic,
 };

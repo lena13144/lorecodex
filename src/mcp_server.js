@@ -3,12 +3,24 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const crypto = require('crypto');
+const { promisify } = require('util');
+const { execFile } = require('child_process');
 const { createCorpusManager } = require('./corpus_manager');
-const { detectPythonBin, formatCharCount } = require('./utils');
+const { resolveCorpusFiles } = require('./tree_agent');
+const { detectPythonBin, formatCharCount, writeJsonAtomic } = require('./utils');
+
+const execFileAsync = promisify(execFile);
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const CFG_FILE = path.join(ROOT_DIR, 'config.json');
+const PKG_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8')).version || '0.0.0';
+  } catch (_) {
+    return '0.0.0';
+  }
+})();
 
 function parseArgs(argv) {
   const out = {};
@@ -548,6 +560,10 @@ async function handleToolCall(name, args = {}) {
     if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(corpusId)) {
       throw new Error('corpus_id must be 1-48 alphanumeric, underscore, or hyphen characters');
     }
+    const mergeInto = args.merge_into !== undefined && args.merge_into !== null ? String(args.merge_into).trim() : '';
+    if (mergeInto && !/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(mergeInto)) {
+      throw new Error('merge_into must be 1-48 alphanumeric, underscore, or hyphen characters');
+    }
     const pyBin = detectPythonBin();
     const useLlm = args.use_llm !== false; // Default true: LLM directory building is required for full 3-tier tree quality
     const workers = Math.min(Math.max(Number(args.workers) || 8, 1), 24);
@@ -569,11 +585,18 @@ async function handleToolCall(name, args = {}) {
     let effectiveCfgPath = CONFIG_PATH;
     if (useLlm || action === 'upgrade') {
       if (!fs.existsSync(CONFIG_PATH) || args.chat_base || args.chat_key || args.chat_model) {
-        tmpCfgPath = path.join(ROOT_DIR, `.tmp-mcp-cfg-${Date.now()}.json`);
-        fs.writeFileSync(tmpCfgPath, JSON.stringify(runtimeCfg, null, 2), 'utf8');
+        tmpCfgPath = path.join(ROOT_DIR, `.tmp-mcp-cfg-${crypto.randomBytes(6).toString('hex')}.json`);
+        fs.writeFileSync(tmpCfgPath, JSON.stringify(runtimeCfg, null, 2), { encoding: 'utf8', mode: 0o600 });
         effectiveCfgPath = tmpCfgPath;
       }
     }
+
+    const execOpts = {
+      cwd: ROOT_DIR,
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+      windowsHide: true,
+    };
 
     try {
       if (action === 'upgrade') {
@@ -591,9 +614,9 @@ async function handleToolCall(name, args = {}) {
         ];
         if (args.series) pyArgs.push('--series', String(args.series));
         if (Number(args.limit_arcs) > 0) pyArgs.push('--limit-arcs', String(Number(args.limit_arcs)));
-        const stdout = execFileSync(pyBin, pyArgs, { cwd: ROOT_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-        corpusManager.reload();
-        return `Upgraded and reloaded corpus "${corpusId}" with LLM directory & alias synthesis:\n${stdout.trim()}`;
+        const { stdout } = await execFileAsync(pyBin, pyArgs, execOpts);
+        corpusManager.reloadCorpus(corpusId);
+        return `Upgraded and reloaded corpus "${corpusId}" with LLM directory & alias synthesis:\n${String(stdout || '').trim()}`;
       }
 
       const inputPath = path.resolve(String(args.input_path || ''));
@@ -614,11 +637,11 @@ async function handleToolCall(name, args = {}) {
           '--filter-game-stats',
         ];
         if (args.name) pyArgs.push('--name', String(args.name));
-        if (args.merge_into) pyArgs.push('--merge-into', path.join(CORPORA_DIR, String(args.merge_into)));
+        if (mergeInto) pyArgs.push('--merge-into', path.join(CORPORA_DIR, mergeInto));
         if (!useLlm) pyArgs.push('--no-llm');
-        const stdout = execFileSync(pyBin, pyArgs, { cwd: ROOT_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-        corpusManager.reload();
-        return `Built lore corpus "${args.merge_into || corpusId}" (use_llm=${useLlm}):\n${stdout.trim()}`;
+        const { stdout } = await execFileAsync(pyBin, pyArgs, execOpts);
+        corpusManager.reloadCorpus(mergeInto || corpusId);
+        return `Built lore corpus "${mergeInto || corpusId}" (use_llm=${useLlm}):\n${String(stdout || '').trim()}`;
       }
 
       const pyArgs = [
@@ -639,12 +662,12 @@ async function handleToolCall(name, args = {}) {
       if (args.series) pyArgs.push('--series', String(args.series));
       if (Number(args.limit_arcs) > 0) pyArgs.push('--limit-arcs', String(Number(args.limit_arcs)));
       if (!useLlm) pyArgs.push('--no-llm');
-      const stdout = execFileSync(pyBin, pyArgs, { cwd: ROOT_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      corpusManager.reload();
+      const { stdout } = await execFileAsync(pyBin, pyArgs, execOpts);
+      corpusManager.reloadCorpus(corpusId);
       const followUp = !useLlm
         ? '\n[IMPORTANT] Corpus was split without LLM summaries (use_llm=false). You MUST now either call lorecodex_build_corpus(action="upgrade") per volume or populate LLM directory summaries, series_summaries, and character aliases via lorecodex_update_index_meta.'
         : '';
-      return `Built novel corpus "${corpusId}" (use_llm=${useLlm}):\n${stdout.trim()}${followUp}`;
+      return `Built novel corpus "${corpusId}" (use_llm=${useLlm}):\n${String(stdout || '').trim()}${followUp}`;
     } finally {
       if (tmpCfgPath && fs.existsSync(tmpCfgPath)) {
         try {
@@ -657,9 +680,9 @@ async function handleToolCall(name, args = {}) {
   if (name === 'lorecodex_update_index_meta') {
     const cid = resolveCorpusId(args.corpus);
     const corpusDir = path.join(CORPORA_DIR, cid);
-    const idxPath = path.join(corpusDir, 'tree_index.json');
+    const { indexPath: idxPath } = resolveCorpusFiles(corpusDir);
     const cfgFilePath = path.join(corpusDir, 'corpus.json');
-    if (!fs.existsSync(idxPath)) {
+    if (!idxPath || !fs.existsSync(idxPath)) {
       throw new Error(`tree_index.json not found for corpus "${cid}"`);
     }
     const idxData = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
@@ -683,10 +706,12 @@ async function handleToolCall(name, args = {}) {
         if (Array.isArray(item.tone_tags) && item.tone_tags.length) {
           hit.sc.tone_tags = item.tone_tags.map((x) => String(x).trim()).filter(Boolean);
         }
+        hit.sc._llm_done = true;
         updatedScenes += 1;
         // Auto-propagate single-scene summary to its parent arc if arc description wasn't explicitly set
         if ((hit.arc.scenes || []).length === 1 && item.summary && !hit.arc._host_updated) {
           hit.arc.description = String(item.summary).trim();
+          hit.arc._llm_done = true;
         }
       }
     }
@@ -705,6 +730,7 @@ async function handleToolCall(name, args = {}) {
         if (Array.isArray(item.key_items) && item.key_items.length) {
           arc.key_items = item.key_items.map((x) => String(x).trim()).filter(Boolean);
         }
+        arc._llm_done = true;
         arc._host_updated = true;
         updatedArcs += 1;
       }
@@ -723,16 +749,25 @@ async function handleToolCall(name, args = {}) {
       }
     }
 
+    let llmScenes = 0;
+    let llmArcs = 0;
+    for (const a of arcs) {
+      const aScenes = a.scenes || [];
+      let allScenesDone = aScenes.length > 0;
+      for (const s of aScenes) {
+        const sDone = s._llm_done !== false && Boolean(String(s.summary || '').trim());
+        if (sDone) llmScenes += 1;
+        else allScenesDone = false;
+      }
+      const aDone =
+        a._llm_done !== false &&
+        (Boolean(String(a.description || '').trim()) || (aScenes.length > 0 && allScenesDone));
+      if (aDone) llmArcs += 1;
+    }
     idxData.stats = idxData.stats || {};
-    idxData.stats.llm_scenes = Math.min(
-      idxData.stats.scenes || sceneMap.size,
-      (idxData.stats.llm_scenes || 0) + updatedScenes
-    );
-    idxData.stats.llm_arcs = Math.min(
-      idxData.stats.arcs || arcs.length,
-      (idxData.stats.llm_arcs || 0) + (updatedArcs || (updatedScenes > 0 ? 1 : 0))
-    );
-    fs.writeFileSync(idxPath, JSON.stringify(idxData, null, 2), 'utf8');
+    idxData.stats.llm_scenes = llmScenes;
+    idxData.stats.llm_arcs = llmArcs;
+    writeJsonAtomic(idxPath, idxData);
 
     let addedAliasGroups = 0;
     let addedGlossary = 0;
@@ -772,10 +807,10 @@ async function handleToolCall(name, args = {}) {
         }
         rawCfg.glossary = existingG;
       }
-      fs.writeFileSync(cfgFilePath, JSON.stringify(rawCfg, null, 2), 'utf8');
+      writeJsonAtomic(cfgFilePath, rawCfg);
     }
 
-    corpusManager.reload();
+    corpusManager.reloadCorpus(cid);
     return `[${cid}] Updated LLM directory metadata and hot-reloaded: scenes=${updatedScenes}, arcs=${updatedArcs}, series_summaries=${updatedSeries}, alias_groups_merged=${addedAliasGroups}, glossary_added=${addedGlossary}`;
   }
 
@@ -815,7 +850,7 @@ async function handleRpcRequest(msg) {
           },
           serverInfo: {
             name: 'lorecodex-mcp',
-            version: '2.0.0',
+            version: PKG_VERSION,
           },
         },
       });
@@ -891,6 +926,7 @@ async function handleRpcRequest(msg) {
 let inputBuffer = Buffer.alloc(0);
 
 function startMcpStdioServer() {
+  console.log = (...a) => console.error(...a);
   process.stdin.on('data', (chunk) => {
     inputBuffer = Buffer.concat([inputBuffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
 
