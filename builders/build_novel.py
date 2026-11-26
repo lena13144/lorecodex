@@ -10,12 +10,14 @@ import collections
 import concurrent.futures
 import datetime
 import email.utils
+import hashlib
 import html.parser
 import json
 import os
 import posixpath
 import random
 import re
+import secrets
 import sys
 import threading
 import time
@@ -275,7 +277,7 @@ def strip_web_noise_blocks(lines, clean_web_noise=True, strip_block_specs=None, 
             if start_re.search(s):
                 stats["custom_blocks"] += 1
                 stats["custom_lines"] += 1
-                if not (end_re is not None and end_re.search(s)):
+                if end_re is not None and not end_re.search(s):
                     mode = "custom"
                     custom_end_re = end_re
                     custom_lines = 1
@@ -464,13 +466,25 @@ def read_text_auto(filepath):
     return raw.decode("utf-8", errors="replace")
 
 
+EPUB_MAX_MEMBER_BYTES = 20 * 1024 * 1024
+EPUB_MAX_TOTAL_BYTES = 200 * 1024 * 1024
+
+_HTML_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img",
+    "input", "link", "meta", "param", "source", "track", "wbr",
+}
+
+
 class _XHTMLTextExtractor(html.parser.HTMLParser):
     def __init__(self):
         super().__init__()
         self._skip = 0
+        self._in_head = 0
         self._blocks = []
         self._cur = []
+        self._title_cur = []
         self._heading_tag = None
+        self._cls_head_depth = 0
         self._in_title = False
         self.doc_title = ""
 
@@ -478,14 +492,27 @@ class _XHTMLTextExtractor(html.parser.HTMLParser):
         t = tag.lower()
         attr_map = dict(attrs or [])
         cls = str(attr_map.get("class") or "").lower()
-        if t == "title":
-            self._in_title = True
-            self._cur = []
+        if t == "head":
+            self._in_head += 1
+            self._skip += 1
             return
-        if t in ("script", "style", "head", "noscript"):
+        if t == "title":
+            if self._in_head > 0:
+                self._in_title = True
+                self._title_cur = []
+            else:
+                self._skip += 1
+            return
+        if t in ("script", "style", "noscript"):
             self._skip += 1
             return
         if self._skip:
+            return
+        if self._heading_tag == "cls-head":
+            if t == "br":
+                self._cur.append("\n")
+            elif t not in _HTML_VOID_TAGS:
+                self._cls_head_depth += 1
             return
         if t in ("h1", "h2", "h3", "h4"):
             self._flush()
@@ -493,6 +520,7 @@ class _XHTMLTextExtractor(html.parser.HTMLParser):
         elif t in ("p", "div") and re.search(r"\b(?:title|chapter|chap|head(?:ing)?)\b", cls):
             self._flush()
             self._heading_tag = "cls-head"
+            self._cls_head_depth = 1
         elif t in ("p", "div", "li", "blockquote", "section", "article"):
             self._flush()
         elif t == "br":
@@ -500,18 +528,40 @@ class _XHTMLTextExtractor(html.parser.HTMLParser):
 
     def handle_endtag(self, tag):
         t = tag.lower()
-        if t == "title":
-            self.doc_title = "".join(self._cur).strip()
-            self._cur = []
-            self._in_title = False
+        if t == "head":
+            if self._in_head > 0:
+                self._in_head -= 1
+            if self._skip > 0:
+                self._skip -= 1
             return
-        if t in ("script", "style", "head", "noscript"):
+        if t == "title":
+            if self._in_title:
+                self.doc_title = "".join(self._title_cur).strip()
+                self._title_cur = []
+                self._in_title = False
+            elif self._skip > 0:
+                self._skip -= 1
+            return
+        if t in ("script", "style", "noscript"):
             if self._skip > 0:
                 self._skip -= 1
             return
         if self._skip:
             return
-        if t in ("h1", "h2", "h3", "h4") or self._heading_tag == "cls-head":
+        if self._heading_tag == "cls-head":
+            if t not in _HTML_VOID_TAGS:
+                self._cls_head_depth -= 1
+            if self._cls_head_depth <= 0:
+                text = "".join(self._cur).strip()
+                self._cur = []
+                if text and len(text) <= 65:
+                    self._blocks.append("## " + text)
+                elif text:
+                    self._blocks.append(text)
+                self._heading_tag = None
+                self._cls_head_depth = 0
+            return
+        if t in ("h1", "h2", "h3", "h4") and self._heading_tag == t:
             text = "".join(self._cur).strip()
             self._cur = []
             if text and len(text) <= 65:
@@ -525,7 +575,7 @@ class _XHTMLTextExtractor(html.parser.HTMLParser):
 
     def handle_data(self, data):
         if self._in_title:
-            self._cur.append(data)
+            self._title_cur.append(data)
         elif not self._skip:
             self._cur.append(data)
 
@@ -543,17 +593,36 @@ class _XHTMLTextExtractor(html.parser.HTMLParser):
         return self._blocks
 
 
+def _norm_zip_path(path):
+    return posixpath.normpath(str(path or "").replace("\\", "/").lstrip("/"))
+
+
+def _read_zip_member(zf, member_name, total_read_box):
+    info = zf.getinfo(member_name)
+    if info.file_size > EPUB_MAX_MEMBER_BYTES:
+        raise ValueError(f"EPUB member too large ({info.file_size} bytes): {member_name}")
+    with zf.open(info, "r") as f:
+        data = f.read(EPUB_MAX_MEMBER_BYTES + 1)
+    if len(data) > EPUB_MAX_MEMBER_BYTES:
+        raise ValueError(f"EPUB member uncompressed size exceeds limit ({EPUB_MAX_MEMBER_BYTES} bytes): {member_name}")
+    total_read_box[0] += len(data)
+    if total_read_box[0] > EPUB_MAX_TOTAL_BYTES:
+        raise ValueError(f"EPUB total uncompressed size exceeds limit ({EPUB_MAX_TOTAL_BYTES} bytes)")
+    return data
+
+
 def read_epub_lines(epub_path):
     lines = []
+    total_read_box = [0]
     with zipfile.ZipFile(epub_path, "r") as zf:
         zip_names = zf.namelist()
-        exact_map = {posixpath.normpath(n): n for n in zip_names}
-        lower_map = {posixpath.normpath(n).lower(): n for n in zip_names}
+        exact_map = {_norm_zip_path(n): n for n in zip_names}
+        lower_map = {_norm_zip_path(n).lower(): n for n in zip_names}
 
         container_name = exact_map.get("META-INF/container.xml") or lower_map.get("meta-inf/container.xml")
         if not container_name:
             raise ValueError("EPUB missing META-INF/container.xml")
-        container_xml = zf.read(container_name).decode("utf-8", errors="replace")
+        container_xml = _read_zip_member(zf, container_name, total_read_box).decode("utf-8", errors="replace")
         c_root = ET.fromstring(container_xml)
         opf_path = None
         for elem in c_root.iter():
@@ -563,9 +632,12 @@ def read_epub_lines(epub_path):
         if not opf_path:
             raise ValueError("EPUB missing rootfile in container.xml")
 
-        opf_member = exact_map.get(posixpath.normpath(opf_path)) or lower_map.get(posixpath.normpath(opf_path).lower()) or opf_path
-        opf_dir = posixpath.dirname(opf_member)
-        opf_xml = zf.read(opf_member).decode("utf-8", errors="replace")
+        opf_norm = _norm_zip_path(opf_path)
+        opf_member = exact_map.get(opf_norm) or lower_map.get(opf_norm.lower())
+        if not opf_member:
+            raise ValueError(f"EPUB missing OPF package file: {opf_path}")
+        opf_dir = posixpath.dirname(_norm_zip_path(opf_member))
+        opf_xml = _read_zip_member(zf, opf_member, total_read_box).decode("utf-8", errors="replace")
         o_root = ET.fromstring(opf_xml)
 
         manifest = {}
@@ -584,13 +656,13 @@ def read_epub_lines(epub_path):
             href = manifest.get(sid)
             if not href:
                 continue
-            clean_href = urllib.parse.unquote(href.split("#", 1)[0]).lstrip("/")
-            raw_joined = posixpath.join(opf_dir, clean_href) if opf_dir else clean_href
-            norm_joined = posixpath.normpath(raw_joined)
+            clean_href = urllib.parse.unquote(href.split("#", 1)[0]).replace("\\", "/").lstrip("/")
+            raw_joined = posixpath.join(opf_dir, clean_href) if opf_dir and opf_dir != "." else clean_href
+            norm_joined = _norm_zip_path(raw_joined)
             member = exact_map.get(norm_joined) or lower_map.get(norm_joined.lower())
             if not member:
                 continue
-            raw = zf.read(member).decode("utf-8", errors="replace")
+            raw = _read_zip_member(zf, member, total_read_box).decode("utf-8", errors="replace")
             parser = _XHTMLTextExtractor()
             parser.feed(raw)
             parser.close()
@@ -1052,7 +1124,7 @@ class _RateLimitCoordinator:
             )
 
 
-def _post_chat(url, key, payload, stream=True, idle_timeout=90, total_timeout=60):
+def _post_chat(url, key, payload, stream=True, idle_timeout=90, total_timeout=180):
     """POST /chat/completions; returns (content, finish_reason, usage).
 
     stream=True sends ``stream: true`` and assembles the SSE deltas. The socket
@@ -1146,6 +1218,14 @@ def llm_json(cfg, prompt, retries=5, rate_limiter=None):
         retry_base_s = max(0.0, float(os.environ.get("LORECODEX_RETRY_BASE_SEC", "1.2") or 1.2))
     except (TypeError, ValueError):
         retry_base_s = 1.2
+    try:
+        idle_timeout = max(10.0, float(os.environ.get("LORECODEX_LLM_IDLE_TIMEOUT_SEC", "90") or 90))
+    except (TypeError, ValueError):
+        idle_timeout = 90.0
+    try:
+        total_timeout = max(idle_timeout, float(cfg.get("llmTimeout") or os.environ.get("LORECODEX_LLM_TIMEOUT_SEC", "180") or 180))
+    except (TypeError, ValueError):
+        total_timeout = max(idle_timeout, 180.0)
     last_err = None
     for attempt in range(retries):
         payload = {
@@ -1159,10 +1239,18 @@ def llm_json(cfg, prompt, retries=5, rate_limiter=None):
         if max_tokens_val is not None:
             payload["max_tokens"] = max_tokens_val
         ok = False
+        wait_s = None
         if rate_limiter is not None:
             rate_limiter.acquire()
         try:
-            txt, finish_reason, usage = _post_chat(url, cfg["chatKey"], payload, stream=use_stream)
+            txt, finish_reason, usage = _post_chat(
+                url,
+                cfg["chatKey"],
+                payload,
+                stream=use_stream,
+                idle_timeout=idle_timeout,
+                total_timeout=total_timeout,
+            )
             if not txt or not str(txt).strip():
                 # An empty content body is almost always the model spending the whole
                 # budget on reasoning tokens (finish_reason=length). Report that directly
@@ -1182,11 +1270,18 @@ def llm_json(cfg, prompt, retries=5, rate_limiter=None):
             txt = str(txt)
             m = re.search(r"```(?:json)?\s*([\s\S]*?)```", txt)
             raw = m.group(1) if m else txt
-            m2 = re.search(r"(\{[\s\S]*\})", raw)
-            parsed = json.loads(m2.group(1) if m2 else raw)
+            brace_idx = raw.find("{")
+            if brace_idx >= 0:
+                parsed, _ = json.JSONDecoder().raw_decode(raw, brace_idx)
+            else:
+                parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                raise ValueError(f"Expected JSON object from LLM, got {type(parsed).__name__}")
             ok = True
             return parsed, usage
         except _LlmHttpError as e:
+            if e.code in (401, 403):
+                raise
             last_err = str(e)
             if e.code == 429:
                 base_wait = min(60.0, 2.0 * (2 ** attempt)) + random.uniform(0.1, 0.8)
@@ -1198,21 +1293,30 @@ def llm_json(cfg, prompt, retries=5, rate_limiter=None):
                 wait_s = min(25.0, 1.5 * (2 ** attempt))
             else:
                 wait_s = retry_base_s * (attempt + 1)
-            time.sleep(wait_s)
         except Exception as e:
             last_err = str(e)
-            time.sleep(retry_base_s * (attempt + 1))
+            wait_s = retry_base_s * (attempt + 1)
         finally:
             if rate_limiter is not None:
                 rate_limiter.release(ok=ok)
+        if wait_s is not None and attempt + 1 < retries:
+            time.sleep(wait_s)
     raise RuntimeError(f"LLM failed after {retries} attempts: {last_err}")
 
 
 def atomic_write_json(path, obj, indent=None):
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=indent)
-    os.replace(tmp_path, path)
+    tmp_path = f"{path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=indent)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def merge_alias_groups(existing_groups, new_groups, max_groups=60, locked_aliases=None):
@@ -1372,7 +1476,7 @@ def merge_glossary(existing_list, new_list, max_items=40, locked_glossary=None):
                 seen_full.add(full)
             continue
         if len(out) >= max_items:
-            break
+            continue
         head_to_idx[h] = len(out)
         seen_full.add(full)
         out.append(item)
@@ -1418,22 +1522,46 @@ def build_series_digest(ser_arcs, max_samples=80, max_chars=6500):
     return "\n".join(lines), top_chars
 
 
-def apply_virtual_series_buckets(arcs, bucket_size=80):
-    """Split any series exceeding bucket_size arcs into '<series> (start-end)' buckets."""
+def _sha256_text(text):
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+
+def apply_virtual_series_buckets(arcs, bucket_size=80, existing_arcs=None):
+    """Split any series exceeding bucket_size arcs into '<series> (start-end)' buckets.
+
+    When existing_arcs is provided (--append), continues numbering past existing chapters
+    with the same series prefix instead of restarting at 1.
+    """
     if not bucket_size or bucket_size <= 0 or not arcs:
         return arcs
+    existing_counts = collections.Counter()
+    existing_max_end = collections.Counter()
+    existing_has_buckets = set()
+    bucket_suffix_re = re.compile(r"^(.+?)\s*\((\d+)-(\d+)\)$")
+    for ea in existing_arcs or []:
+        eser = str(ea.get("series") or "正文卷").strip() or "正文卷"
+        bm = bucket_suffix_re.match(eser)
+        if bm:
+            base_ser = bm.group(1).strip()
+            existing_counts[base_ser] += 1
+            existing_max_end[base_ser] = max(existing_max_end[base_ser], int(bm.group(3)))
+            existing_has_buckets.add(base_ser)
+        else:
+            existing_counts[eser] += 1
+
     by_series = collections.defaultdict(list)
     for a in arcs:
         ser = str(a.get("series") or "正文卷").strip() or "正文卷"
         by_series[ser].append(a)
     for ser, ser_arcs in by_series.items():
+        offset = max(existing_counts.get(ser, 0), existing_max_end.get(ser, 0))
         total = len(ser_arcs)
-        if total <= bucket_size:
+        if (offset + total) <= bucket_size and ser not in existing_has_buckets:
             continue
         for idx, a in enumerate(ser_arcs):
             b_idx = idx // bucket_size
-            start_num = b_idx * bucket_size + 1
-            end_num = min((b_idx + 1) * bucket_size, total)
+            start_num = offset + b_idx * bucket_size + 1
+            end_num = min(offset + (b_idx + 1) * bucket_size, offset + total)
             a["series"] = f"{ser} ({start_num}-{end_num})"
     return arcs
 
@@ -1589,7 +1717,7 @@ def main():
     alias_pool = []
     if os.path.exists(corpus_cfg_path):
         try:
-            with open(corpus_cfg_path, "r", encoding="utf-8") as f:
+            with open(corpus_cfg_path, "r", encoding="utf-8-sig") as f:
                 existing_corpus_cfg = json.load(f)
             for grp in existing_corpus_cfg.get("aliases", []):
                 alias_pool.extend(grp)
@@ -1599,6 +1727,8 @@ def main():
     if args.upgrade and args.append:
         raise RuntimeError("--append cannot be combined with --upgrade")
 
+    existing_index = None
+    existing_arcs = []
     existing_stats = {}
     if args.upgrade:
         if args.no_llm:
@@ -1607,14 +1737,15 @@ def main():
         txt_path = os.path.join(out_corpus_dir, "tree_texts.json")
         if not os.path.exists(idx_path) or not os.path.exists(txt_path):
             raise RuntimeError(f"Cannot --upgrade: tree_index.json or tree_texts.json missing in {out_corpus_dir}")
-        with open(idx_path, "r", encoding="utf-8") as f:
+        with open(idx_path, "r", encoding="utf-8-sig") as f:
             existing_index = json.load(f)
-        with open(txt_path, "r", encoding="utf-8") as f:
+        with open(txt_path, "r", encoding="utf-8-sig") as f:
             texts_map = json.load(f)
         arcs = existing_index.get("arcs") or []
         new_arcs = arcs
         source_name = existing_index.get("source") or args.corpus_id
         existing_series_summaries = dict(existing_index.get("series_summaries") or {})
+        existing_stats = dict(existing_index.get("stats") or {})
         if not args.name:
             args.name = str(existing_corpus_cfg.get("name") or args.corpus_id).strip()
         freq = collections.Counter()
@@ -1626,7 +1757,6 @@ def main():
         if not args.input:
             raise RuntimeError("--input is required unless --upgrade is passed")
 
-        existing_arcs = []
         texts_map = {}
         existing_series_summaries = {}
         max_existing_order = 0
@@ -1638,9 +1768,9 @@ def main():
             txt_path = os.path.join(out_corpus_dir, "tree_texts.json")
             if not os.path.exists(idx_path) or not os.path.exists(txt_path):
                 raise RuntimeError(f"Cannot --append: tree_index.json or tree_texts.json missing in {out_corpus_dir}")
-            with open(idx_path, "r", encoding="utf-8") as f:
+            with open(idx_path, "r", encoding="utf-8-sig") as f:
                 existing_index = json.load(f)
-            with open(txt_path, "r", encoding="utf-8") as f:
+            with open(txt_path, "r", encoding="utf-8-sig") as f:
                 texts_map = json.load(f)
             existing_arcs = list(existing_index.get("arcs") or [])
             existing_series_summaries = dict(existing_index.get("series_summaries") or {})
@@ -1760,12 +1890,21 @@ def main():
                 "key_items": [],
             })
 
-        apply_virtual_series_buckets(new_arcs, args.virtual_series_size)
+        apply_virtual_series_buckets(
+            new_arcs,
+            args.virtual_series_size,
+            existing_arcs=existing_arcs if args.append else None,
+        )
         arcs = existing_arcs + new_arcs
 
     preflight = None
     if not args.upgrade:
-        preflight = _report_structure_preflight(chapters, new_arcs, texts_map, clean_stats=clean_stats)
+        preflight_texts = (
+            {sc["node_id"]: texts_map[sc["node_id"]] for a in new_arcs for sc in a["scenes"] if sc["node_id"] in texts_map}
+            if args.append
+            else texts_map
+        )
+        preflight = _report_structure_preflight(chapters, new_arcs, preflight_texts, clean_stats=clean_stats)
         if (
             not args.no_llm
             and not args.allow_noisy
@@ -1784,7 +1923,7 @@ def main():
     if not args.no_llm:
         if not os.path.exists(args.config):
             raise RuntimeError(f"Config file not found: {args.config} (pass --no-llm for offline heuristic build)")
-        with open(args.config, "r", encoding="utf-8") as f:
+        with open(args.config, "r", encoding="utf-8-sig") as f:
             cfg = json.load(f)
         if args.max_tokens and args.max_tokens > 0:
             cfg["maxTokens"] = args.max_tokens
@@ -1799,8 +1938,15 @@ def main():
 
     ckpt_path = os.path.join(out_corpus_dir, ".build_novel.ckpt.jsonl")
     ckpt = {}
-    if not args.no_llm and os.path.exists(ckpt_path):
-        with open(ckpt_path, "r", encoding="utf-8") as f:
+    is_full_rebuild = not args.upgrade and not args.append
+    if is_full_rebuild:
+        if os.path.exists(ckpt_path):
+            try:
+                os.remove(ckpt_path)
+            except OSError:
+                pass
+    elif not args.no_llm and os.path.exists(ckpt_path):
+        with open(ckpt_path, "r", encoding="utf-8-sig") as f:
             for lineno, l in enumerate(f, 1):
                 if not l.strip():
                     continue
@@ -1857,18 +2003,23 @@ def main():
 
         todo_leaves = []
         for a in target_arcs:
-            for sc in a["scenes"]:
+            for sc_idx, sc in enumerate(a["scenes"], 1):
                 key = f"leaf:{sc['node_id']}"
-                if not args.force and key in ckpt:
+                leaf_text = texts_map[sc["node_id"]]["text"]
+                leaf_hash = _sha256_text(leaf_text)
+                if not args.force and args.upgrade and sc.get("_llm_done") and str(sc.get("summary") or "").strip():
+                    continue
+                if not args.force and key in ckpt and ckpt[key].get("text_sha256") == leaf_hash:
                     sc["title"] = ckpt[key].get("title", "")
                     sc["summary"] = ckpt[key].get("summary", "")
                     sc["tone_tags"] = ckpt[key].get("tone_tags", [])
                     sc["_chars"] = ckpt[key].get("characters", [])
+                    sc["_llm_done"] = True
                 else:
-                    todo_leaves.append((a, sc, key))
+                    todo_leaves.append((a, sc, sc_idx, key, leaf_hash))
 
         def _run_leaf(item):
-            a, sc, key = item
+            a, sc, _sc_idx, key, leaf_hash = item
             txt = texts_map[sc["node_id"]]["text"][:7000]
             prompt = (
                 f"你是《{args.name}》文本目录索引员。请为下面这段完整场景生成检索索引（注意把人称代词消解为具体人名）：\n"
@@ -1883,6 +2034,7 @@ def main():
             record_usage(usage)
             rec = {
                 "key": key,
+                "text_sha256": leaf_hash,
                 "title": str(parsed.get("title", "")).strip() or f"{a['title']}·片段",
                 "summary": str(parsed.get("summary", "")).strip(),
                 "characters": [str(x).strip() for x in (parsed.get("characters") or []) if str(x).strip()][:6],
@@ -1894,53 +2046,98 @@ def main():
         if todo_leaves:
             print(f"[build_novel] summarizing {len(todo_leaves)} scenes with LLM (workers={args.workers})...")
             done_cnt = 0
+            leaf_ok = 0
+            leaf_fail = 0
+            last_leaf_err = None
             with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
                 fut_map = {ex.submit(_run_leaf, it): it for it in todo_leaves}
                 for fut in concurrent.futures.as_completed(fut_map):
-                    a, sc, key = fut_map[fut]
+                    a, sc, sc_idx, key, _leaf_hash = fut_map[fut]
                     done_cnt += 1
                     try:
                         sc, rec = fut.result()
-                    except Exception as err:
+                        sc["title"] = rec["title"]
+                        sc["summary"] = rec["summary"]
+                        sc["tone_tags"] = rec["tone_tags"]
+                        sc["_chars"] = rec["characters"]
+                        sc["_llm_done"] = True
+                        leaf_ok += 1
+                    except _LlmHttpError as err:
+                        if err.code in (401, 403):
+                            for f in fut_map:
+                                f.cancel()
+                            raise RuntimeError(f"LLM authentication failed ({err})") from err
+                        leaf_fail += 1
+                        last_leaf_err = err
                         print(f"[build_novel] warn leaf {sc['node_id']} fallback ({err})")
-                        fb = heuristic_scene_meta(a["title"], 1, len(a["scenes"]), texts_map[sc["node_id"]]["text"], cast_pool)
-                        rec = {
-                            "key": key,
-                            "title": fb["title"],
-                            "summary": fb["summary"],
-                            "characters": fb["characters"],
-                            "tone_tags": fb["tone_tags"],
-                        }
-                    sc["title"] = rec["title"]
-                    sc["summary"] = rec["summary"]
-                    sc["tone_tags"] = rec["tone_tags"]
-                    sc["_chars"] = rec["characters"]
+                        fb = heuristic_scene_meta(a["title"], sc_idx, len(a["scenes"]), texts_map[sc["node_id"]]["text"], cast_pool)
+                        if not str(sc.get("title") or "").strip():
+                            sc["title"] = fb["title"]
+                        if not str(sc.get("summary") or "").strip():
+                            sc["summary"] = fb["summary"]
+                        if not sc.get("tone_tags"):
+                            sc["tone_tags"] = fb["tone_tags"]
+                        sc["_chars"] = fb["characters"]
+                    except Exception as err:
+                        leaf_fail += 1
+                        last_leaf_err = err
+                        print(f"[build_novel] warn leaf {sc['node_id']} fallback ({err})")
+                        fb = heuristic_scene_meta(a["title"], sc_idx, len(a["scenes"]), texts_map[sc["node_id"]]["text"], cast_pool)
+                        if not str(sc.get("title") or "").strip():
+                            sc["title"] = fb["title"]
+                        if not str(sc.get("summary") or "").strip():
+                            sc["summary"] = fb["summary"]
+                        if not sc.get("tone_tags"):
+                            sc["tone_tags"] = fb["tone_tags"]
+                        sc["_chars"] = fb["characters"]
                     if done_cnt % 50 == 0 or done_cnt == len(todo_leaves):
                         print(f"[build_novel] leaf progress: {done_cnt}/{len(todo_leaves)}")
+            if leaf_ok == 0 and leaf_fail == len(todo_leaves):
+                raise RuntimeError(f"All {leaf_fail} LLM scene summarizations failed (last error: {last_leaf_err})")
 
         todo_arcs = []
         for a in target_arcs:
             scenes = a.get("scenes") or []
             if len(scenes) == 1:
                 sc = scenes[0]
-                a["description"] = sc["summary"]
-                a["characters"] = list(sc.get("_chars") or a.get("characters") or [])[:8]
-                a["tone_tags"] = list(sc.get("tone_tags") or ["叙事/剧情"])[:2]
-                a["key_items"] = [sc["title"]] if sc.get("title") else []
+                if not args.force and args.upgrade and a.get("_llm_done") and str(a.get("description") or "").strip():
+                    continue
+                if sc.get("_llm_done") and str(sc.get("summary") or "").strip():
+                    a["description"] = sc["summary"]
+                    a["characters"] = list(sc.get("_chars") or a.get("characters") or [])[:8]
+                    a["tone_tags"] = list(sc.get("tone_tags") or ["叙事/剧情"])[:2]
+                    a["key_items"] = [sc["title"]] if sc.get("title") else []
+                    a["_llm_done"] = True
+                else:
+                    if not str(a.get("description") or "").strip():
+                        a["description"] = sc.get("summary", "")
+                    if not a.get("characters"):
+                        a["characters"] = list(sc.get("_chars") or [])[:8]
+                    if not a.get("tone_tags"):
+                        a["tone_tags"] = list(sc.get("tone_tags") or ["叙事/剧情"])[:2]
+                    if not a.get("key_items") and sc.get("title"):
+                        a["key_items"] = [sc["title"]]
                 usage_stats["reused_single_arcs"] += 1
                 continue
 
             if not scenes:
                 continue
 
+            if not args.force and args.upgrade and a.get("_llm_done") and str(a.get("description") or "").strip():
+                continue
+
             key = f"arc:{a['arc_id']}"
-            if not args.force and key in ckpt:
+            arc_hash = _sha256_text(
+                "\n".join(f"{s['node_id']}:{s.get('title', '')}:{s.get('summary', '')}" for s in scenes)
+            )
+            if not args.force and key in ckpt and ckpt[key].get("scenes_sha256") == arc_hash:
                 a["description"] = ckpt[key].get("description", "")
                 a["characters"] = ckpt[key].get("characters", [])
                 a["tone_tags"] = ckpt[key].get("tone_tags", [])
                 a["key_items"] = ckpt[key].get("key_items", [])
+                a["_llm_done"] = True
             else:
-                todo_arcs.append((a, key))
+                todo_arcs.append((a, key, arc_hash))
 
         if usage_stats["reused_single_arcs"]:
             print(
@@ -1949,7 +2146,7 @@ def main():
             )
 
         def _run_arc(item):
-            a, key = item
+            a, key, arc_hash = item
             sc_lines = "\n".join(f"- [{s['node_id']}] {s['title']}: {s['summary']}" for s in a["scenes"])
             prompt = (
                 f"根据《{args.name}》篇章的子场景摘要提炼篇章总目信息：\n"
@@ -1963,6 +2160,7 @@ def main():
             record_usage(usage)
             rec = {
                 "key": key,
+                "scenes_sha256": arc_hash,
                 "description": str(parsed.get("description", "")).strip(),
                 "characters": [str(x).strip() for x in (parsed.get("characters") or []) if str(x).strip()][:8],
                 "tone_tags": [str(x).strip() for x in (parsed.get("tone_tags") or []) if str(x).strip()][:2] or ["叙事/剧情"],
@@ -1974,14 +2172,29 @@ def main():
         if todo_arcs:
             print(f"[build_novel] summarizing {len(todo_arcs)} multi-scene arcs with LLM...")
             arc_done = 0
+            arc_ok = 0
+            arc_fail = 0
+            last_arc_err = None
             with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
                 fut_map = {ex.submit(_run_arc, it): it for it in todo_arcs}
                 for fut in concurrent.futures.as_completed(fut_map):
-                    a, key = fut_map[fut]
+                    a, key, _arc_hash = fut_map[fut]
                     arc_done += 1
                     try:
                         a, rec = fut.result()
-                    except Exception as err:
+                        a["description"] = rec["description"]
+                        a["characters"] = rec["characters"]
+                        a["tone_tags"] = rec["tone_tags"]
+                        a["key_items"] = rec["key_items"]
+                        a["_llm_done"] = True
+                        arc_ok += 1
+                    except _LlmHttpError as err:
+                        if err.code in (401, 403):
+                            for f in fut_map:
+                                f.cancel()
+                            raise RuntimeError(f"LLM authentication failed ({err})") from err
+                        arc_fail += 1
+                        last_arc_err = err
                         print(f"[build_novel] warn arc {a['arc_id']} fallback ({err})")
                         fb_chars = []
                         seen_fc = set()
@@ -1990,33 +2203,61 @@ def main():
                                 if ch not in seen_fc:
                                     seen_fc.add(ch)
                                     fb_chars.append(ch)
-                        rec = {
-                            "key": key,
-                            "description": "；".join(s["summary"][:60] for s in a["scenes"][:2])[:140],
-                            "characters": fb_chars[:8],
-                            "tone_tags": ["叙事/剧情"],
-                            "key_items": [s["title"] for s in a["scenes"][:8] if s.get("title")],
-                        }
-                    a["description"] = rec["description"]
-                    a["characters"] = rec["characters"]
-                    a["tone_tags"] = rec["tone_tags"]
-                    a["key_items"] = rec["key_items"]
+                        if not str(a.get("description") or "").strip():
+                            a["description"] = "；".join(s["summary"][:60] for s in a["scenes"][:2])[:140]
+                        if not a.get("characters"):
+                            a["characters"] = fb_chars[:8]
+                        if not a.get("tone_tags"):
+                            a["tone_tags"] = ["叙事/剧情"]
+                        if not a.get("key_items"):
+                            a["key_items"] = [s["title"] for s in a["scenes"][:8] if s.get("title")]
+                    except Exception as err:
+                        arc_fail += 1
+                        last_arc_err = err
+                        print(f"[build_novel] warn arc {a['arc_id']} fallback ({err})")
+                        fb_chars = []
+                        seen_fc = set()
+                        for sc in a["scenes"]:
+                            for ch in sc.get("_chars") or []:
+                                if ch not in seen_fc:
+                                    seen_fc.add(ch)
+                                    fb_chars.append(ch)
+                        if not str(a.get("description") or "").strip():
+                            a["description"] = "；".join(s["summary"][:60] for s in a["scenes"][:2])[:140]
+                        if not a.get("characters"):
+                            a["characters"] = fb_chars[:8]
+                        if not a.get("tone_tags"):
+                            a["tone_tags"] = ["叙事/剧情"]
+                        if not a.get("key_items"):
+                            a["key_items"] = [s["title"] for s in a["scenes"][:8] if s.get("title")]
                     if arc_done % 50 == 0 or arc_done == len(todo_arcs):
                         print(f"[build_novel] arc progress: {arc_done}/{len(todo_arcs)}")
+            if arc_ok == 0 and arc_fail == len(todo_arcs):
+                raise RuntimeError(f"All {arc_fail} LLM arc summarizations failed (last error: {last_arc_err})")
 
         if not args.skip_meta and target_arcs:
-            grouped = collections.OrderedDict()
-            for a in target_arcs:
-                ser_name = str(a.get("series") or a.get("category") or "正文卷").strip()
-                grouped.setdefault(ser_name, []).append(a)
-
-            for ser_name, ser_arcs in grouped.items():
+            touched_series = list(
+                dict.fromkeys(str(a.get("series") or a.get("category") or "正文卷").strip() for a in target_arcs)
+            )
+            for ser_name in touched_series:
+                ser_arcs = [
+                    a for a in arcs
+                    if str(a.get("series") or a.get("category") or "正文卷").strip() == ser_name
+                    and (a.get("_llm_done") or str(a.get("description") or "").strip())
+                ]
+                if not ser_arcs:
+                    continue
+                digest_text, top_chars = build_series_digest(ser_arcs)
+                digest_hash = _sha256_text(digest_text)
                 meta_key = f"series_meta:{ser_name}:{len(ser_arcs)}"
-                from_ckpt = not args.force and meta_key in ckpt
+                from_ckpt = (
+                    not args.force
+                    and meta_key in ckpt
+                    and ckpt[meta_key].get("digest_sha256") == digest_hash
+                )
                 if from_ckpt:
                     rec = ckpt[meta_key]
                 else:
-                    digest_text, top_chars = build_series_digest(ser_arcs)
                     meta_prompt = (
                         f"你是《{args.name}》文本资料库总编。请根据以下「{ser_name}」的章节脉络与高频人物表，提炼全卷级检索元数据与知识图谱：\n"
                         "1. series_summary: 60-120字精炼概括本卷主线剧情、核心舞台与关键转折；\n"
@@ -2031,6 +2272,7 @@ def main():
                         record_usage(usage)
                         rec = {
                             "key": meta_key,
+                            "digest_sha256": digest_hash,
                             "series_summary": str(parsed.get("series_summary", "")).strip(),
                             "aliases": parsed.get("aliases") if isinstance(parsed.get("aliases"), list) else [],
                             "glossary": [str(x).strip() for x in (parsed.get("glossary") or []) if str(x).strip()],
@@ -2041,6 +2283,11 @@ def main():
                             f"summary={len(rec['series_summary'])}c, aliases={len(rec['aliases'])}, "
                             f"glossary={len(rec['glossary'])}"
                         )
+                    except _LlmHttpError as err:
+                        if err.code in (401, 403):
+                            raise RuntimeError(f"LLM authentication failed ({err})") from err
+                        print(f"[build_novel] warn series_meta '{ser_name}' skipped ({err})")
+                        rec = None
                     except Exception as err:
                         print(f"[build_novel] warn series_meta '{ser_name}' skipped ({err})")
                         rec = None
@@ -2063,37 +2310,53 @@ def main():
         for a in arcs
     )
     ckpt_keys = set(ckpt.keys())
-    if args.append:
-        llm_scenes_count = int(existing_stats.get("llm_scenes") or 0)
-        llm_arcs_count = int(existing_stats.get("llm_arcs") or 0)
-        count_scope = new_arcs
-    else:
-        llm_scenes_count = 0
-        llm_arcs_count = 0
-        count_scope = arcs
-    for a in count_scope:
-        sc_list = a.get("scenes") or []
-        if sc_list and all(f"leaf:{sc['node_id']}" in ckpt_keys for sc in sc_list):
-            if len(sc_list) == 1 or f"arc:{a['arc_id']}" in ckpt_keys:
-                llm_arcs_count += 1
-        for sc in sc_list:
-            if f"leaf:{sc['node_id']}" in ckpt_keys:
-                llm_scenes_count += 1
 
-    index_doc = {
-        "version": 2,
-        "source": source_name,
-        "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "stats": {
-            "arcs": len(arcs),
-            "groups": total_scenes,
-            "scenes": total_scenes,
-            "total_chars": total_chars,
-            "llm_scenes": llm_scenes_count,
-            "llm_arcs": llm_arcs_count,
-        },
-        "arcs": arcs,
+    def _count_llm_done(arc_list):
+        sc_done = 0
+        arc_done = 0
+        for a in arc_list:
+            sc_list = a.get("scenes") or []
+            all_sc_done = bool(sc_list)
+            for sc in sc_list:
+                is_sc = bool(
+                    (sc.get("_llm_done") and str(sc.get("summary") or "").strip())
+                    or f"leaf:{sc['node_id']}" in ckpt_keys
+                )
+                if is_sc:
+                    sc_done += 1
+                else:
+                    all_sc_done = False
+            if sc_list:
+                is_arc = bool(
+                    (a.get("_llm_done") and str(a.get("description") or "").strip())
+                    or (all_sc_done and (len(sc_list) == 1 or f"arc:{a['arc_id']}" in ckpt_keys))
+                )
+                if is_arc:
+                    arc_done += 1
+        return sc_done, arc_done
+
+    if args.append:
+        ex_sc, ex_arc = _count_llm_done(existing_arcs)
+        nw_sc, nw_arc = _count_llm_done(new_arcs)
+        llm_scenes_count = min(total_scenes, max(ex_sc, int(existing_stats.get("llm_scenes") or 0)) + nw_sc)
+        llm_arcs_count = min(len(arcs), max(ex_arc, int(existing_stats.get("llm_arcs") or 0)) + nw_arc)
+    else:
+        llm_scenes_count, llm_arcs_count = _count_llm_done(arcs)
+
+    index_doc = dict(existing_index) if isinstance(existing_index, dict) else {}
+    index_doc["version"] = 2
+    index_doc["source"] = source_name
+    index_doc["built_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    index_doc["stats"] = {
+        **existing_stats,
+        "arcs": len(arcs),
+        "groups": total_scenes,
+        "scenes": total_scenes,
+        "total_chars": total_chars,
+        "llm_scenes": llm_scenes_count,
+        "llm_arcs": llm_arcs_count,
     }
+    index_doc["arcs"] = arcs
     if series_summaries:
         index_doc["series_summaries"] = series_summaries
 

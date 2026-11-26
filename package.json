@@ -1,6 +1,6 @@
 {
   "name": "lorecodex",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Vectorless tree-reasoning, millisecond in-RAM grep, and sidecar memory agent for long-form fiction, game lore, SillyTavern / TauriTavern, and DeepSeek Harness / MCP agents.",
   "main": "src/dsh_plugin.js",
   "exports": {

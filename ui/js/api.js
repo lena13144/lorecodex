@@ -21,9 +21,19 @@ async function getBrowserEngine() {
 }
 
 async function ensureLocalDemoSeeded(be) {
-  if (localRowsCache && localRowsCache.length > 0) return localRowsCache;
+  if (localRowsCache) return localRowsCache;
   const rows = await be.idbListCorpora();
   if (rows.length > 0) {
+    if (typeof be.idbSetMeta === 'function') {
+      await be.idbSetMeta('demo_seeded', true).catch(() => {});
+    }
+    localRowsCache = rows;
+    return rows;
+  }
+  const alreadySeeded = typeof be.idbGetMeta === 'function'
+    ? await be.idbGetMeta('demo_seeded', false)
+    : false;
+  if (alreadySeeded) {
     localRowsCache = rows;
     return rows;
   }
@@ -38,6 +48,9 @@ async function ensureLocalDemoSeeded(be) {
         name: rawPack.corpus_name || rawPack.indexData?.corpus_name || '苍穹残响·灰烬星港编年史',
       });
       await be.idbSaveCorpus(pack);
+      if (typeof be.idbSetMeta === 'function') {
+        await be.idbSetMeta('demo_seeded', true);
+      }
       localRowsCache = await be.idbListCorpora();
       return localRowsCache;
     }
@@ -48,8 +61,10 @@ async function ensureLocalDemoSeeded(be) {
 async function getLocalAgentAndPack(corpusId) {
   const be = await getBrowserEngine();
   const rows = await ensureLocalDemoSeeded(be);
-  const meta = rows.find((p) => p.id === corpusId) || rows[0];
+  const cid = String(corpusId || '').trim();
+  const meta = cid ? rows.find((p) => p.id === cid) : rows[0];
   if (!meta) {
+    if (cid) throw new Error('corpus not found');
     throw new Error('内置免服务端书库为空，请先点击顶栏「导入建树」导入小说 (.txt / .md)、世界书 (.json) 或 .lorepack.json');
   }
   const cacheKey = `${meta.id}:${meta.updatedAt || ''}`;
@@ -165,6 +180,7 @@ export async function fetchCorpora() {
       tone_tags: agent.toneTags,
       spoiler_gate: p.config?.spoiler_gate || {},
       prompt_framing: p.config?.prompt_framing || {},
+      ui: p.config?.ui || {},
     };
   });
   return {
@@ -362,11 +378,13 @@ export async function saveConfig(patch) {
 
 export async function fetchModels(baseUrl, apiKey) {
   if (!forceLocalMode) {
-    return reqJson('/models', {
+    const j = await reqJson('/models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ baseUrl, apiKey }),
     });
+    if (j?.ok === false) throw new Error(j.error || '拉取失败');
+    return j;
   }
   const be = await getBrowserEngine();
   const cur = await getLocalApiConfig(be);
@@ -377,30 +395,27 @@ export async function fetchModels(baseUrl, apiKey) {
     .replace(/\/+$/, '');
   const key = apiKey && !/^\*+$/.test(String(apiKey).trim()) ? String(apiKey).trim() : cur.chatKey;
   if (!cleanBase || !key) {
-    return { ok: false, error: '请先填写 API Base URL 与 API Key' };
+    throw new Error('请先填写 API Base URL 与 API Key');
   }
-  try {
-    const r = await fetch(`${cleanBase}/models`, {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    if (!r.ok) {
-      const txt = await r.text().catch(() => '');
-      return { ok: false, error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 120) : ''}` };
-    }
-    const j = await r.json();
-    const rawList = Array.isArray(j.data) ? j.data : Array.isArray(j.models) ? j.models : [];
-    const models = [
-      ...new Set(
-        rawList
-          .map((x) => (typeof x === 'string' ? x : x?.id || String(x?.name || '').replace(/^models\//, '')))
-          .map((s) => String(s || '').trim())
-          .filter(Boolean)
-      ),
-    ];
-    return { ok: true, models };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  const r = await fetch(`${cleanBase}/models`, {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+  if (!r.ok) {
+    const txt = await r.text().catch(() => '');
+    throw new Error(`HTTP ${r.status}${txt ? ': ' + txt.slice(0, 120) : ''}`);
   }
+  const j = await r.json();
+  if (j?.ok === false) throw new Error(j.error || '拉取失败');
+  const rawList = Array.isArray(j.data) ? j.data : Array.isArray(j.models) ? j.models : [];
+  const models = [
+    ...new Set(
+      rawList
+        .map((x) => (typeof x === 'string' ? x : x?.id || String(x?.name || '').replace(/^models\//, '')))
+        .map((s) => String(s || '').trim())
+        .filter(Boolean)
+    ),
+  ];
+  return { ok: true, models };
 }
 
 export function cancelJob(jobId) {
@@ -534,10 +549,12 @@ export async function importCorpus(payload) {
       const rawText = isEpub
         ? await be.extractEpubTextInBrowser(rawBytes)
         : be.decodeTextBufferAuto(rawBytes);
-      const existingRows = await be.idbListCorpora();
-      const mergeTarget = payload.mergeInto
-        ? existingRows.find((r) => r.id === payload.mergeInto) || null
+      const mergeTarget = isJson && payload.mergeInto && typeof be.idbGetCorpus === 'function'
+        ? await be.idbGetCorpus(payload.mergeInto)
         : null;
+      if (isJson && payload.mergeInto && !mergeTarget) {
+        throw new Error(`未找到要合并的目标书库: ${payload.mergeInto}`);
+      }
       const appendPack = !isJson && payload.appendTo && typeof be.idbGetCorpus === 'function'
         ? await be.idbGetCorpus(payload.appendTo)
         : null;
@@ -873,6 +890,9 @@ export async function deleteCorpus(id) {
   }
   const be = await getBrowserEngine();
   await be.idbDeleteCorpus(cid);
+  if (typeof be.idbSetMeta === 'function') {
+    await be.idbSetMeta('demo_seeded', true);
+  }
   clearLocalCaches();
   const listRes = await fetchCorpora();
   return { ok: true, deleted: cid, ...listRes };

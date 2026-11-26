@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 let cachedPythonBin = null;
@@ -106,7 +107,7 @@ function escapeRegExp(str) {
 function writeJsonAtomic(filePath, data) {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   try {
     fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2) + '\n', 'utf8');
     fs.renameSync(tmpPath, filePath);

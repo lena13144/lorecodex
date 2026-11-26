@@ -1109,6 +1109,7 @@ jQuery(async () => {
     };
 
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        clearInjection(cfg);
         lastInjectionSnapshot = null;
         lastRetrievalCache = null;
         renderLastPreview(cfg);
@@ -1328,13 +1329,6 @@ jQuery(async () => {
         }
         if (localUpgAbortCtrl) return;
 
-        const plan = estimateBrowserLlmUpgradePlan(metaPack, { series: '', workers: 8, limitArcs: 0 });
-        if (!plan.totalArcs) {
-            renderStaticLlmWidget();
-            if (typeof toastr !== 'undefined') toastr.info('当前书库已完成全部 LLM 目录构建');
-            return;
-        }
-
         const buildLock = acquireCorpusBuildLock(metaPack.id, '酒馆扩展侧边栏');
         if (!buildLock.ok) {
             const holderOwner = buildLock.holder?.owner || '其他窗口';
@@ -1342,90 +1336,99 @@ jQuery(async () => {
             return;
         }
 
-        const pack = await idbGetCorpus(targetCorpusId);
-        if (!pack) {
-            buildLock.release?.();
-            if (typeof toastr !== 'undefined') toastr.warning('无法读取书库正文数据');
-            return;
-        }
-
-        localUpgAbortCtrl = new AbortController();
-        llmBuildRunning = true;
-        const ctrl = localUpgAbortCtrl;
-
-        let latestProg = {
-            phase: 'arcs',
-            doneArcs: 0,
-            totalArcs: plan.totalArcs,
-            doneScenes: 0,
-            totalScenes: plan.totalScenes,
-            doneCalls: 0,
-            totalCalls: plan.totalCalls,
-            doneSeries: 0,
-            totalSeries: plan.totalSeriesMeta,
-            percent: 0,
-            etaMs: null,
-            estMinMs: plan.estMinMs,
-            estMaxMs: plan.estMaxMs,
-            startedAtMs: Date.now(),
-            updatedAtMs: Date.now(),
-            arcTitle: plan.targetArcs[0]?.title || '',
-            series: plan.targetArcs[0]?.series || '',
-        };
-        let progStateMode = 'running';
-        renderRunningLlmWidget(latestProg, 'running');
-
-        const progTicker = setInterval(() => {
-            if (progStateMode === 'running') renderRunningLlmWidget(latestProg, 'running');
-        }, 1000);
-
+        let progTicker = null;
         try {
-            const res = await upgradeBrowserCorpusWithLLM(pack, apiCfg, {
-                series: '',
-                workers: 8,
-                limitArcs: 0,
-                signal: ctrl.signal,
-                onProgress(prog) {
-                    latestProg = { ...prog, updatedAtMs: Date.now() };
-                    progStateMode = prog.event === 'done' ? 'done' : 'running';
-                    renderRunningLlmWidget(latestProg, progStateMode);
-                },
-                async onSave(updatedPack) {
-                    await idbSaveCorpus(updatedPack);
-                    localAgentsCache.delete(updatedPack.id);
-                },
-            });
-            await idbSaveCorpus(pack);
-            localAgentsCache.delete(pack.id);
-            const ok = await fetchCorporaAndHealth(cfg);
-            progStateMode = 'done';
-            llmBuildRunning = false;
-            renderConnStatus(ok);
-            renderCorpusDropdown();
-            const durStr = formatDurationZh(res.elapsedMs);
-            renderRunningLlmWidget({ ...latestProg, percent: 100, elapsedMs: res.elapsedMs }, 'done', `完成，总耗时 ${durStr}`);
-            if (typeof toastr !== 'undefined') toastr.success(`LLM 目录构建完成（${durStr}）`);
-        } catch (err) {
-            await idbSaveCorpus(pack).catch(() => {});
-            localAgentsCache.delete(pack.id);
-            await fetchCorporaAndHealth(cfg);
-            const isPaused = ctrl.signal.aborted;
-            progStateMode = isPaused ? 'paused' : 'err';
-            llmBuildRunning = false;
-            const errMsg = err?.message || String(err);
-            renderRunningLlmWidget(
-                latestProg,
-                progStateMode,
-                isPaused ? '已暂停并保存断点，随时可继续' : `中断: ${errMsg}`
-            );
-            if (typeof toastr !== 'undefined') {
-                toastr.info(isPaused ? '已暂停 LLM 构建并保存断点' : `LLM 构建中断: ${escHtml(errMsg)}`);
+            const pack = await idbGetCorpus(targetCorpusId);
+            if (!pack) {
+                if (typeof toastr !== 'undefined') toastr.warning('无法读取书库正文数据');
+                return;
+            }
+
+            const plan = estimateBrowserLlmUpgradePlan(pack, { series: '', workers: 8, limitArcs: 0 });
+            if (!plan.totalArcs) {
+                renderStaticLlmWidget();
+                if (typeof toastr !== 'undefined') toastr.info('当前书库已完成全部 LLM 目录构建');
+                return;
+            }
+
+            localUpgAbortCtrl = new AbortController();
+            llmBuildRunning = true;
+            const ctrl = localUpgAbortCtrl;
+
+            let latestProg = {
+                phase: 'arcs',
+                doneArcs: 0,
+                totalArcs: plan.totalArcs,
+                doneScenes: 0,
+                totalScenes: plan.totalScenes,
+                doneCalls: 0,
+                totalCalls: plan.totalCalls,
+                doneSeries: 0,
+                totalSeries: plan.totalSeriesMeta,
+                percent: 0,
+                etaMs: null,
+                estMinMs: plan.estMinMs,
+                estMaxMs: plan.estMaxMs,
+                startedAtMs: Date.now(),
+                updatedAtMs: Date.now(),
+                arcTitle: plan.targetArcs[0]?.title || '',
+                series: plan.targetArcs[0]?.series || '',
+            };
+            let progStateMode = 'running';
+            renderRunningLlmWidget(latestProg, 'running');
+
+            progTicker = setInterval(() => {
+                if (progStateMode === 'running') renderRunningLlmWidget(latestProg, 'running');
+            }, 1000);
+
+            try {
+                const res = await upgradeBrowserCorpusWithLLM(pack, apiCfg, {
+                    series: '',
+                    workers: 8,
+                    limitArcs: 0,
+                    signal: ctrl.signal,
+                    onProgress(prog) {
+                        latestProg = { ...prog, updatedAtMs: Date.now() };
+                        progStateMode = prog.event === 'done' ? 'done' : 'running';
+                        renderRunningLlmWidget(latestProg, progStateMode);
+                    },
+                    async onSave(updatedPack) {
+                        await idbSaveCorpus(updatedPack);
+                        localAgentsCache.delete(updatedPack.id);
+                    },
+                });
+                await idbSaveCorpus(pack);
+                localAgentsCache.delete(pack.id);
+                const ok = await fetchCorporaAndHealth(cfg);
+                progStateMode = 'done';
+                llmBuildRunning = false;
+                renderConnStatus(ok);
+                renderCorpusDropdown();
+                const durStr = formatDurationZh(res.elapsedMs);
+                renderRunningLlmWidget({ ...latestProg, percent: 100, elapsedMs: res.elapsedMs }, 'done', `完成，总耗时 ${durStr}`);
+                if (typeof toastr !== 'undefined') toastr.success(`LLM 目录构建完成（${durStr}）`);
+            } catch (err) {
+                await idbSaveCorpus(pack).catch(() => {});
+                localAgentsCache.delete(pack.id);
+                await fetchCorporaAndHealth(cfg);
+                const isPaused = ctrl.signal.aborted;
+                progStateMode = isPaused ? 'paused' : 'err';
+                llmBuildRunning = false;
+                const errMsg = err?.message || String(err);
+                renderRunningLlmWidget(
+                    latestProg,
+                    progStateMode,
+                    isPaused ? '已暂停并保存断点，随时可继续' : `中断: ${errMsg}`
+                );
+                if (typeof toastr !== 'undefined') {
+                    toastr.info(isPaused ? '已暂停 LLM 构建并保存断点' : `LLM 构建中断: ${escHtml(errMsg)}`);
+                }
             }
         } finally {
-            buildLock.release();
-            clearInterval(progTicker);
+            if (progTicker) clearInterval(progTicker);
             localUpgAbortCtrl = null;
             llmBuildRunning = false;
+            buildLock.release();
         }
     };
 

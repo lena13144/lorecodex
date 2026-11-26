@@ -304,6 +304,7 @@ function recordTreeRun(payload, out) {
 
 const importJobs = [];
 const importJobMap = new Map();
+const activeCorpusJobs = new Map();
 
 function pushJobLogs(job, chunk) {
   const lines = String(chunk || '')
@@ -337,14 +338,7 @@ function runBuilderJob({ kind, corpusId, filename, bytes = 0, initLog, scriptArg
     if (removed) importJobMap.delete(removed.id);
   }
   importJobMap.set(jobId, job);
-
-  const child = spawn(detectPythonBin(), scriptArgs, {
-    cwd: ROOT_DIR,
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-  });
-
-  child.stdout.on('data', (d) => pushJobLogs(job, d.toString('utf8')));
-  child.stderr.on('data', (d) => pushJobLogs(job, d.toString('utf8')));
+  activeCorpusJobs.set(corpusId, job);
 
   const doCleanup = () => {
     if (typeof cleanupFn === 'function') {
@@ -354,7 +348,33 @@ function runBuilderJob({ kind, corpusId, filename, bytes = 0, initLog, scriptArg
     }
   };
 
+  const clearActive = () => {
+    if (activeCorpusJobs.get(corpusId) === job) {
+      activeCorpusJobs.delete(corpusId);
+    }
+  };
+
+  let child;
+  try {
+    child = spawn(detectPythonBin(), scriptArgs, {
+      cwd: ROOT_DIR,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    });
+  } catch (err) {
+    clearActive();
+    doCleanup();
+    job.status = 'error';
+    job.error = err.message;
+    job.finishedAt = new Date().toISOString();
+    pushJobLogs(job, `[error] spawn failed: ${err.message}`);
+    return job;
+  }
+
+  child.stdout.on('data', (d) => pushJobLogs(job, d.toString('utf8')));
+  child.stderr.on('data', (d) => pushJobLogs(job, d.toString('utf8')));
+
   child.on('error', (err) => {
+    clearActive();
     doCleanup();
     job.status = 'error';
     job.error = err.message;
@@ -363,6 +383,7 @@ function runBuilderJob({ kind, corpusId, filename, bytes = 0, initLog, scriptArg
   });
 
   child.on('close', (code) => {
+    clearActive();
     doCleanup();
     job.finishedAt = new Date().toISOString();
     if (code === 0) {
@@ -542,15 +563,17 @@ const server = http.createServer(async (req, res) => {
     const parsedUrl = new URL(req.url, 'http://localhost');
     const pathname = parsedUrl.pathname;
 
-    if (
-      API_TOKEN &&
-      (req.method === 'POST' ||
-        req.method === 'PUT' ||
-        req.method === 'PATCH' ||
-        req.method === 'DELETE' ||
-        pathname === '/models' ||
-        pathname === '/tree-search')
-    ) {
+    const isPublicGet =
+      req.method === 'GET' &&
+      (pathname === '/' ||
+        pathname === '/ui' ||
+        pathname.startsWith('/ui/') ||
+        pathname === '/styles.css' ||
+        pathname.startsWith('/js/') ||
+        pathname.startsWith('/favicon') ||
+        pathname === '/health');
+
+    if (API_TOKEN && !isPublicGet) {
       if (!isAuthorized(req)) {
         return send({ error: 'unauthorized' }, 401);
       }
@@ -597,6 +620,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && pathname === '/health') {
+    if (API_TOKEN && !isAuthorized(req)) {
+      return send({
+        ok: true,
+        engine: 'lorecodex',
+        version: require('../package.json').version || '3.0.0',
+        mode: 'tree-only',
+        authRequired: true,
+      });
+    }
     const activeId = resolveDefaultCorpusId();
     const activeMeta = corpusManager.getCorpusMeta(activeId);
     const activeAgent = corpusManager.hasCorpus(activeId) ? corpusManager.getAgent(activeId) : null;
@@ -664,7 +696,7 @@ const server = http.createServer(async (req, res) => {
         return send({ error: `目标追加书库 "${appendTo}" 不存在` }, 404);
       }
       const targetId = kind === 'lore' && mergeInto ? mergeInto : kind === 'novel' && appendTo ? appendTo : corpusId;
-      if (importJobs.some((j) => j.status === 'running' && j.corpusId === targetId)) {
+      if (activeCorpusJobs.has(targetId)) {
         return send({ error: `书库 "${targetId}" 已有运行中的导入/升级任务，请等待完成后再试` }, 409);
       }
       const rawB64 = String(payload.contentBase64 || '').replace(/^data:[^;]+;base64,/i, '').trim();
@@ -734,10 +766,10 @@ const server = http.createServer(async (req, res) => {
       if (!runtimeCfg.chatBase || !runtimeCfg.chatKey) {
         return send({ error: '请先在服务配置中填好 chatBase 与 chatKey 后再执行 LLM 目录补全' }, 400);
       }
-      if (importJobs.some((j) => j.status === 'running' && j.corpusId === cid)) {
+      const payload = await readJsonBody(req);
+      if (activeCorpusJobs.has(cid)) {
         return send({ error: `书库 "${cid}" 已有运行中的导入/升级任务，请等待完成后再试` }, 409);
       }
-      const payload = await readJsonBody(req);
       const job = startUpgradeJob({
         corpusId: cid,
         series: payload.series || '',
@@ -826,7 +858,7 @@ const server = http.createServer(async (req, res) => {
     if (!corpusManager.hasCorpus(cid)) {
       return send({ error: `corpus "${cid}" not found` }, 404);
     }
-    const activeJob = importJobs.find((j) => j.status === 'running' && j.corpusId === cid);
+    const activeJob = activeCorpusJobs.get(cid);
     if (activeJob) {
       return send({ error: `书库 "${cid}" 正在执行任务 (${activeJob.id})，请先暂停或等待完成后再删除` }, 409);
     }
@@ -983,7 +1015,10 @@ const server = http.createServer(async (req, res) => {
       if (parsedBase.protocol !== 'http:' && parsedBase.protocol !== 'https:') {
         return send({ ok: false, error: 'API Base URL 仅支持 http: 或 https: 协议' }, 400);
       }
-      const r = await fetch(b + '/models', { headers: { Authorization: 'Bearer ' + k } });
+      const r = await fetch(b + '/models', {
+        headers: { Authorization: 'Bearer ' + k },
+        signal: AbortSignal.timeout(15000),
+      });
       if (!r.ok) {
         const errTxt = await r.text().catch(() => '');
         throw new Error(`HTTP ${r.status}${errTxt ? ': ' + errTxt.slice(0, 120) : ''}`);

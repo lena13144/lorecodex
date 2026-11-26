@@ -45,7 +45,7 @@ function renderCorpusSelect() {
   sel.innerHTML = state.corpora
     .map(
       (c) =>
-        `<option value="${esc(c.id)}" ${c.id === state.corpusId ? 'selected' : ''}>${esc(c.name)} (${c.stats?.arcs || 0}卷)</option>`
+        `<option value="${esc(c.id)}" ${c.id === state.corpusId ? 'selected' : ''}>${esc(c.name)} (${Number(c.stats?.arcs) || 0}卷)</option>`
     )
     .join('');
 }
@@ -415,13 +415,18 @@ function wireEvents() {
   });
   $('#reloadCorporaBtn').addEventListener('click', async () => {
     const beforeSwitch = switchSeq;
-    const j = await reloadCorpora();
-    if (switchSeq !== beforeSwitch) return;
-    state.corpora = j.corpora || [];
-    const next = state.corpora.some((c) => c.id === state.corpusId)
-      ? state.corpusId
-      : j.defaultCorpus || state.corpora[0]?.id || '';
-    if (next) await switchCorpus(next);
+    try {
+      const j = await reloadCorpora();
+      if (switchSeq !== beforeSwitch) return;
+      state.corpora = j.corpora || [];
+      const next = state.corpora.some((c) => c.id === state.corpusId)
+        ? state.corpusId
+        : j.defaultCorpus || state.corpora[0]?.id || '';
+      if (next) await switchCorpus(next);
+      else renderEmptyLibraryState();
+    } catch (e) {
+      $('#statMeta').textContent = '重新加载失败：' + e.message;
+    }
   });
 
   $('#tocMaxOrder').addEventListener('change', (e) => setMaxOrder(e.target.value, { reloadIndex: true }));
@@ -509,7 +514,8 @@ async function init() {
   const reqAction = String(urlParams.get('action') || '').trim().toLowerCase();
 
   try {
-    const [h, c] = await Promise.all([fetchHealth(), fetchCorpora()]);
+    const h = await fetchHealth();
+    const c = await fetchCorpora();
     state.modelName = h.config?.chatModel || '-';
     state.corpora = c.corpora || [];
     const target =
@@ -517,7 +523,7 @@ async function init() {
         ? reqCorpus
         : c.defaultCorpus || state.corpora[0]?.id || '';
     if (target) await switchCorpus(target);
-    else $('#statMeta').textContent = '未发现语料包，请点击「导入建树」';
+    else renderEmptyLibraryState();
     await pollRuns({ autoSelectNewest: Boolean(hashRunId), preferHashRunId: hashRunId });
 
     if (reqAction === 'settings') openSettingsModal();

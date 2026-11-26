@@ -637,28 +637,36 @@ with zipfile.ZipFile(epub_path, "w") as zf:
       mockCounts.leaf = 0;
       mockCounts.arc = 0;
       mockCounts.seriesMeta = 0;
-      const emptyRun = await execFileAsync(
-        PYTHON_BIN,
-        [
-          path.join(ROOT, 'builders', 'build_novel.py'),
-          '--upgrade',
-          '--corpus-id',
-          'llm-upgrade-smoke',
-          '--out-dir',
-          outDir,
-          '--config',
-          mockCfgPath,
-          '--series',
-          '第1卷',
-          '--workers',
-          '1',
-          '--max-tokens',
-          '8192',
-          '--force',
-        ],
-        { env: { ...process.env, LORECODEX_RETRY_BASE_SEC: '0.01' } }
-      );
-      const emptyErrText = String((emptyRun && (emptyRun.stdout || emptyRun.stderr)) || '');
+      let emptyErrText = '';
+      let emptyExitedNonZero = false;
+      try {
+        const emptyRun = await execFileAsync(
+          PYTHON_BIN,
+          [
+            path.join(ROOT, 'builders', 'build_novel.py'),
+            '--upgrade',
+            '--corpus-id',
+            'llm-upgrade-smoke',
+            '--out-dir',
+            outDir,
+            '--config',
+            mockCfgPath,
+            '--series',
+            '第1卷',
+            '--workers',
+            '1',
+            '--max-tokens',
+            '8192',
+            '--force',
+          ],
+          { env: { ...process.env, LORECODEX_RETRY_BASE_SEC: '0.01' } }
+        );
+        emptyErrText = `${emptyRun?.stdout || ''}\n${emptyRun?.stderr || ''}`;
+      } catch (e) {
+        emptyExitedNonZero = true;
+        emptyErrText = `${e?.stdout || ''}\n${e?.stderr || ''}\n${e?.message || ''}`;
+      }
+      assert(emptyExitedNonZero, 'empty LLM content total failure must exit non-zero');
       assert(
         emptyErrText.includes('empty message content'),
         `empty LLM content must surface an explicit diagnosis, got: ${emptyErrText.slice(0, 400)}`

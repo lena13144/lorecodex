@@ -44,6 +44,8 @@ async function postChatCompletion({ url, key, body, stream = true, idleMs = 9000
         const idleWhy = `流式响应超过 ${Math.round(idleMs / 1000)} 秒没有收到数据`;
         if (useStream) arm(idleMs, idleWhy);
         else arm(effectiveTotalMs, `请求超过 ${Math.round(effectiveTotalMs / 1000)} 秒未完成`);
+        let reader = null;
+        let streamDone = false;
         try {
             const resp = await fetch(url, {
                 method: 'POST',
@@ -75,12 +77,15 @@ async function postChatCompletion({ url, key, body, stream = true, idleMs = 9000
                 return parseChatPayloadText(await resp.text());
             }
             const acc = createChatStreamAccumulator(onDelta);
-            const reader = resp.body.getReader();
+            reader = resp.body.getReader();
             const decoder = new TextDecoder('utf-8');
             let buf = '';
             for (;;) {
                 const { value, done } = await reader.read();
-                if (done) break;
+                if (done) {
+                    streamDone = true;
+                    break;
+                }
                 arm(idleMs, idleWhy);
                 buf += decoder.decode(value, { stream: true });
                 let nl;
@@ -102,6 +107,19 @@ async function postChatCompletion({ url, key, body, stream = true, idleMs = 9000
         } finally {
             if (timer) clearTimeout(timer);
             if (signal) signal.removeEventListener('abort', onOuterAbort);
+            if (reader) {
+                if (!streamDone) {
+                    try {
+                        if (!ctrl.signal.aborted) ctrl.abort();
+                    } catch (_) {}
+                    try {
+                        await reader.cancel();
+                    } catch (_) {}
+                }
+                try {
+                    reader.releaseLock();
+                } catch (_) {}
+            }
         }
     };
     if (!stream) return attemptOnce(false);

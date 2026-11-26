@@ -135,6 +135,13 @@ export function renderTrace(out) {
   `
     : '';
 
+  const bindOpenDossier = () => {
+    box.querySelector('.trace-open-dossier')?.addEventListener('click', () => {
+      actions.setStageTab?.('dossier');
+      actions.setMobilePane?.('stage');
+    });
+  };
+
   const steps = Array.isArray(out.steps) && out.steps.length ? out.steps : null;
   if (!steps) {
     box.innerHTML =
@@ -142,6 +149,7 @@ export function renderTrace(out) {
       waterfallHtml +
       promptsBlock +
       (out.trace || []).map((t) => `<div class="turn-card"><code>${esc(t)}</code></div>`).join('');
+    bindOpenDossier();
     return;
   }
 
@@ -197,10 +205,7 @@ export function renderTrace(out) {
     .join('');
 
   box.innerHTML = summary + waterfallHtml + promptsBlock + turnsHtml;
-  box.querySelector('.trace-open-dossier')?.addEventListener('click', () => {
-    actions.setStageTab?.('dossier');
-    actions.setMobilePane?.('stage');
-  });
+  bindOpenDossier();
   box.querySelectorAll('[data-jump-arc]').forEach((b) => b.addEventListener('click', () => actions.openArc?.(b.dataset.jumpArc)));
   box.querySelectorAll('[data-jump-node]').forEach((b) => b.addEventListener('click', () => actions.openScene?.(b.dataset.jumpNode)));
 }
@@ -233,6 +238,7 @@ export async function selectRun(rid, { switchTab = true } = {}) {
   state.activeRunData = run.output;
   if (run.corpus_id && run.corpus_id !== state.corpusId && state.corpora.some((c) => c.id === run.corpus_id)) {
     await actions.switchCorpus?.(run.corpus_id, { keepRun: true });
+    if (state.activeRunId !== rid) return;
   }
   renderRunsList();
   renderTrace(run.output);

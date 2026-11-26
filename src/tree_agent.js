@@ -33,36 +33,45 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
   const corpusConfig = normalizeCorpusConfig(rawConfig, corpusId);
   const { indexPath, textsPath } = resolveCorpusFiles(corpusDir);
 
+  const makeUnloadedAgent = () => ({
+    loaded: false,
+    corpusId,
+    corpusConfig,
+    stats: { arcs: 0, scenes: 0, total_chars: 0, max_order: 0 },
+    categories: [],
+    seriesList: [],
+    toneTags: [],
+    getTreeIndex() {
+      return null;
+    },
+    getSceneText() {
+      return null;
+    },
+    getAliases() {
+      return corpusConfig.aliases || [];
+    },
+    grepScenes() {
+      return { took_ms: 0, total: 0, cameo_count: 0, all_matched: false, hits: [] };
+    },
+    async search() {
+      throw new Error(`Tree index files not found or corrupt for corpus "${corpusId}" in ${corpusDir}`);
+    },
+  });
+
   if (!indexPath || !textsPath) {
     console.warn(`[tree-agent:${corpusId}] tree_index.json or tree_texts.json missing in ${corpusDir}`);
-    return {
-      loaded: false,
-      corpusId,
-      corpusConfig,
-      stats: { arcs: 0, scenes: 0, total_chars: 0, max_order: 0 },
-      categories: [],
-      seriesList: [],
-      toneTags: [],
-      getTreeIndex() {
-        return null;
-      },
-      getSceneText() {
-        return null;
-      },
-      getAliases() {
-        return corpusConfig.aliases || [];
-      },
-      grepScenes() {
-        return { took_ms: 0, total: 0, cameo_count: 0, all_matched: false, hits: [] };
-      },
-      async search() {
-        throw new Error(`Tree index files not found for corpus "${corpusId}" in ${corpusDir}`);
-      },
-    };
+    return makeUnloadedAgent();
   }
 
-  const indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
-  const textsData = JSON.parse(fs.readFileSync(textsPath, 'utf8'));
+  let indexData;
+  let textsData;
+  try {
+    indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    textsData = JSON.parse(fs.readFileSync(textsPath, 'utf8'));
+  } catch (err) {
+    console.warn(`[tree-agent:${corpusId}] failed to parse tree JSON in ${corpusDir}: ${err.message}`);
+    return makeUnloadedAgent();
+  }
   const seriesSummaries =
     indexData.series_summaries && typeof indexData.series_summaries === 'object'
       ? indexData.series_summaries
@@ -146,7 +155,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         effective_tones: scTones,
       });
 
-      const item = textsData[sc.node_id];
+      const item = Object.prototype.hasOwnProperty.call(textsData, sc.node_id) ? textsData[sc.node_id] : null;
       if (!item) continue;
       const clean = stripMarkup(item.text);
       searchableScenes.push({
@@ -220,7 +229,23 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     return out;
   }
 
-  function computeSeriesOverview(visibleArcEntries) {
+  function getHiddenSeriesSet(maxOrder) {
+    const hidden = new Set();
+    if (maxOrder === null || maxOrder === undefined) return hidden;
+    for (const arc of indexData.arcs || []) {
+      const serKey = String(arc.series || arc.category || '默认分卷').trim();
+      const arcAllowed = isOrderAllowed(arc.order, maxOrder);
+      const allScenesAllowed = (arc.scenes || []).every((s) =>
+        isOrderAllowed(effectiveSceneOrder(s, arc), maxOrder)
+      );
+      if (!arcAllowed || !allScenesAllowed) {
+        hidden.add(serKey);
+      }
+    }
+    return hidden;
+  }
+
+  function computeSeriesOverview(visibleArcEntries, maxOrder = null) {
     const map = new Map();
     for (const { arc, scenes } of visibleArcEntries) {
       const ser = String(arc.series || arc.category || '默认分卷').trim();
@@ -250,6 +275,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         entry.characters.set(ch, (entry.characters.get(ch) || 0) + 1);
       }
     }
+    const hiddenSeriesSet = getHiddenSeriesSet(maxOrder);
     return [...map.values()].map((e) => ({
       series: e.series,
       arcs: e.arcs,
@@ -262,7 +288,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         .sort((a, b) => b[1] - a[1])
         .slice(0, 6)
         .map((x) => x[0]),
-      summary: String(seriesSummaries[e.series] || '').trim(),
+      summary: hiddenSeriesSet.has(e.series) ? '' : String(seriesSummaries[e.series] || '').trim(),
     }));
   }
 
@@ -349,7 +375,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     if (name === 'list_series') {
       const kw = String(args?.keyword || '').trim().toLowerCase();
       const visible = getVisibleArcs(maxOrder);
-      let items = computeSeriesOverview(visible);
+      let items = computeSeriesOverview(visible, maxOrder);
       if (kw) {
         items = items.filter(
           (x) =>
@@ -379,7 +405,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       const tone = String(args?.tone || '').trim().toLowerCase();
 
       const visibleArcs = getVisibleArcs(maxOrder);
-      const seriesOverview = computeSeriesOverview(visibleArcs);
+      const seriesOverview = computeSeriesOverview(visibleArcs, maxOrder);
 
       // 3-tier protection: fold into Level-0 series when huge unfiltered catalog
       if (!ser && !cat && !ch && !kw && !tone && visibleArcs.length > autoThreshold && seriesOverview.length >= 2) {
@@ -557,7 +583,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       let blockedCount = 0;
 
       for (const sid of sids) {
-        const item = textsData[sid];
+        const item = Object.prototype.hasOwnProperty.call(textsData, sid) ? textsData[sid] : null;
         if (!item) continue;
         const sm = sceneMetaMap.get(sid) || {};
         const scOrder = sm.effective_order ?? null;
@@ -829,7 +855,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     }
 
     const hydrateScene = (id) => {
-      const item = textsData[id];
+      const item = Object.prototype.hasOwnProperty.call(textsData, id) ? textsData[id] : null;
       if (!item) return null;
       const sm = sceneMetaMap.get(id) || {};
       const scOrder = sm.effective_order ?? null;
@@ -878,7 +904,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     let charBudget = maxChars && Number(maxChars) > 0 ? Number(maxChars) : Infinity;
     const finalScenes = [];
     for (const sc of orderedScenes.slice(0, maxScenes)) {
-      if (Number.isFinite(charBudget) && charBudget <= 400) break;
+      if (finalScenes.length > 0 && Number.isFinite(charBudget) && charBudget <= 400) break;
       let txt = sc.text;
       if (Number.isFinite(charBudget) && txt.length > charBudget) {
         const cut = txt.slice(0, charBudget);
@@ -980,12 +1006,13 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
           outlines: outlines.map((o) => ({ ...o, order: arcMap.get(o.arc_id)?.order ?? null })),
           forcedFinal,
         });
-        if (candidate) {
+        if (candidate && fs.existsSync(corpusDir)) {
           // Only reinforce co-access links with matched notes the agent actually read via read_scene
           const usedMatchedIds = (state.matchedNotes || [])
             .filter((n) => (n.refs || []).some((r) => state.traversal.readScenes.has(r.node_id)))
             .map((n) => n.id);
-          const res = recordLibrarianNote(librarianNotes, candidate, {
+          const diskNotes = loadLibrarianMemory(corpusDir);
+          const res = recordLibrarianNote(diskNotes, candidate, {
             matchedIds: usedMatchedIds,
           });
           librarianNotes = saveLibrarianMemory(corpusDir, res.notes);
@@ -1290,22 +1317,11 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         (acc, a) => acc + (a.scenes || []).reduce((sAcc, s) => sAcc + (Number(s.chars) || 0), 0),
         0
       );
-      let series = computeSeriesOverview(visible);
+      const series = computeSeriesOverview(visible, maxOrder);
       let visibleSeriesSummaries = seriesSummaries;
       if (maxOrder !== null) {
         const visibleSeriesSet = new Set(series.map((s) => s.series));
-        const hiddenSeriesSet = new Set();
-        for (const arc of indexData.arcs || []) {
-          const serKey = String(arc.series || arc.category || '默认分卷').trim();
-          const arcAllowed = isOrderAllowed(arc.order, maxOrder);
-          const allScenesAllowed = (arc.scenes || []).every((s) =>
-            isOrderAllowed(effectiveSceneOrder(s, arc), maxOrder)
-          );
-          if (!arcAllowed || !allScenesAllowed) {
-            hiddenSeriesSet.add(serKey);
-          }
-        }
-        series = series.map((s) => (hiddenSeriesSet.has(s.series) ? { ...s, summary: '' } : s));
+        const hiddenSeriesSet = getHiddenSeriesSet(maxOrder);
         visibleSeriesSummaries = {};
         for (const [k, v] of Object.entries(seriesSummaries)) {
           if (visibleSeriesSet.has(k) && !hiddenSeriesSet.has(k)) {
@@ -1348,7 +1364,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     },
     getSceneText(nodeId, { maxOrder: rawMaxOrder } = {}) {
       const id = String(nodeId || '').trim();
-      const item = textsData[id];
+      const item = Object.prototype.hasOwnProperty.call(textsData, id) ? textsData[id] : null;
       if (!item) return null;
       const sm = sceneMetaMap.get(id) || {};
       const arc = arcMap.get(item.arc_id) || {};
@@ -1382,7 +1398,11 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       return librarianNotes;
     },
     updateLibrarianMemory(actionPayload) {
-      const res = applyMemoryAction(librarianNotes, actionPayload);
+      if (!fs.existsSync(corpusDir)) {
+        throw new Error(`Corpus directory does not exist: ${corpusDir}`);
+      }
+      const diskNotes = loadLibrarianMemory(corpusDir);
+      const res = applyMemoryAction(diskNotes, actionPayload);
       librarianNotes = saveLibrarianMemory(corpusDir, res.notes);
       return { notes: librarianNotes, changed: res.changed, note: res.note || null };
     },

@@ -10,10 +10,15 @@ import collections
 import json
 import os
 import re
+import secrets
 import sys
 import time
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 GAME_STAT_NOISE_RE = re.compile(
     r"伤害提高|暴击率|稳态伤害|导染指数|不可叠加|回合最多触发|造成.{0,12}伤害|"
@@ -56,6 +61,7 @@ def load_lore_entries(input_path, filter_stats=False, include_disabled=False, se
     """selected_uids: 只导入这些条目（uid/id/序号，字符串）。传入时以勾选为准，忽略启用状态与噪声过滤。"""
     entries = []
     if os.path.isdir(input_path):
+        dir_idx = 0
         for root, _, files in sorted(os.walk(input_path)):
             rel_group = os.path.relpath(root, input_path)
             bucket = "通用档案" if rel_group == "." else rel_group.replace(os.sep, "/")
@@ -65,11 +71,19 @@ def load_lore_entries(input_path, filter_stats=False, include_disabled=False, se
                 fpath = os.path.join(root, fname)
                 with open(fpath, "r", encoding="utf-8", errors="replace") as f:
                     txt = f.read().strip()
-                if not txt or (filter_stats and is_noise_entry(txt)):
-                    continue
                 title = os.path.splitext(fname)[0]
+                entry_id = slugify(title)
+                rel_path = os.path.relpath(fpath, input_path).replace(os.sep, "/")
+                uid_candidates = {entry_id, title, fname, rel_path, str(dir_idx)}
+                dir_idx += 1
+                if selected_uids is not None:
+                    if not (uid_candidates & selected_uids) or not txt:
+                        continue
+                else:
+                    if not txt or (filter_stats and is_noise_entry(txt)):
+                        continue
                 entries.append({
-                    "id": slugify(title),
+                    "id": entry_id,
                     "bucket": bucket,
                     "title": title,
                     "keys": [],
@@ -85,12 +99,18 @@ def load_lore_entries(input_path, filter_stats=False, include_disabled=False, se
                     continue
                 obj = json.loads(line)
                 txt = str(obj.get("content") or obj.get("text") or "").strip()
-                if not txt or (filter_stats and is_noise_entry(txt)):
-                    continue
+                raw_uid = obj.get("uid") if obj.get("uid") is not None else obj.get("id")
+                entry_id = str(raw_uid) if raw_uid is not None else f"L{idx:03d}"
+                if selected_uids is not None:
+                    if not ({entry_id, str(idx - 1)} & selected_uids) or not txt:
+                        continue
+                else:
+                    if not txt or (filter_stats and is_noise_entry(txt)):
+                        continue
                 title = str(obj.get("title") or obj.get("comment") or f"条目{idx}").strip()
                 keys = _parse_keys(obj.get("keys") or obj.get("key") or obj.get("characters") or [])
                 entries.append({
-                    "id": str(obj.get("id") or f"L{idx:03d}"),
+                    "id": entry_id,
                     "bucket": str(obj.get("bucket") or obj.get("group") or "设定档案"),
                     "title": title,
                     "keys": keys,
@@ -102,10 +122,10 @@ def load_lore_entries(input_path, filter_stats=False, include_disabled=False, se
     # SillyTavern Worldbook JSON OR Character Card V2/V3 JSON (data.character_book.entries)
     with open(input_path, "r", encoding="utf-8-sig") as f:
         data = json.load(f)
-    raw_list = []
+    raw_pairs = []
     default_book_bucket = "世界观与技术档案"
     if isinstance(data, list):
-        raw_list = data
+        raw_pairs = [(None, v) for v in data]
     elif isinstance(data, dict):
         ents = data.get("entries")
         if ents is None and isinstance(data.get("data"), dict) and isinstance(data["data"].get("character_book"), dict):
@@ -118,13 +138,18 @@ def load_lore_entries(input_path, filter_stats=False, include_disabled=False, se
             ents = cb.get("entries")
             if cb.get("name"):
                 default_book_bucket = str(cb["name"]).strip()
-        raw_list = list(ents.values()) if isinstance(ents, dict) else (ents if isinstance(ents, list) else [])
+        if isinstance(ents, dict):
+            raw_pairs = [(str(k), v) for k, v in ents.items()]
+        elif isinstance(ents, list):
+            raw_pairs = [(None, v) for v in ents]
 
-    for idx, item in enumerate(raw_list, 1):
+    for idx, (outer_key, item) in enumerate(raw_pairs, 1):
         if not isinstance(item, dict):
             continue
         uid = item.get("uid") if item.get("uid") is not None else item.get("id")
-        uid = str(uid if uid is not None else idx - 1)
+        if uid is None:
+            uid = outer_key if outer_key is not None else (idx - 1)
+        uid = str(uid)
         txt = str(item.get("content") or item.get("text") or "").strip()
         if selected_uids is not None:
             if uid not in selected_uids or not txt:
@@ -215,6 +240,7 @@ def main():
     parser.add_argument("--out-dir", default="corpora", help="Corpora root dir (if not using --merge-into)")
     parser.add_argument("--category", default="档案设定", help="Category name for lore arcs (default: 档案设定)")
     parser.add_argument("--series", default="设定与技术档案", help="Series name for lore arcs")
+    parser.add_argument("--source-key", default="", help="Optional source identifier for idempotent merge prefix (default: input filename slug)")
     parser.add_argument("--merge-into", default="", help="Existing corpus directory to idempotently merge into")
     parser.add_argument("--filter-game-stats", action="store_true", help="Filter RPG combat stats and promotional noise")
     parser.add_argument("--include-disabled", action="store_true", help="Include disabled worldbook entries")
@@ -237,17 +263,24 @@ def main():
 
     packed = pack_entries_to_scenes(entries)
     target_dir = args.merge_into or os.path.join(args.out_dir, args.corpus_id)
-    os.makedirs(target_dir, exist_ok=True)
 
     index_path = os.path.join(target_dir, "tree_index.json")
     texts_path = os.path.join(target_dir, "tree_texts.json")
 
-    arc_prefix = f"lore_{slugify(args.category)}_"
+    in_base = os.path.basename(os.path.normpath(args.input))
+    in_stem = in_base if os.path.isdir(args.input) else os.path.splitext(in_base)[0]
+    src_slug = slugify(args.source_key or in_stem)
+    arc_prefix = f"lore_{slugify(args.category)}_{src_slug}_"
     existing_arcs = []
     existing_texts = {}
+    used_ids = set()
     max_id_num = 0
 
-    if args.merge_into and os.path.exists(index_path) and os.path.exists(texts_path):
+    if args.merge_into:
+        if not os.path.exists(index_path) or not os.path.exists(texts_path):
+            raise RuntimeError(
+                f"Cannot --merge-into {target_dir}: tree_index.json or tree_texts.json is missing"
+            )
         with open(index_path, "r", encoding="utf-8-sig") as f:
             old_idx = json.load(f)
         with open(texts_path, "r", encoding="utf-8-sig") as f:
@@ -257,28 +290,42 @@ def main():
         for a in old_idx.get("arcs", []):
             if str(a.get("arc_key", "")).startswith(arc_prefix):
                 for s in a.get("scenes", []):
-                    removed_node_ids.add(s["node_id"])
+                    removed_node_ids.add(str(s.get("node_id", "")))
             else:
                 existing_arcs.append(a)
-                if str(a.get("arc_id", "")).isdigit():
-                    max_id_num = max(max_id_num, int(a["arc_id"]))
+                aid = str(a.get("arc_id", ""))
+                if aid:
+                    used_ids.add(aid)
+                    if aid.isdigit():
+                        max_id_num = max(max_id_num, int(aid))
                 for s in a.get("scenes", []):
-                    if str(s.get("node_id", "")).isdigit():
-                        max_id_num = max(max_id_num, int(s["node_id"]))
+                    snid = str(s.get("node_id", ""))
+                    if snid:
+                        used_ids.add(snid)
+                        if snid.isdigit():
+                            max_id_num = max(max_id_num, int(snid))
 
         for nid, val in old_texts.items():
-            if nid not in removed_node_ids:
-                existing_texts[nid] = val
+            nid_s = str(nid)
+            if nid_s not in removed_node_ids:
+                existing_texts[nid_s] = val
+                used_ids.add(nid_s)
+                if nid_s.isdigit():
+                    max_id_num = max(max_id_num, int(nid_s))
     else:
+        os.makedirs(target_dir, exist_ok=True)
         old_idx = {"version": 2, "source": os.path.basename(os.path.normpath(args.input))}
 
     node_counter = max_id_num + 1
 
     def next_nid():
         nonlocal node_counter
-        v = f"{node_counter:04d}"
-        node_counter += 1
-        return v
+        while True:
+            v = f"{node_counter:04d}"
+            node_counter += 1
+            if v not in used_ids:
+                used_ids.add(v)
+                return v
 
     new_arcs = []
     for idx, pa in enumerate(packed, 1):
@@ -335,6 +382,31 @@ def main():
     total_chars = sum(a.get("total_chars", 0) for a in all_arcs)
 
     old_stats = dict(old_idx.get("stats") or {}) if isinstance(old_idx.get("stats"), dict) else {}
+    llm_scenes = 0
+    llm_arcs = 0
+    has_llm_flags = False
+    for a in all_arcs:
+        scenes = a.get("scenes") or []
+        arc_all_done = bool(scenes)
+        for sc in scenes:
+            if sc.get("_llm_done"):
+                has_llm_flags = True
+                if str(sc.get("summary") or "").strip():
+                    llm_scenes += 1
+                else:
+                    arc_all_done = False
+            else:
+                arc_all_done = False
+        if a.get("_llm_done"):
+            has_llm_flags = True
+            if str(a.get("description") or "").strip():
+                llm_arcs += 1
+        elif arc_all_done and len(scenes) == 1 and str(a.get("description") or "").strip():
+            llm_arcs += 1
+    if not has_llm_flags and args.merge_into:
+        llm_scenes = min(int(old_stats.get("llm_scenes") or 0), total_scenes)
+        llm_arcs = min(int(old_stats.get("llm_arcs") or 0), len(all_arcs))
+
     out_idx = dict(old_idx)
     out_idx["version"] = 2
     out_idx["source"] = old_idx.get("source") or os.path.basename(os.path.normpath(args.input))
@@ -345,14 +417,24 @@ def main():
         "groups": total_scenes,
         "scenes": total_scenes,
         "total_chars": total_chars,
+        "llm_scenes": llm_scenes,
+        "llm_arcs": llm_arcs,
     }
     out_idx["arcs"] = all_arcs
 
     def atomic_write_json(path, obj, indent=None):
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=indent)
-        os.replace(tmp_path, path)
+        tmp_path = f"{path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False, indent=indent)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
 
     atomic_write_json(index_path, out_idx, indent=2)
     atomic_write_json(texts_path, existing_texts)

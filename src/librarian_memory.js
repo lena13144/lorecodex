@@ -456,6 +456,8 @@ function applyMemoryAction(notes, payload = {}) {
         ...incoming,
         hits: rawNote.hits !== undefined ? incoming.hits : existing.hits,
         locked: rawNote.locked !== undefined ? incoming.locked : existing.locked,
+        links: rawNote.links !== undefined ? incoming.links : existing.links,
+        created_at: existing.created_at || incoming.created_at,
         updated_at: new Date().toISOString(),
       };
     } else {

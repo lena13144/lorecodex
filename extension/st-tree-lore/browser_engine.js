@@ -215,9 +215,10 @@ export async function idbSetMeta(key, value) {
         return await new Promise((resolve) => {
             const tx = db.transaction(IDB_META_STORE, 'readwrite');
             const st = tx.objectStore(IDB_META_STORE);
-            const req = st.put({ key, value, updatedAt: new Date().toISOString() });
-            req.onsuccess = () => resolve(true);
-            req.onerror = () => resolve(false);
+            st.put({ key, value, updatedAt: new Date().toISOString() });
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+            tx.onabort = () => resolve(false);
         });
     } catch (_) {
         return false;
@@ -800,8 +801,8 @@ async function inflateRawBytes(compressedBytes) {
     if (typeof DecompressionStream !== 'undefined') {
         const ds = new DecompressionStream('deflate-raw');
         const writer = ds.writable.getWriter();
-        writer.write(compressedBytes);
-        writer.close();
+        writer.write(compressedBytes).catch(() => {});
+        writer.close().catch(() => {});
         const ab = await new Response(ds.readable).arrayBuffer();
         return new Uint8Array(ab);
     }
@@ -854,6 +855,16 @@ function parseZipEntries(bytes) {
     return { entries, readEntryBytes };
 }
 
+function decodeHtmlEntities(str) {
+    return String(str || '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/&amp;/gi, '&');
+}
+
 function htmlToPlainLines(xhtml) {
     let s = String(xhtml || '')
         .replace(/<head[\s\S]*?<\/head>/gi, '')
@@ -862,18 +873,14 @@ function htmlToPlainLines(xhtml) {
     let headingTitle = '';
     const hm = s.match(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i);
     if (hm) {
-        headingTitle = hm[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+        headingTitle = decodeHtmlEntities(hm[1].replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
     }
-    s = s
-        .replace(/<\/(?:p|div|h[1-6]|li|tr|blockquote|section|article)>/gi, '\n')
-        .replace(/<br\s*\/?>/gi, '\n')
-        .replace(/<[^>]+>/g, '')
-        .replace(/&nbsp;/gi, ' ')
-        .replace(/&lt;/gi, '<')
-        .replace(/&gt;/gi, '>')
-        .replace(/&amp;/gi, '&')
-        .replace(/&quot;/gi, '"')
-        .replace(/&#39;/gi, "'");
+    s = decodeHtmlEntities(
+        s
+            .replace(/<\/(?:p|div|h[1-6]|li|tr|blockquote|section|article)>/gi, '\n')
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<[^>]+>/g, '')
+    );
     const lines = s
         .split(/\r?\n/)
         .map((l) => l.trim())
@@ -917,10 +924,26 @@ export async function extractEpubTextInBrowser(inputBuffer) {
             const hrefM = attrs.match(/\bhref=["']([^"']+)["']/i);
             const typeM = attrs.match(/\bmedia-type=["']([^"']+)["']/i);
             if (idM && hrefM) {
-                const hrefClean = decodeURIComponent(hrefM[1].split('#')[0]);
+                const rawHref = hrefM[1].split('#')[0];
+                let hrefClean = rawHref;
+                try {
+                    hrefClean = decodeURIComponent(rawHref);
+                } catch (_) {
+                    hrefClean = rawHref;
+                }
                 const mediaType = typeM ? typeM[1].toLowerCase() : '';
                 if (mediaType.includes('html') || /\.(?:xhtml|html|htm)$/i.test(hrefClean)) {
-                    const resolved = (opfDir + hrefClean).replace(/\/\.\//g, '/');
+                    const combined = hrefClean.startsWith('/') ? hrefClean : `${opfDir}${hrefClean}`;
+                    const parts = [];
+                    for (const seg of combined.replace(/\\/g, '/').split('/')) {
+                        if (!seg || seg === '.') continue;
+                        if (seg === '..') {
+                            if (parts.length) parts.pop();
+                        } else {
+                            parts.push(seg);
+                        }
+                    }
+                    const resolved = parts.join('/');
                     manifest.set(idM[1], resolved);
                 }
             }
@@ -1417,7 +1440,7 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
         }
     }
     const validChaps = rawChapters.filter((c) => c.lines.join('\n').trim().length > 0);
-    const existingArcs = Array.isArray(existingPack?.indexData?.arcs) ? existingPack.indexData.arcs : [];
+    const existingArcs = existingPack ? preserveExistingArcLlmFlags(existingPack) : [];
     const existingTexts = existingPack?.textsData && typeof existingPack.textsData === 'object' ? existingPack.textsData : {};
     const maxExistingOrder = existingArcs.reduce((m, a) => Math.max(m, Number(a?.order) || 0), 0);
     const maxExistingArcNum = existingArcs.reduce((m, a) => {
@@ -1535,6 +1558,7 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
                 chars: scText.length,
                 tone_tags: scTones,
                 summary: scSummary,
+                _llm_done: false,
             });
             newTextsData[nodeId] = {
                 arc_id: arcId,
@@ -1560,6 +1584,7 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
             characters: cast,
             key_items: [],
             tone_tags: scenes[0]?.tone_tags || ['叙事/剧情'],
+            _llm_done: false,
             scenes,
         });
         arcSeq += 1;
@@ -1574,13 +1599,31 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
         seriesBuckets.get(key).push(a);
     }
     for (const [serKey, list] of seriesBuckets.entries()) {
-        if (list.length <= bucketThreshold) continue;
         const baseName = serKey || '正文卷';
+        let offset = 0;
+        let plainCount = 0;
+        let hasExistingBuckets = false;
+        for (const ea of existingArcs) {
+            const eaSer = String(ea?.series || '').trim() || '正文卷';
+            if (eaSer === baseName) {
+                plainCount += 1;
+            } else if (eaSer.startsWith(`${baseName} (`) && eaSer.endsWith(')')) {
+                const rangeStr = eaSer.slice(baseName.length + 2, -1);
+                const m = /^\d+-(\d+)$/.exec(rangeStr);
+                if (m) {
+                    hasExistingBuckets = true;
+                    offset = Math.max(offset, parseInt(m[1], 10));
+                }
+            }
+        }
+        if (!hasExistingBuckets && list.length <= bucketThreshold) continue;
+        offset = Math.max(offset, plainCount);
         for (let i = 0; i < list.length; i += bucketThreshold) {
-            const start = i + 1;
-            const end = Math.min(i + bucketThreshold, list.length);
+            const chunkEnd = Math.min(i + bucketThreshold, list.length);
+            const start = offset + i + 1;
+            const end = offset + chunkEnd;
             const label = `${baseName} (${start}-${end})`;
-            for (let j = i; j < end; j++) {
+            for (let j = i; j < chunkEnd; j++) {
                 list[j].series = label;
             }
         }
@@ -1687,11 +1730,14 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
 
     // Also support full .lorepack.json export bundle
     if (parsed && parsed.indexData && parsed.textsData) {
+        if (existingPack) {
+            throw new Error('不能将完整 .lorepack.json 书库包直接追加到现有书库，请作为新书库导入');
+        }
         const packId = String(corpusId || parsed.id || parsed.indexData.corpus_id || 'imported-pack').trim();
         return {
             id: packId,
             config: normalizeCorpusConfig(parsed.config || { id: packId, name: name || parsed.indexData.corpus_name || packId }, packId),
-            indexData: parsed.indexData,
+            indexData: { ...parsed.indexData, corpus_id: packId },
             textsData: parsed.textsData,
             graphData: Array.isArray(parsed.graphData) ? parsed.graphData : [],
         };
@@ -1700,10 +1746,40 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
     const entriesRaw = extractWorldbookRawEntries(parsed);
     const selected = Array.isArray(selectedUids) ? new Set(selectedUids.map(String)) : null;
 
-    const baseArcs = existingPack ? [...(existingPack.indexData.arcs || [])] : [];
+    const targetId = existingPack ? existingPack.id : corpusId;
+    const targetName = existingPack ? existingPack.config.name : name || corpusId;
+
+    const baseArcs = existingPack ? preserveExistingArcLlmFlags(existingPack) : [];
     const textsData = existingPack ? { ...(existingPack.textsData || {}) } : {};
-    let arcSeq = baseArcs.length + 1;
-    let nodeSeq = Object.keys(textsData).length + 1;
+
+    const existingArcIds = new Set();
+    let maxLoreArcNum = 0;
+    for (const a of baseArcs) {
+        const aid = String(a?.arc_id || '');
+        if (aid) existingArcIds.add(aid);
+        const m = /^L(\d+)$/.exec(aid);
+        if (m) maxLoreArcNum = Math.max(maxLoreArcNum, parseInt(m[1], 10));
+    }
+
+    const existingNodeIds = new Set(Object.keys(textsData));
+    let maxLoreNodeNum = 0;
+    for (const k of existingNodeIds) {
+        const m = /^L(\d+)$/.exec(k);
+        if (m) maxLoreNodeNum = Math.max(maxLoreNodeNum, parseInt(m[1], 10));
+    }
+    for (const a of baseArcs) {
+        for (const s of a?.scenes || []) {
+            const nid = String(s?.node_id || '');
+            if (nid) {
+                existingNodeIds.add(nid);
+                const m = /^L(\d+)$/.exec(nid);
+                if (m) maxLoreNodeNum = Math.max(maxLoreNodeNum, parseInt(m[1], 10));
+            }
+        }
+    }
+
+    let arcSeq = maxLoreArcNum + 1;
+    let nodeSeq = maxLoreNodeNum + 1;
 
     const cleanEntries = [];
     entriesRaw.forEach((ent, idx) => {
@@ -1731,14 +1807,23 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
         cleanEntries.push({ title, content, keys });
     });
 
-    const arcId = 'L' + String(arcSeq).padStart(3, '0');
+    let arcId = 'L' + String(arcSeq).padStart(3, '0');
+    while (existingArcIds.has(arcId)) {
+        arcSeq += 1;
+        arcId = 'L' + String(arcSeq).padStart(3, '0');
+    }
+    existingArcIds.add(arcId);
     const scenes = [];
     const allKeys = new Set();
     let arcChars = 0;
 
     for (let i = 0; i < cleanEntries.length; i++) {
         const item = cleanEntries[i];
-        const nodeId = 'L' + String(nodeSeq++).padStart(4, '0');
+        let nodeId = 'L' + String(nodeSeq++).padStart(4, '0');
+        while (existingNodeIds.has(nodeId)) {
+            nodeId = 'L' + String(nodeSeq++).padStart(4, '0');
+        }
+        existingNodeIds.add(nodeId);
         item.keys.forEach((k) => allKeys.add(k));
         arcChars += item.content.length;
         scenes.push({
@@ -1764,7 +1849,7 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
     if (scenes.length) {
         baseArcs.push({
             arc_id: arcId,
-            arc_key: `${corpusId}-${arcId}`,
+            arc_key: `${targetId}-${arcId}`,
             title: name || '世界书设定档案',
             series: category || '档案设定',
             category: category || '档案设定',
@@ -1783,8 +1868,6 @@ export function buildLoreCorpusInBrowser({ rawJson, corpusId, name, category = '
     const totalChars = baseArcs.reduce((a, x) => a + (Number(x.total_chars) || 0), 0);
     const maxOrder = baseArcs.reduce((m, x) => (x.order != null && x.order > m ? x.order : m), 0);
 
-    const targetId = existingPack ? existingPack.id : corpusId;
-    const targetName = existingPack ? existingPack.config.name : name || corpusId;
     const indexData = {
         version: 2,
         corpus_id: targetId,
@@ -3447,6 +3530,8 @@ async function postChatCompletion({ url, key, body, stream = true, idleMs = 9000
         const idleWhy = `流式响应超过 ${Math.round(idleMs / 1000)} 秒没有收到数据`;
         if (useStream) arm(idleMs, idleWhy);
         else arm(effectiveTotalMs, `请求超过 ${Math.round(effectiveTotalMs / 1000)} 秒未完成`);
+        let reader = null;
+        let streamDone = false;
         try {
             const resp = await fetch(url, {
                 method: 'POST',
@@ -3478,12 +3563,15 @@ async function postChatCompletion({ url, key, body, stream = true, idleMs = 9000
                 return parseChatPayloadText(await resp.text());
             }
             const acc = createChatStreamAccumulator(onDelta);
-            const reader = resp.body.getReader();
+            reader = resp.body.getReader();
             const decoder = new TextDecoder('utf-8');
             let buf = '';
             for (;;) {
                 const { value, done } = await reader.read();
-                if (done) break;
+                if (done) {
+                    streamDone = true;
+                    break;
+                }
                 arm(idleMs, idleWhy);
                 buf += decoder.decode(value, { stream: true });
                 let nl;
@@ -3505,6 +3593,19 @@ async function postChatCompletion({ url, key, body, stream = true, idleMs = 9000
         } finally {
             if (timer) clearTimeout(timer);
             if (signal) signal.removeEventListener('abort', onOuterAbort);
+            if (reader) {
+                if (!streamDone) {
+                    try {
+                        if (!ctrl.signal.aborted) ctrl.abort();
+                    } catch (_) {}
+                    try {
+                        await reader.cancel();
+                    } catch (_) {}
+                }
+                try {
+                    reader.releaseLock();
+                } catch (_) {}
+            }
         }
     };
     if (!stream) return attemptOnce(false);
@@ -3783,6 +3884,20 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3, rateGat
         }
     }
     throw lastErr || new Error('LLM 请求失败');
+}
+
+function preserveExistingArcLlmFlags(existingPack) {
+    const oldIndex = existingPack?.indexData;
+    const oldArcs = Array.isArray(oldIndex?.arcs) ? oldIndex.arcs : [];
+    if (!oldArcs.length) return [];
+    return oldArcs.map((arc) => {
+        if (!arc || typeof arc !== 'object') return arc;
+        if (!isArcLlmDone(arc, oldIndex)) return arc;
+        const scenes = Array.isArray(arc.scenes)
+            ? arc.scenes.map((sc) => (sc && typeof sc === 'object' && sc._llm_done === undefined ? { ...sc, _llm_done: true } : sc))
+            : arc.scenes;
+        return { ...arc, _llm_done: true, scenes };
+    });
 }
 
 export function isArcLlmDone(arc, indexData) {
@@ -4325,9 +4440,6 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             }
 
             pack.indexData.series_summaries = pack.indexData.series_summaries || {};
-            const extractedAliases = [];
-            const extractedGlossary = [];
-            const extractedRelations = [];
 
             for (const [serName] of groupedSeries.entries()) {
                 if (runSignal.aborted) throw new Error('用户已暂停/终止 LLM 建库');
@@ -4352,15 +4464,22 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
                 try {
                     const parsedMeta = await callLlmJsonInBrowser(apiCfg, metaPrompt, runSignal, 3, rateGate);
                     const serSum = String(parsedMeta.series_summary || '').trim();
+                    let seriesUpdated = false;
                     if (serSum) {
                         pack.indexData.series_summaries[serName] = serSum;
                         synthesizedSeries += 1;
+                        seriesUpdated = true;
                     }
-                    if (Array.isArray(parsedMeta.aliases)) {
-                        extractedAliases.push(...parsedMeta.aliases);
+                    if (Array.isArray(parsedMeta.aliases) && parsedMeta.aliases.length) {
+                        pack.config.aliases = mergeAliasGroupsInBrowser(pack.config.aliases || [], parsedMeta.aliases, 60, pack.config.locked_aliases || []);
+                        seriesUpdated = true;
                     }
-                    if (Array.isArray(parsedMeta.glossary)) {
-                        extractedGlossary.push(...parsedMeta.glossary);
+                    if (Array.isArray(parsedMeta.glossary) && parsedMeta.glossary.length) {
+                        pack.config.glossary = mergeGlossaryInBrowser(pack.config.glossary || [], parsedMeta.glossary, 40, pack.config.locked_glossary || []);
+                        seriesUpdated = true;
+                    }
+                    if (seriesUpdated) {
+                        await persistStatsAndCheckpoint(true);
                     }
                 } catch (err) {
                     if (signal?.aborted || runSignal.aborted) throw err;
@@ -4382,16 +4501,10 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
                 );
             }
 
-            if (extractedAliases.length) {
-                pack.config.aliases = mergeAliasGroupsInBrowser(pack.config.aliases || [], extractedAliases, 60, pack.config.locked_aliases || []);
-            }
-            if (extractedGlossary.length) {
-                pack.config.glossary = mergeGlossaryInBrowser(pack.config.glossary || [], extractedGlossary, 40, pack.config.locked_glossary || []);
-            }
             await persistStatsAndCheckpoint(true);
         }
     } catch (err) {
-        if (completedArcs > 0 || upgradedScenes > 0) {
+        if (completedArcs > 0 || upgradedScenes > 0 || synthesizedSeries > 0) {
             await persistStatsAndCheckpoint(true).catch(() => {});
         }
         throw err;

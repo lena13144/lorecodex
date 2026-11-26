@@ -330,6 +330,7 @@ function startModalJobPoll({
   onError,
 }) {
   clearModalPoll();
+  const pollSeq = modalSeq;
   const fallbackStartMs = Date.now();
   if (progPrefix && initialJob) {
     renderJobProgressUi(progPrefix, initialJob, fallbackStartMs);
@@ -347,10 +348,18 @@ function startModalJobPoll({
   let consecutiveErrors = 0;
   let inFlight = false;
   activeModalPoll = setInterval(async () => {
+    if (pollSeq !== modalSeq) {
+      clearModalPoll();
+      return;
+    }
     if (inFlight) return;
     inFlight = true;
     try {
       const jr = await fetchJob(jobId);
+      if (pollSeq !== modalSeq) {
+        clearModalPoll();
+        return;
+      }
       consecutiveErrors = 0;
       const job = jr.job;
       if (progPrefix) {
@@ -378,6 +387,10 @@ function startModalJobPoll({
         statusEl.textContent = runningText ? runningText(job) : `正在运行 (${job.kind})...`;
       }
     } catch (e) {
+      if (pollSeq !== modalSeq) {
+        clearModalPoll();
+        return;
+      }
       consecutiveErrors += 1;
       const msg = e?.message || String(e || '轮询任务状态失败');
       const isNotFound = /404|not found/i.test(msg);
@@ -402,6 +415,7 @@ export function closeModal() {
 }
 
 function openDialog(html, extraClass = '') {
+  clearModalPoll();
   const seq = ++modalSeq;
   const dlg = $('#modalDialog');
   dlg.className = `modal-dialog ${extraClass}`.trim();
@@ -516,6 +530,8 @@ export async function openSettingsModal() {
       $('#cfgStatus').textContent = '正在拉取模型列表...';
       try {
         const j = await fetchModels($('#cfgBase').value.trim(), $('#cfgKey').value.trim());
+        if (seq !== modalSeq) return;
+        if (j?.ok === false) throw new Error(j.error || '拉取失败');
         const models = j.models || [];
         const sel = $('#cfgModelSelect');
         if (sel && models.length) {
@@ -533,13 +549,16 @@ export async function openSettingsModal() {
           ? `已拉取 ${models.length} 个可用模型，可在下拉框直接选择`
           : '接口返回了 0 个模型，请手动输入模型名称';
       } catch (e) {
+        if (seq !== modalSeq) return;
         $('#cfgStatus').textContent = '拉取失败: ' + e.message;
       } finally {
-        btn.disabled = false;
+        if (seq === modalSeq) btn.disabled = false;
       }
     });
 
     $('#cfgSaveBtn').addEventListener('click', async () => {
+      const btn = $('#cfgSaveBtn');
+      btn.disabled = true;
       try {
         const rawMaxTokens = Number($('#cfgMaxTokens').value);
         const rawTempStr = $('#cfgTemperature').value.trim();
@@ -560,9 +579,12 @@ export async function openSettingsModal() {
         state.modelName = res.config?.chatModel || patch.chatModel;
         actions.refreshModelMeta?.();
         showToast('服务模型配置已保存', 'ok');
+        if (seq !== modalSeq) return;
         closeModal();
       } catch (e) {
-        $('#cfgStatus').textContent = '保存失败: ' + e.message;
+        if (seq === modalSeq) $('#cfgStatus').textContent = '保存失败: ' + e.message;
+      } finally {
+        if (seq === modalSeq) btn.disabled = false;
       }
     });
   } catch (e) {
@@ -1015,11 +1037,11 @@ export async function openCorpusModal(initialTab = 'basic') {
             .join('');
           const refsHtml = (n.refs || [])
             .slice(0, 6)
-            .map((r) => `<button type="button" class="btn-sm cc-mem-jump-node" data-nid="${esc(r.node_id)}" style="font-family:var(--mono);font-size:11px;padding:1px 6px;height:auto;">${esc(r.node_id)}${r.order != null ? `(序${r.order})` : ''}</button>`)
+            .map((r) => `<button type="button" class="btn-sm cc-mem-jump-node" data-nid="${esc(r.node_id)}" style="font-family:var(--mono);font-size:11px;padding:1px 6px;height:auto;">${esc(r.node_id)}${r.order != null ? `(序${esc(r.order)})` : ''}</button>`)
             .join('');
           const arcRefsHtml = (n.arc_refs || [])
             .slice(0, 5)
-            .map((a) => `<button type="button" class="btn-sm cc-mem-jump-arc" data-aid="${esc(a.arc_id)}" style="font-size:11px;padding:1px 6px;height:auto;">${esc(a.title || a.arc_id)}${a.order != null ? `(序${a.order})` : ''}</button>`)
+            .map((a) => `<button type="button" class="btn-sm cc-mem-jump-arc" data-aid="${esc(a.arc_id)}" style="font-size:11px;padding:1px 6px;height:auto;">${esc(a.title || a.arc_id)}${a.order != null ? `(序${esc(a.order)})` : ''}</button>`)
             .join('');
           const linkEntries = Object.entries(n.links || {})
             .filter(([tid, w]) => w > 0 && byId.has(tid))
@@ -1183,8 +1205,8 @@ export async function openCorpusModal(initialTab = 'basic') {
         renderAliasesEditor();
         renderGlossaryEditor();
       }
-      const newLlm = state.index?.stats?.llm_scenes || 0;
-      const newTot = state.index?.stats?.scenes || totalScenes;
+      const newLlm = Number(state.index?.stats?.llm_scenes) || 0;
+      const newTot = Number(state.index?.stats?.scenes || totalScenes) || 0;
       if ($('#ccUpgCoverage')) {
         $('#ccUpgCoverage').innerHTML = isAborted
           ? `当前 LLM 目录覆盖度：<b>${newLlm}</b> / ${newTot} 幕（已暂停并保存断点，可随时点击「开始原地补全 LLM 目录」续传）`
@@ -1248,14 +1270,18 @@ export async function openCorpusModal(initialTab = 'basic') {
           skipMeta: !$('#ccUpgSynthMeta').checked,
           force: $('#ccUpgForce').checked,
         });
+        if (seq !== modalSeq) return;
         attachUpgJob(res.job, Boolean(res.reused));
       } catch (e) {
+        if (seq !== modalSeq) return;
         $('#ccUpgJobStatus').textContent = '提交失败: ' + e.message;
         upgBtn.disabled = false;
       }
     });
 
     $('#ccSaveBtn').addEventListener('click', async () => {
+      const btn = $('#ccSaveBtn');
+      btn.disabled = true;
       try {
         const splitLines = (v) => v.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
         const splitComma = (v) => v.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
@@ -1307,9 +1333,12 @@ export async function openCorpusModal(initialTab = 'basic') {
         state.corpora = listRes.corpora || [];
         await actions.switchCorpus?.(c.id, { keepRun: true });
         showToast(`书库「${c.id}」配置已更新并热重载`, 'ok');
+        if (seq !== modalSeq) return;
         closeModal();
       } catch (e) {
         showToast('保存失败: ' + e.message, 'err');
+      } finally {
+        if (seq === modalSeq) btn.disabled = false;
       }
     });
   } catch (e) {
@@ -1354,7 +1383,7 @@ export function openImportModal() {
     ...state.corpora.map((c) => `<option value="${esc(c.id)}">追加到已有书库：${esc(c.name)} (${esc(c.id)})</option>`),
   ].join('');
 
-  openDialog(`
+  const seq = openDialog(`
     <div class="modal-head">
       <span class="modal-title">网页导入建树（小说 / 世界书 / 设定档案）</span>
       <button class="btn-ghost" data-close-modal>✕</button>
@@ -1667,7 +1696,7 @@ export function openImportModal() {
     const kind = $('#impKind').value;
     const appendTo = kind === 'novel' ? ($('#impAppendTo')?.value || '') : '';
     const mergeInto = kind === 'lore' ? $('#impMergeInto').value : '';
-    const corpusId = (appendTo || $('#impCorpusId').value).trim();
+    const corpusId = (appendTo || mergeInto || $('#impCorpusId').value).trim();
     if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(corpusId)) {
       return showToast('书库 ID 仅支持英文/数字/连字符', 'err');
     }
@@ -1684,6 +1713,7 @@ export function openImportModal() {
 
     try {
       const contentBase64 = await readBase64(selectedFile);
+      if (seq !== modalSeq) return;
       const isLorepack = selectedFile.name.toLowerCase().endsWith('.lorepack.json');
       const res = await importCorpus({
         kind,
@@ -1702,6 +1732,7 @@ export function openImportModal() {
         stripBlocks: $('#impStripBlocks')?.value || '',
         selectedUids: kind === 'lore' && !isLorepack ? selectedLoreUids() : null,
       });
+      if (seq !== modalSeq) return;
 
       const jobId = res.job.id;
       const targetId = res.job.corpusId;
@@ -1726,10 +1757,11 @@ export function openImportModal() {
           },
           onDone: async (j) => {
             state.sceneCache.clear();
-            $('#impJobStatus').textContent = `LLM 目录构建完成（耗时 ${formatDurationZh(j?.progress?.elapsedMs)}）！书库 "${targetId}" 已就绪`;
             const listRes = await fetchCorpora();
             state.corpora = listRes.corpora || [];
             showToast(`书库「${targetId}」LLM 智能目录构建完成！`, 'ok');
+            if (seq !== modalSeq) return;
+            $('#impJobStatus').textContent = `LLM 目录构建完成（耗时 ${formatDurationZh(j?.progress?.elapsedMs)}）！书库 "${targetId}" 已就绪`;
             if (startLlmBtn) startLlmBtn.style.display = 'none';
             switchBtn.style.display = 'inline-flex';
           },
@@ -1737,8 +1769,9 @@ export function openImportModal() {
             state.sceneCache.clear();
             const listRes = await fetchCorpora();
             state.corpora = listRes.corpora || [];
-            $('#impJobStatus').textContent = `已暂停 LLM 建立目录并保存断点，可随时点击「继续 LLM 建立目录」续传`;
             showToast(`书库「${targetId}」已保存断点，可随时继续`, 'ok');
+            if (seq !== modalSeq) return;
+            $('#impJobStatus').textContent = `已暂停 LLM 建立目录并保存断点，可随时点击「继续 LLM 建立目录」续传`;
             if (startLlmBtn) {
               startLlmBtn.disabled = false;
               startLlmBtn.textContent = '继续 LLM 建立目录';
@@ -1746,6 +1779,7 @@ export function openImportModal() {
             }
           },
           onError: (j) => {
+            if (seq !== modalSeq) return;
             $('#impJobStatus').textContent = `LLM 目录构建失败: ${j.error}`;
             if (startLlmBtn) startLlmBtn.disabled = false;
           },
@@ -1762,12 +1796,19 @@ export function openImportModal() {
         runningText: (job) => `正在离线切分入库 (${job.kind})...`,
         onDone: async (job) => {
           state.sceneCache.clear();
+          const listRes = await fetchCorpora();
+          state.corpora = listRes.corpora || [];
+          const canManualLlm = kind === 'novel' && !isLorepack;
+          showToast(
+            canManualLlm ? `书库「${targetId}」已离线入库，确认无误后可手动启动 LLM 建目录` : `书库「${targetId}」导入成功！`,
+            'ok'
+          );
+          if (seq !== modalSeq) return;
           const wrap = $('#impSplitPreviewWrap');
           if (wrap && !wrap.innerHTML.trim() && job?.structureReport) {
             wrap.innerHTML = renderSplitPreviewHtml(job.structureReport, null);
             wrap.style.display = 'flex';
           }
-          const canManualLlm = kind === 'novel' && !isLorepack;
           $('#impJobStatus').textContent = canManualLlm
             ? `离线切分完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！书库 "${targetId}" 已入库，请确认结构无误后点击「开始 LLM 建立目录」`
             : `导入完成（耗时 ${formatDurationZh(job?.progress?.elapsedMs)}）！书库 "${targetId}" 已入库`;
@@ -1777,12 +1818,7 @@ export function openImportModal() {
               $('#impJobStatus').textContent += `。其中 ${activeImported} 条在酒馆世界书里仍是启用状态，会继续常驻或按关键词注入；如需改由 LoreCodex 按需检索，请在世界书里关闭它们`;
             }
           }
-          const listRes = await fetchCorpora();
-          state.corpora = listRes.corpora || [];
-          showToast(
-            canManualLlm ? `书库「${targetId}」已离线入库，确认无误后可手动启动 LLM 建目录` : `书库「${targetId}」导入成功！`,
-            'ok'
-          );
+          startBtn.disabled = false;
           switchBtn.style.display = 'inline-flex';
           switchBtn.onclick = async () => {
             await actions.switchCorpus?.(targetId);
@@ -1801,8 +1837,10 @@ export function openImportModal() {
                   skipMeta: false,
                   force: false,
                 });
+                if (seq !== modalSeq) return;
                 attachManualLlmUpgrade(upgRes.job);
               } catch (e) {
+                if (seq !== modalSeq) return;
                 $('#impJobStatus').textContent = '提交 LLM 任务失败: ' + e.message;
                 startLlmBtn.disabled = false;
               }
@@ -1814,6 +1852,7 @@ export function openImportModal() {
           const listRes = await fetchCorpora();
           state.corpora = listRes.corpora || [];
           showToast(`书库「${targetId}」已保存断点，打开后可在语料配置继续补全`, 'ok');
+          if (seq !== modalSeq) return;
           const switchBtn = $('#impDoneSwitchBtn');
           switchBtn.style.display = 'inline-flex';
           switchBtn.onclick = async () => {
@@ -1823,11 +1862,13 @@ export function openImportModal() {
           startBtn.disabled = false;
         },
         onError: (job) => {
+          if (seq !== modalSeq) return;
           $('#impJobStatus').textContent = `构建失败: ${job.error}`;
           startBtn.disabled = false;
         },
       });
     } catch (e) {
+      if (seq !== modalSeq) return;
       $('#impJobStatus').textContent = '提交失败: ' + e.message;
       startBtn.disabled = false;
     }
@@ -1980,7 +2021,7 @@ export async function openStSettingsModal() {
     if (seq !== modalSeq) return;
     const st = reply.settings || {};
     const arcs = state.index?.arcs || [];
-    const maxAvail = state.index?.stats?.max_order || state.corpusMeta?.stats?.max_order || 0;
+    const maxAvail = Number(state.index?.stats?.max_order || state.corpusMeta?.stats?.max_order) || 0;
     const curOrder = Math.max(0, Math.floor(Number(st.maxOrder) || 0));
 
     // Build human-readable spoiler gate options (per-arc if <=60 arcs, else per-series ceiling)

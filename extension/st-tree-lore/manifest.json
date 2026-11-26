@@ -7,6 +7,6 @@
   "css": "style.css",
   "generate_interceptor": "loreCodexGenerateInterceptor",
   "author": "LoreCodex",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "homePage": "https://github.com/lena13144/lorecodex"
 }

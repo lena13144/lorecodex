@@ -349,8 +349,8 @@ function renderArcOverviewSheet(sheet, arc) {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
       <span style="font-family:var(--heading-font);font-weight:700;font-size:15px;">分幕目录</span>
       <div style="display:flex;gap:8px;">
-        ${arc.scenes.length ? `<button id="startReadFirstBtn">从第一幕精读</button>` : ''}
-        ${arc.scenes.length ? `<button id="readContinuousBtn" class="btn-seal">连读整卷正文</button>` : ''}
+        ${(arc.scenes || []).length ? `<button id="startReadFirstBtn">从第一幕精读</button>` : ''}
+        ${(arc.scenes || []).length ? `<button id="readContinuousBtn" class="btn-seal">连读整卷正文</button>` : ''}
       </div>
     </div>
 

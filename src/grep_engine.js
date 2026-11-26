@@ -140,7 +140,7 @@ function orderMatchedHits(pool, sortBy) {
     seenIds.add(h.node_id);
     arcCounts.set(h.arc_id, (arcCounts.get(h.arc_id) || 0) + 1);
   }
-  for (const passLimit of [2, 99]) {
+  for (const passLimit of [2, Infinity]) {
     for (const h of mains) {
       if (seenIds.has(h.node_id)) continue;
       if ((arcCounts.get(h.arc_id) || 0) >= passLimit) continue;
@@ -208,6 +208,22 @@ function createGrepEngine(searchableScenes, corpusConfig) {
       return { kind: 'terms', terms: expandAliases(tk).map((a) => a.toLowerCase()) };
     });
 
+    if (!groups.length) {
+      return {
+        took_ms: 0,
+        total: 0,
+        cameo_count: 0,
+        all_matched: false,
+        sort_by: sortBy,
+        offset,
+        limit,
+        has_more: false,
+        next_offset: null,
+        buckets: [],
+        hits: [],
+      };
+    }
+
     const flatAliases = [...new Set(groups.flatMap((g) => g.terms))];
     const activeRegexes = groups.filter((g) => g.kind === 'regex').map((g) => g.re);
 
@@ -257,7 +273,7 @@ function createGrepEngine(searchableScenes, corpusConfig) {
           }
         }
 
-        if (requireAll ? groupsHit < groups.length : groupsHit === 0) continue;
+        if (groupsHit === 0 || (requireAll && groupsHit < groups.length)) continue;
 
         const inMeta = !activeRegexes.length && flatAliases.some((a) => sc.metaHay.includes(a));
         const cameo = !inMeta;

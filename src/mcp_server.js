@@ -46,28 +46,67 @@ function parseOptionalTemp(val) {
 function loadRuntimeConfig() {
   const base = {
     defaultCorpus: 'demo-chronicles',
-    chatBase:
-      process.env.CHAT_BASE ||
-      process.env.OPENAI_BASE_URL ||
-      (process.env.DEEPSEEK_API_KEY ? 'https://api.deepseek.com/v1' : 'https://api.openai.com/v1'),
-    chatKey: process.env.CHAT_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || '',
-    chatModel: process.env.CHAT_MODEL || 'deepseek-chat',
-    maxTokens: process.env.CHAT_MAX_TOKENS ? Number(process.env.CHAT_MAX_TOKENS) || null : null,
-    temperature: parseOptionalTemp(process.env.CHAT_TEMPERATURE),
-    reasoningEffort: String(process.env.CHAT_REASONING_EFFORT || '').trim().toLowerCase() || null,
+    chatBase: '',
+    chatKey: '',
+    chatModel: 'deepseek-chat',
+    maxTokens: null,
+    temperature: null,
+    reasoningEffort: null,
   };
   if (fs.existsSync(CONFIG_PATH)) {
     try {
       const fileCfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-      Object.assign(base, fileCfg);
+      if (fileCfg && typeof fileCfg === 'object') {
+        Object.assign(base, fileCfg);
+      }
     } catch (_) {}
   }
-  base.temperature = parseOptionalTemp(base.temperature);
-  base.reasoningEffort = String(base.reasoningEffort ?? base.reasoning_effort ?? '').trim().toLowerCase() || null;
+  const envChatBase = String(process.env.CHAT_BASE || process.env.OPENAI_BASE_URL || '').trim();
+  const envChatKey = String(process.env.CHAT_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || '').trim();
+  const envChatModel = String(process.env.CHAT_MODEL || '').trim();
+  const envMaxTokens = String(process.env.CHAT_MAX_TOKENS || '').trim();
+  if (envChatBase) base.chatBase = envChatBase;
+  if (envChatKey) base.chatKey = envChatKey;
+  if (envChatModel) base.chatModel = envChatModel;
+  if (!base.chatBase) {
+    base.chatBase = process.env.DEEPSEEK_API_KEY ? 'https://api.deepseek.com/v1' : 'https://api.openai.com/v1';
+  }
+  const rawMaxTokens = envMaxTokens || base.maxTokens || base.max_tokens;
+  const parsedMaxTokens = Number(rawMaxTokens);
+  base.maxTokens = Number.isFinite(parsedMaxTokens) && parsedMaxTokens > 0 ? Math.floor(parsedMaxTokens) : null;
+  if (process.env.CHAT_TEMPERATURE !== undefined && String(process.env.CHAT_TEMPERATURE).trim() !== '') {
+    base.temperature = parseOptionalTemp(process.env.CHAT_TEMPERATURE);
+  } else {
+    base.temperature = parseOptionalTemp(base.temperature);
+  }
+  const envEffort = String(process.env.CHAT_REASONING_EFFORT || '').trim();
+  base.reasoningEffort = (envEffort || String(base.reasoningEffort ?? base.reasoning_effort ?? '').trim()).toLowerCase() || null;
   base.llmStream = base.llmStream !== false && !/^(0|false|no|off)$/i.test(String(process.env.CHAT_STREAM || '').trim());
   if (cli.defaultCorpus) base.defaultCorpus = cli.defaultCorpus;
   if (process.env.DEFAULT_CORPUS) base.defaultCorpus = process.env.DEFAULT_CORPUS;
   return base;
+}
+
+const corpusWriteLocks = new Map();
+
+async function withCorpusLock(corpusId, fn) {
+  const key = String(corpusId || '').trim();
+  const prev = corpusWriteLocks.get(key) || Promise.resolve();
+  let release;
+  const next = new Promise((resolve) => {
+    release = resolve;
+  });
+  const chained = prev.then(() => next, () => next);
+  corpusWriteLocks.set(key, chained);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (corpusWriteLocks.get(key) === chained) {
+      corpusWriteLocks.delete(key);
+    }
+  }
 }
 
 const corpusManager = createCorpusManager(CORPORA_DIR);
@@ -326,6 +365,9 @@ async function handleToolCall(name, args = {}) {
   if (name === 'lorecodex_list_series') {
     const cid = resolveCorpusId(args.corpus);
     const agent = corpusManager.getAgent(cid);
+    if (!agent?.loaded) {
+      throw new Error(`Corpus "${cid}" is not loaded (missing or invalid tree_index.json / tree_texts.json).`);
+    }
     const idx = agent.getTreeIndex({ maxOrder: args.max_order });
     const kw = String(args.keyword || '').trim().toLowerCase();
     const seriesMap = new Map();
@@ -375,6 +417,9 @@ async function handleToolCall(name, args = {}) {
   if (name === 'lorecodex_list_arcs') {
     const cid = resolveCorpusId(args.corpus);
     const agent = corpusManager.getAgent(cid);
+    if (!agent?.loaded) {
+      throw new Error(`Corpus "${cid}" is not loaded (missing or invalid tree_index.json / tree_texts.json).`);
+    }
     const idx = agent.getTreeIndex({ maxOrder: args.max_order });
     const ser = String(args.series || '').trim().toLowerCase();
     const cat = String(args.category || '').trim().toLowerCase();
@@ -437,6 +482,9 @@ async function handleToolCall(name, args = {}) {
   if (name === 'lorecodex_expand_arc') {
     const cid = resolveCorpusId(args.corpus);
     const agent = corpusManager.getAgent(cid);
+    if (!agent?.loaded) {
+      throw new Error(`Corpus "${cid}" is not loaded (missing or invalid tree_index.json / tree_texts.json).`);
+    }
     const idx = agent.getTreeIndex({ maxOrder: args.max_order });
     const arcMap = new Map((idx.arcs || []).map((a) => [String(a.arc_id), a]));
     const wanted = (Array.isArray(args.arc_ids) ? args.arc_ids : []).map((x) => String(x).trim()).slice(0, 10);
@@ -598,6 +646,8 @@ async function handleToolCall(name, args = {}) {
       windowsHide: true,
     };
 
+    const lockTarget = action === 'build_lore' && mergeInto ? mergeInto : corpusId;
+    return withCorpusLock(lockTarget, async () => {
     try {
       if (action === 'upgrade') {
         const pyArgs = [
@@ -675,10 +725,12 @@ async function handleToolCall(name, args = {}) {
         } catch (_) {}
       }
     }
+    });
   }
 
   if (name === 'lorecodex_update_index_meta') {
     const cid = resolveCorpusId(args.corpus);
+    return withCorpusLock(cid, async () => {
     const corpusDir = path.join(CORPORA_DIR, cid);
     const { indexPath: idxPath } = resolveCorpusFiles(corpusDir);
     const cfgFilePath = path.join(corpusDir, 'corpus.json');
@@ -812,6 +864,7 @@ async function handleToolCall(name, args = {}) {
 
     corpusManager.reloadCorpus(cid);
     return `[${cid}] Updated LLM directory metadata and hot-reloaded: scenes=${updatedScenes}, arcs=${updatedArcs}, series_summaries=${updatedSeries}, alias_groups_merged=${addedAliasGroups}, glossary_added=${addedGlossary}`;
+    });
   }
 
   throw new Error(`Unknown MCP tool: ${name}`);

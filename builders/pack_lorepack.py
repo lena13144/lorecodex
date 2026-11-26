@@ -19,26 +19,41 @@ import argparse
 import datetime
 import json
 import os
+import secrets
 import sys
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 
 def load_json(path, default=None):
     if not os.path.exists(path):
         return default
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 
 def save_json(path, obj, compact=False):
     abs_path = os.path.abspath(path)
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-    tmp_path = abs_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        if compact:
-            json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
-        else:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, abs_path)
+    tmp_path = f"{abs_path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            if compact:
+                json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
+            else:
+                json.dump(obj, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, abs_path)
+    except BaseException:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def merge_alias_groups(existing, incoming):
@@ -149,18 +164,23 @@ def apply_meta_file(index_data, corpus_cfg, meta_path):
 
     for arc in index_data.get("arcs") or []:
         aid = str(arc.get("arc_id") or "")
+        arc_updated_desc = False
         if aid and aid in arc_updates:
             val = arc_updates[aid]
             if isinstance(val, str) and val.strip():
                 arc["description"] = val.strip()
+                arc_updated_desc = True
                 arc_hits += 1
             elif isinstance(val, dict):
                 desc = str(val.get("summary") or val.get("description") or "").strip()
                 if desc:
                     arc["description"] = desc
+                    arc_updated_desc = True
                 if isinstance(val.get("characters"), list):
                     arc["characters"] = [str(x).strip() for x in val["characters"] if str(x).strip()]
                 arc_hits += 1
+        if arc_updated_desc:
+            arc["_llm_desc"] = True
 
         scenes = arc.get("scenes") or []
         all_done = bool(scenes)
@@ -193,12 +213,17 @@ def apply_meta_file(index_data, corpus_cfg, meta_path):
             arc["characters"] = list(dict.fromkeys(scene_chars + list(arc.get("characters") or [])))[:8]
 
         if all_done and scenes:
-            arc["_llm_done"] = True
-            # Single-scene arcs: the scene summary is the arc description (same as build_novel.py --upgrade).
-            if len(scenes) == 1 and aid not in arc_updates:
-                arc["description"] = str(scenes[0].get("summary") or "").strip() or arc.get("description", "")
-                if scenes[0].get("characters"):
-                    arc["characters"] = list(scenes[0]["characters"])[:8]
+            if len(scenes) == 1:
+                arc["_llm_done"] = True
+                arc.pop("_llm_desc", None)
+                # Single-scene arcs: the scene summary is the arc description (same as build_novel.py --upgrade).
+                if aid not in arc_updates:
+                    arc["description"] = str(scenes[0].get("summary") or "").strip() or arc.get("description", "")
+                    if scenes[0].get("characters"):
+                        arc["characters"] = list(scenes[0]["characters"])[:8]
+            elif (arc_updated_desc or arc.get("_llm_desc") or arc.get("_llm_done")) and str(arc.get("description") or "").strip():
+                arc["_llm_done"] = True
+                arc.pop("_llm_desc", None)
 
     if isinstance(series_updates, dict) and series_updates:
         ss = index_data.setdefault("series_summaries", {})
@@ -259,8 +284,11 @@ def recompute_stats(index_data, texts_data):
             else:
                 arc_done = False
         if arc_done and scenes:
-            arc["_llm_done"] = True
-            llm_arcs += 1
+            if len(scenes) == 1:
+                arc["_llm_done"] = True
+                llm_arcs += 1
+            elif arc.get("_llm_done") and str(arc.get("description") or "").strip():
+                llm_arcs += 1
 
     stats = index_data.setdefault("stats", {})
     stats["arcs"] = len(arcs)
@@ -339,6 +367,15 @@ def main():
 
     summary = recompute_stats(index_data, texts_data)
 
+    if args.apply_meta and unknown_total and args.strict:
+        sys.exit(4)
+
+    if summary["missing_texts"]:
+        msg = f"[pack_lorepack] WARN: {len(summary['missing_texts'])} scene(s) missing in tree_texts.json: {summary['missing_texts'][:5]}"
+        print(msg, file=sys.stderr)
+        if args.strict:
+            sys.exit(3)
+
     if args.apply_meta:
         save_json(idx_path, index_data, compact=False)
         save_json(cfg_path, corpus_cfg, compact=False)
@@ -351,14 +388,6 @@ def main():
             manifest = refresh_manifest_status(load_json(manifest_path), index_data)
             save_json(manifest_path, manifest)
             print_status(manifest)
-        if unknown_total and args.strict:
-            sys.exit(4)
-
-    if summary["missing_texts"]:
-        msg = f"[pack_lorepack] WARN: {len(summary['missing_texts'])} scene(s) missing in tree_texts.json: {summary['missing_texts'][:5]}"
-        print(msg, file=sys.stderr)
-        if args.strict:
-            sys.exit(3)
 
     out_path = os.path.abspath(args.out) if args.out else os.path.abspath(f"{cid}.lorepack.json")
     pack = {
