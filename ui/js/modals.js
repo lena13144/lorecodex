@@ -1319,6 +1319,29 @@ export async function openCorpusModal(initialTab = 'basic') {
   }
 }
 
+export function suggestCorpusId(stem, existingIds = []) {
+  const raw = String(stem || '').trim();
+  const ascii = raw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  let base = ascii;
+  if (!base || /[^\x00-\x7f]/.test(raw)) {
+    let h = 2166136261;
+    for (let i = 0; i < raw.length; i++) {
+      h ^= raw.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    const suffix = (h >>> 0).toString(36).slice(0, 7);
+    base = base ? `${base.slice(0, 32).replace(/-+$/, '')}-${suffix}` : `book-${suffix}`;
+  }
+  base = base.slice(0, 40).replace(/-+$/, '') || 'custom-book';
+  const taken = existingIds instanceof Set ? existingIds : new Set(existingIds || []);
+  if (!taken.has(base)) return base;
+  for (let n = 2; n < 10000; n++) {
+    const cand = `${base}-${n}`;
+    if (!taken.has(cand)) return cand;
+  }
+  return `${base}-${Date.now().toString(36).slice(-4)}`;
+}
+
 export function openImportModal() {
   let selectedFile = null;
 
@@ -1588,8 +1611,10 @@ export function openImportModal() {
     } else {
       $('#impFileInfo').textContent = `已选择: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
     }
+    const startBtn = $('#impStartBtn');
+    if (startBtn) startBtn.disabled = false;
     const stem = file.name.replace(/\.lorepack\.json$/i, '').replace(/\.[^.]+$/, '');
-    const slug = stem.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'custom-book';
+    const slug = suggestCorpusId(stem, state.corpora.map((c) => c.id));
     const curId = $('#impCorpusId').value.trim();
     const curName = $('#impName').value.trim();
     if (!curId || curId === lastAutoSlug) {
@@ -1641,9 +1666,16 @@ export function openImportModal() {
     }
     const kind = $('#impKind').value;
     const appendTo = kind === 'novel' ? ($('#impAppendTo')?.value || '') : '';
+    const mergeInto = kind === 'lore' ? $('#impMergeInto').value : '';
     const corpusId = (appendTo || $('#impCorpusId').value).trim();
     if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(corpusId)) {
       return showToast('书库 ID 仅支持英文/数字/连字符', 'err');
+    }
+    if (!mergeInto && !appendTo) {
+      const dup = state.corpora.find((c) => c.id === corpusId);
+      if (dup && !window.confirm(`书库「${dup.name || dup.id}」(${corpusId}) 已存在，继续导入将覆盖原有内容。\n如需保留两本书，请点取消并修改「目标书库 ID」。确定覆盖吗？`)) {
+        return;
+      }
     }
     const startBtn = $('#impStartBtn');
     startBtn.disabled = true;
@@ -1653,7 +1685,6 @@ export function openImportModal() {
     try {
       const contentBase64 = await readBase64(selectedFile);
       const isLorepack = selectedFile.name.toLowerCase().endsWith('.lorepack.json');
-      const mergeInto = kind === 'lore' ? $('#impMergeInto').value : '';
       const res = await importCorpus({
         kind,
         corpusId,
