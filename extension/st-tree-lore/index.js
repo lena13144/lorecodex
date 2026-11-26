@@ -278,11 +278,14 @@ function collectRecentChat(chat, maxTurns) {
     return (chat || [])
         .filter(m => m && !m.is_system && m.mes && !String(m.mes).startsWith('[Pi 工作流]'))
         .slice(-(turns * 2))
-        .map(m => ({
-            role: m.is_user ? 'user' : 'assistant',
-            name: m.name || '',
-            text: cleanMessage(m.mes).slice(0, 500),
-        }))
+        .map(m => {
+            const t = cleanMessage(m.mes);
+            return {
+                role: m.is_user ? 'user' : 'assistant',
+                name: m.name || '',
+                text: t.length <= 3500 ? t : (t.slice(0, 1200) + '\n…\n' + t.slice(-2300)),
+            };
+        })
         .filter(m => m.text);
 }
 
@@ -801,7 +804,8 @@ function clearInjection(cfg) {
  */
 function buildRetrievalInput(chat) {
     const lastUserMsg = (chat || []).filter(m => m && m.is_user && !m.is_system && m.mes).slice(-1)[0];
-    const query = lastUserMsg ? cleanMessage(lastUserMsg.mes).slice(0, 500) : '';
+    const rawQ = lastUserMsg ? cleanMessage(lastUserMsg.mes) : '';
+    const query = rawQ.length <= 3500 ? rawQ : (rawQ.slice(0, 1200) + '\n…\n' + rawQ.slice(-2300));
     const onDemand = query && USER_QUOTE_RE.test(query) ? query : '';
     const sessionRecall = lastUserMsg ? extractSessionRecall(lastUserMsg.mes) : [];
     return { query, onDemand, sessionRecall };

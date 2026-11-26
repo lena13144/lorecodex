@@ -331,7 +331,8 @@ function buildUserMessage({ query, recentChat, sceneAnchor, sessionRecall, onDem
       .slice(-10)
       .map((m) => {
         const who = m.name || (m.role === 'user' ? sceneAnchor?.userName || '用户' : sceneAnchor?.charName || '角色');
-        const txt = String(m.text || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+        const rawTxt = String(m.text || '').replace(/\s+/g, ' ').trim();
+        const txt = rawTxt.length <= 3500 ? rawTxt : `${rawTxt.slice(0, 1200)} … ${rawTxt.slice(-2300)}`;
         return txt ? `[${who}]: ${txt}` : '';
       })
       .filter(Boolean);
