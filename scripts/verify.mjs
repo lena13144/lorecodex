@@ -630,11 +630,6 @@ with zipfile.ZipFile(epub_path, "w") as zf:
       assert(postIdx.series_summaries?.['第1卷'] && postIdx.series_summaries?.['第2卷'], 'Both series summaries present');
       assert.strictEqual(postIdx.stats.llm_scenes, 4);
       assert.strictEqual(postIdx.stats.llm_arcs, 3);
-      const graphPath = path.join(outDir, 'llm-upgrade-smoke', 'graph.json');
-      assert(fs.existsSync(graphPath), 'LLM build/upgrade must auto-generate graph.json');
-      const graphEdges = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
-      const partnerEdge = graphEdges.find((e) => e.s === '白川澄' && e.r === '搭档' && e.o === '林夜');
-      assert(partnerEdge && partnerEdge.w >= 1, 'graph.json must contain synthesized 白川澄 -> 林夜 edge with w >= 1');
 
       // A null/empty content body must surface an actionable error naming the token
       // budget, not a bare "TypeError: expected string or bytes-like object".
@@ -1009,6 +1004,331 @@ with zipfile.ZipFile(r"${relEpubPath.replace(/\\/g, '\\\\')}", "w") as zf:
   }
 }
 
+async function testLibrarianMemory() {
+  console.log('\n[7.7/9] Testing Living Librarian Memory (matching, spoiler-gate, growth, lock, HTTP API & browser loop)...');
+  const { createRequire } = await import('module');
+  const req = createRequire(import.meta.url);
+  const lm = req('../src/librarian_memory.js');
+
+  // 1. Unit tests: match, spoiler-gate, growth/merge, lock protection, prune
+  let notes = [];
+  const r1 = lm.recordLibrarianNote(notes, {
+    topic: '星港信标与零号机密',
+    triggers: ['星港信标', '零号', 'Zero-7'],
+    summary: '记录星港信标启动与零号身份线索。',
+    refs: [
+      { node_id: '0001', arc_id: 'a1', title: '第一章', order: 1 },
+      { node_id: '0005', arc_id: 'a5', title: '第五章', order: 5 },
+    ],
+  });
+  notes = r1.notes;
+  assert.strictEqual(r1.saved.action, 'created');
+  assert.strictEqual(notes.length, 1);
+
+  // Spoiler gate: maxOrder=3 hides order=5 ref, keeps order=1 ref
+  const hitGated = lm.matchLibrarianNotes(notes, '查一下星港信标和零号机密', { maxOrder: 3 });
+  assert.strictEqual(hitGated.length, 1, 'Note with visible ref must match under maxOrder=3');
+  assert.deepStrictEqual(
+    hitGated[0].refs.map((r) => r.node_id),
+    ['0001'],
+    'Spoiler ref (order=5) must be filtered out under maxOrder=3'
+  );
+
+  // Spoiler-only note must be completely hidden when maxOrder < min ref order
+  const spoilerOnly = lm.recordLibrarianNote(notes, {
+    topic: '苍穹之心真相',
+    triggers: ['苍穹之心', '终局核心'],
+    summary: '第五章才揭晓的终局核心。',
+    refs: [{ node_id: '0005', arc_id: 'a5', title: '第五章', order: 5 }],
+  }).notes;
+  const hiddenHits = lm.matchLibrarianNotes(spoilerOnly, '苍穹之心是什么', { maxOrder: 3 });
+  assert.strictEqual(hiddenHits.length, 0, 'Note with only future refs must be hidden under maxOrder=3');
+
+  // Growth/merge: overlapping refs should merge triggers and increment hits
+  const r2 = lm.recordLibrarianNote(
+    notes,
+    {
+      topic: '星港信标与零号机密',
+      triggers: ['古代信标'],
+      summary: '记录星港信标启动、零号身份与古代信标线索。',
+      refs: [{ node_id: '0001', arc_id: 'a1', title: '第一章', order: 1 }],
+    },
+    { matchedIds: [notes[0].id] }
+  );
+  notes = r2.notes;
+  assert.strictEqual(r2.saved.action, 'merged');
+  assert.strictEqual(notes[0].hits, 2);
+  assert(notes[0].triggers.includes('古代信标'), 'Merged note must accumulate new triggers');
+
+  // Lock protection: locked note increments hits only, never overwrites summary/triggers
+  const lockedRes = lm.applyMemoryAction(notes, { action: 'toggle_lock', id: notes[0].id, locked: true });
+  notes = lockedRes.notes;
+  assert.strictEqual(notes[0].locked, true);
+  const r3 = lm.recordLibrarianNote(
+    notes,
+    {
+      topic: '星港信标与零号机密',
+      triggers: ['覆盖词'],
+      summary: '试图覆盖已锁定摘要的非常非常长的文本内容用于测试锁定保护机制是否生效',
+      refs: [{ node_id: '0001', arc_id: 'a1', title: '第一章', order: 1 }],
+    },
+    { matchedIds: [notes[0].id] }
+  );
+  notes = r3.notes;
+  assert.strictEqual(r3.saved.action, 'hit');
+  assert.strictEqual(notes[0].hits, 3);
+  assert(!notes[0].triggers.includes('覆盖词'), 'Locked note triggers must not be overwritten');
+
+  // Co-access associative recall (Horon-inspired): co-hit A while saving B -> next query for A alone recalls B (still spoiler-gated)
+  const noteA = notes[0];
+  const assocRes = lm.recordLibrarianNote(
+    notes,
+    {
+      topic: '星港旧案关联档案',
+      triggers: ['黑匣子密钥', '加密日志'],
+      summary: '与星港信标共现的加密日志。',
+      refs: [{ node_id: '0009', arc_id: 'a9', title: '第九章', order: 9 }],
+    },
+    { matchedIds: [noteA.id] }
+  );
+  const assocNotes = assocRes.notes;
+  const linkedHitsUnlocked = lm.matchLibrarianNotes(assocNotes, '查一下星港信标和零号机密', { maxOrder: null, limit: 5 });
+  assert(
+    linkedHitsUnlocked.some((n) => n.topic === '星港旧案关联档案' && n._linked_from === noteA.topic),
+    'Querying A alone must associatively pull co-accessed note B'
+  );
+  const linkedHitsGated = lm.matchLibrarianNotes(assocNotes, '查一下星港信标和零号机密', { maxOrder: 3, limit: 5 });
+  assert(
+    !linkedHitsGated.some((n) => n.topic === '星港旧案关联档案'),
+    'Associatively linked note B (order=9) must remain hidden under maxOrder=3'
+  );
+  // Decay & pruning: stale edge near threshold (0.051 * 0.95 < 0.05) must be auto-pruned on next reinforcement
+  const withStale = assocNotes.map((n) => (n.id === noteA.id ? { ...n, links: { ...(n.links || {}), mem_stale: 0.051 } } : n));
+  const afterDecay = lm.recordLibrarianNote(
+    withStale,
+    {
+      topic: '星港旧案关联档案',
+      triggers: ['黑匣子密钥'],
+      summary: '与星港信标共现的加密日志。',
+      refs: [{ node_id: '0009', arc_id: 'a9', title: '第九章', order: 9 }],
+    },
+    { matchedIds: [noteA.id] }
+  ).notes;
+  const noteAAfter = afterDecay.find((n) => n.id === noteA.id);
+  assert(!('mem_stale' in (noteAAfter?.links || {})), 'Decayed link below 0.05 threshold must be pruned');
+
+  // Alias expansion must match into long topics/triggers, and forced/empty memory_note must not pollute memory
+  const aliasHits = lm.matchLibrarianNotes(
+    [{ id: 'm_al', topic: '闪电的废弃恐惧与红洋葱断片', triggers: ['闪电', '红洋葱'], summary: 'x', refs: [{ node_id: '0100', order: 1 }], hits: 1 }],
+    'Groza 的红洋葱心结是什么？',
+    { expandAliases: (t) => (t.toLowerCase() === 'groza' ? ['Groza', '闪电'] : [t]) }
+  );
+  assert.strictEqual(aliasHits.length, 1, 'Alias expansion (Groza -> 闪电) must match note');
+  assert.strictEqual(
+    lm.deriveNoteFromSearch({ parsedMemoryNote: null, guide: 'g', scenes: [{ node_id: '0001' }], forcedFinal: false }),
+    null,
+    'Missing explicit memory_note must not create noisy question-text note'
+  );
+  assert.strictEqual(
+    lm.deriveNoteFromSearch({ parsedMemoryNote: { topic: '有效主题' }, guide: 'g', scenes: [{ node_id: '0001' }], forcedFinal: true }),
+    null,
+    'Forced-final timeout turn must not write memory note'
+  );
+  // Empty matchedIds (matched but never read) must not create any spurious link
+  const noLinkRes = lm.recordLibrarianNote(
+    notes,
+    { topic: '完全无关的新侧面', triggers: ['无关侧面'], summary: 'x', refs: [{ node_id: '9999', order: 1 }] },
+    { matchedIds: [] }
+  ).notes;
+  const newSide = noLinkRes.find((n) => n.topic === '完全无关的新侧面');
+  assert.deepStrictEqual(newSide?.links || {}, {}, 'Unread matched note must not create spurious co-access links');
+
+  // Macro arc_refs support + spoiler-gate filtering on arc_refs
+  const macroNote = lm.deriveNoteFromSearch({
+    parsedMemoryNote: { topic: '星港大会战总览', triggers: ['星港大会战'], summary: '跨卷大会战' },
+    guide: 'g',
+    scenes: [{ node_id: '0001', order: 1 }],
+    outlines: [
+      { arc_id: 'arc_01', title: '序幕', order: 1 },
+      { arc_id: 'arc_09', title: '终战', order: 9 },
+    ],
+  });
+  const macroList = lm.recordLibrarianNote([], macroNote).notes;
+  const macroGated = lm.matchLibrarianNotes(macroList, '查星港大会战', { maxOrder: 3 });
+  assert.deepStrictEqual(
+    macroGated[0].arc_refs.map((a) => a.arc_id),
+    ['arc_01'],
+    'Macro arc_refs must also obey maxOrder spoiler gate'
+  );
+  assert.strictEqual(macroGated[0].summary, '', 'Note with trimmed higher-order refs/arc_refs must hide summary under maxOrder');
+
+  // Linked associative note must also filter arc_refs and hide spoiler summary under maxOrder
+  const linkedPair = [
+    {
+      id: 'mem_src_safe',
+      topic: '星港前期情报',
+      triggers: ['星港前期'],
+      summary: '安全前期摘要',
+      refs: [{ node_id: '0001', order: 1 }],
+      arc_refs: [{ arc_id: 'arc_01', order: 1 }],
+      links: { mem_dst_mixed: 0.8 },
+      hits: 2,
+    },
+    {
+      id: 'mem_dst_mixed',
+      topic: '终局真相线索',
+      triggers: ['绝密终局'],
+      summary: '包含第9章剧透的总结',
+      refs: [{ node_id: '0002', order: 2 }],
+      arc_refs: [{ arc_id: 'arc_01', order: 1 }, { arc_id: 'arc_09', order: 9 }],
+      links: { mem_src_safe: 0.8 },
+      hits: 2,
+    },
+  ];
+  const linkedGated = lm.matchLibrarianNotes(linkedPair, '查星港前期', { maxOrder: 3 });
+  const linkedHit = linkedGated.find((n) => n.id === 'mem_dst_mixed');
+  assert(linkedHit, 'Linked note with visible refs should still be recalled');
+  assert.deepStrictEqual(linkedHit.arc_refs.map((a) => a.arc_id), ['arc_01'], 'Linked note arc_refs must obey maxOrder');
+  assert.strictEqual(linkedHit.summary, '', 'Linked note with trimmed arc_refs must hide summary under maxOrder');
+
+  // applyMemoryAction: null payload safety + upsert preserves existing hits/locked
+  assert.throws(() => lm.applyMemoryAction(notes, null), /不支持的操作/);
+  const partialUpsert = lm.applyMemoryAction(
+    [{ id: 'mem_keep', topic: '旧主题', triggers: ['旧词'], summary: '旧摘要', refs: [{ node_id: '0001', order: 1 }], hits: 7, locked: true }],
+    { action: 'upsert', note: { id: 'mem_keep', topic: '新主题', triggers: ['新词'], summary: '新摘要', refs: [{ node_id: '0001', order: 1 }] } }
+  );
+  assert.strictEqual(partialUpsert.notes[0].hits, 7, 'Partial upsert must preserve hits');
+  assert.strictEqual(partialUpsert.notes[0].locked, true, 'Partial upsert must preserve locked');
+
+  // Capacity prune preserves locked entries
+  let bulk = [notes[0]];
+  for (let i = 0; i < 6; i++) {
+    bulk = lm.recordLibrarianNote(
+      bulk,
+      { topic: `冷门主题${i}`, triggers: [`冷门${i}`], summary: 'x', refs: [{ node_id: `n${i}`, order: i + 1 }] },
+      { maxNotes: 4 }
+    ).notes;
+  }
+  assert.strictEqual(bulk.length, 4);
+  assert(bulk.some((n) => n.id === notes[0].id && n.locked), 'Locked note must survive capacity pruning');
+
+  // 2. HTTP API integration test on demo-chronicles (clean up memory file afterwards)
+  const demoMemFile = path.join(ROOT, 'corpora', 'demo-chronicles', 'librarian_memory.json');
+  const hadMemFile = fs.existsSync(demoMemFile);
+  const prevMemContent = hadMemFile ? fs.readFileSync(demoMemFile, 'utf8') : null;
+  try {
+    const get0 = await getJson('/corpora/demo-chronicles/memory');
+    assert.strictEqual(get0.status, 200);
+    assert.strictEqual(get0.data.ok, true);
+
+    const up = await postJson('/corpora/demo-chronicles/memory', {
+      action: 'upsert',
+      note: {
+        id: 'mem_verify_demo',
+        topic: '灰烬星港零号档案',
+        triggers: ['灰烬星港', 'Zero-7'],
+        summary: '验证用管理员直达索引。',
+        refs: [{ node_id: '0001', arc_id: 'arc_1', title: '第1章', order: 1 }],
+      },
+    });
+    assert.strictEqual(up.status, 200);
+    assert(up.data.notes.some((n) => n.id === 'mem_verify_demo'), 'Upserted note must persist');
+
+    const lk = await postJson('/corpora/demo-chronicles/memory', { action: 'toggle_lock', id: 'mem_verify_demo', locked: true });
+    assert.strictEqual(lk.status, 200);
+    assert.strictEqual(lk.data.notes.find((n) => n.id === 'mem_verify_demo')?.locked, true);
+
+    const clr = await postJson('/corpora/demo-chronicles/memory', { action: 'clear', includeLocked: false });
+    assert.strictEqual(clr.status, 200);
+    assert(clr.data.notes.some((n) => n.id === 'mem_verify_demo'), 'clear(includeLocked=false) must keep locked note');
+
+    const badAct = await postJson('/corpora/demo-chronicles/memory', { action: 'invalid_action' });
+    assert.strictEqual(badAct.status, 400, 'Invalid memory action must return 400');
+
+    const del = await postJson('/corpora/demo-chronicles/memory', { action: 'delete', id: 'mem_verify_demo' });
+    assert.strictEqual(del.status, 200);
+    assert(!del.data.notes.some((n) => n.id === 'mem_verify_demo'), 'Deleted note must be removed');
+  } finally {
+    if (hadMemFile) fs.writeFileSync(demoMemFile, prevMemContent, 'utf8');
+    else fs.rmSync(demoMemFile, { force: true });
+  }
+
+  // 3. Browser engine end-to-end growth loop with mocked fetch (zero network cost)
+  const { pathToFileURL } = await import('url');
+  const be = await import(pathToFileURL(path.join(ROOT, 'extension', 'st-tree-lore', 'browser_engine.js')).href);
+  const demoDir = path.join(ROOT, 'corpora', 'demo-chronicles');
+  const demoPack = {
+    id: 'demo-chronicles',
+    config: JSON.parse(fs.readFileSync(path.join(demoDir, 'corpus.json'), 'utf8')),
+    indexData: JSON.parse(fs.readFileSync(path.join(demoDir, 'tree_index.json'), 'utf8')),
+    textsData: JSON.parse(fs.readFileSync(path.join(demoDir, 'tree_texts.json'), 'utf8')),
+    graphData: JSON.parse(fs.readFileSync(path.join(demoDir, 'graph.json'), 'utf8')),
+    librarianMemory: [],
+  };
+  const firstNodeId = demoPack.indexData.arcs[0].scenes[0].node_id;
+  const browserAgent = be.createBrowserTreeAgent(demoPack);
+  const origFetch = globalThis.fetch;
+  let capturedSecondUserPrompt = '';
+  let callSeq = 0;
+  globalThis.fetch = async (_url, opts) => {
+    callSeq += 1;
+    const body = JSON.parse(opts.body);
+    if (callSeq === 3) {
+      capturedSecondUserPrompt = body.messages?.[1]?.content || '';
+    }
+    const isReadTurn = callSeq === 1 || callSeq === 3;
+    const msg = isReadTurn
+      ? {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: `tc_${callSeq}`, type: 'function', function: { name: 'read_scene', arguments: JSON.stringify({ scene_node_ids: [firstNodeId] }) } }],
+        }
+      : {
+          role: 'assistant',
+          content: JSON.stringify({
+            skip: false,
+            selected_nodes: [firstNodeId],
+            selected_arcs: [],
+            timeline_note: '序幕阶段',
+            guide: `核实了 [${firstNodeId}] 的灰烬星港初遇。`,
+            memory_note: {
+              topic: '灰烬星港初遇与Zero-7',
+              triggers: ['灰烬星港', 'Zero-7', '初遇'],
+              summary: '灰烬星港初遇核心原文锚点。',
+            },
+          }),
+        };
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ choices: [{ message: msg }], usage: { prompt_tokens: 10, completion_tokens: 10 } }),
+      text: async () => JSON.stringify({ choices: [{ message: msg }] }),
+    };
+  };
+  try {
+    const res1 = await browserAgent.search(
+      { query: '灰烬星港里 Zero-7 的初遇是怎么回事？' },
+      { chatBase: 'http://mock.local/v1', chatKey: 'mock', chatModel: 'mock', llmStream: false }
+    );
+    assert.strictEqual(res1.librarian_memory.saved.action, 'created');
+    assert.strictEqual(browserAgent.getLibrarianMemory().length, 1);
+
+    const res2 = await browserAgent.search(
+      { query: '再查一下灰烬星港 Zero-7 初遇' },
+      { chatBase: 'http://mock.local/v1', chatKey: 'mock', chatModel: 'mock', llmStream: false }
+    );
+    assert(capturedSecondUserPrompt.includes('【图书馆管理员笔记'), 'Second search must inject Librarian Memory hints into user prompt');
+    assert.strictEqual(res2.librarian_memory.matched.length, 1, 'Second search must match existing Librarian Memory note');
+    assert.strictEqual(res2.librarian_memory.saved.action, 'merged');
+    assert.strictEqual(res2.librarian_memory.saved.hits, 2, 'Matched note hits must grow to 2');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+
+  console.log('  PASS: Librarian Memory matching, spoiler-gate, growth/merge, lock protection, HTTP API & browser loop verified');
+}
+
 function testHygieneAndSyntax() {
   console.log('\n[8/9] Checking secret hygiene, path hygiene, and JS syntax...');
   const badSecretHits = [];
@@ -1351,17 +1671,6 @@ async function testMcpAndBrowserEngine() {
       'In-Browser aliases synthesized and merged'
     );
     assert(builtNovelPack.config.glossary.some((g) => g.includes('灰烬星港')), 'In-Browser glossary synthesized');
-    assert(upgRes.relationsCount >= 2, 'In-Browser LLM upgrader must report synthesized relationsCount >= 2');
-    assert(
-      Array.isArray(builtNovelPack.graphData) && builtNovelPack.graphData.length >= 2,
-      'builtNovelPack.graphData must store synthesized knowledge graph triples'
-    );
-    const upgradedAgent = browserMod.createBrowserTreeAgent(builtNovelPack);
-    const graphRels = upgradedAgent.lookupGraph('苏璃在灰烬星港');
-    assert(
-      Array.isArray(graphRels) && graphRels.some((r) => r.includes('苏璃 -[搭档]-> 林夜')),
-      'In-Browser agent lookupGraph must return synthesized 苏璃 -[搭档]-> 林夜 relation'
-    );
 
     // Second run without force must skip already upgraded chapters (checkpoint resume)
     const resumeRes = await browserMod.upgradeBrowserCorpusWithLLM(builtNovelPack, {
@@ -1945,6 +2254,8 @@ async function main() {
     console.log(`  PASS: demo-chronicles Zero-7=${gAliasDemo.data.took_ms}ms/${gAliasDemo.data.total} hits, cameo=${gCameoDemo.data.hits[0].cameo}`);
 
     await testMcpAndBrowserEngine();
+
+    await testLibrarianMemory();
 
     await testStExtension();
 

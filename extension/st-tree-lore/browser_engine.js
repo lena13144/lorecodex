@@ -333,18 +333,436 @@ export async function idbSaveCorpus(pack) {
     });
 }
 
+const MAX_LIBRARIAN_NOTES = 200;
+const LINK_DECAY_GAMMA = 0.95;
+const LINK_PRUNE_THRESHOLD = 0.05;
+const LINK_STEP = 0.8;
+
+function cleanMemStr(val, maxLen = 200) {
+    return String(val || '').replace(/\s+/g, ' ').trim().slice(0, maxLen);
+}
+
+function normalizeMemTriggers(raw) {
+    const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(/[,，、;\n]+/) : [];
+    const seen = new Set();
+    const out = [];
+    for (const item of list) {
+        const s = cleanMemStr(item, 40);
+        if (!s || s.length < 2) continue;
+        const low = s.toLowerCase();
+        if (seen.has(low)) continue;
+        seen.add(low);
+        out.push(s);
+        if (out.length >= 12) break;
+    }
+    return out;
+}
+
+function normalizeMemRefs(raw) {
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const item of raw) {
+        if (!item) continue;
+        const nodeId = typeof item === 'string' ? cleanMemStr(item, 40) : cleanMemStr(item.node_id, 40);
+        if (!nodeId || seen.has(nodeId)) continue;
+        seen.add(nodeId);
+        out.push({
+            node_id: nodeId,
+            arc_id: typeof item === 'object' ? cleanMemStr(item.arc_id, 40) : '',
+            title: typeof item === 'object' ? cleanMemStr(item.title, 80) : '',
+            order: typeof item === 'object' ? normalizeOrder(item.order) : null,
+        });
+        if (out.length >= 10) break;
+    }
+    return out;
+}
+
+function normalizeMemArcRefs(raw) {
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const item of raw) {
+        if (!item) continue;
+        const arcId = typeof item === 'string' ? cleanMemStr(item, 40) : cleanMemStr(item.arc_id, 40);
+        if (!arcId || seen.has(arcId)) continue;
+        seen.add(arcId);
+        out.push({
+            arc_id: arcId,
+            title: typeof item === 'object' ? cleanMemStr(item.title, 80) : '',
+            order: typeof item === 'object' ? normalizeOrder(item.order) : null,
+        });
+        if (out.length >= 5) break;
+    }
+    return out;
+}
+
+function normalizeMemLinks(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    return Object.fromEntries(
+        Object.entries(raw)
+            .map(([k, v]) => [cleanMemStr(k, 64), Number((Number(v) || 0).toFixed(4))])
+            .filter(([k, v]) => k && Number.isFinite(v) && v >= LINK_PRUNE_THRESHOLD)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 8)
+    );
+}
+
+function normalizeMemNote(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const topic = cleanMemStr(raw.topic, 60);
+    const refs = normalizeMemRefs(raw.refs);
+    if (!topic || !refs.length) return null;
+    const now = new Date().toISOString();
+    const triggers = normalizeMemTriggers(raw.triggers);
+    return {
+        id: cleanMemStr(raw.id, 64) || `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+        topic,
+        triggers: triggers.length ? triggers : [topic],
+        summary: cleanMemStr(raw.summary, 180),
+        refs,
+        arc_refs: normalizeMemArcRefs(raw.arc_refs),
+        links: normalizeMemLinks(raw.links),
+        hits: Math.max(1, Math.floor(Number(raw.hits) || 1)),
+        locked: Boolean(raw.locked),
+        created_at: cleanMemStr(raw.created_at, 40) || now,
+        updated_at: cleanMemStr(raw.updated_at, 40) || now,
+    };
+}
+
+function pruneMemNotes(notes, maxNotes = MAX_LIBRARIAN_NOTES) {
+    if (notes.length <= maxNotes) return notes;
+    const locked = notes.filter((n) => n.locked);
+    const unlocked = notes
+        .filter((n) => !n.locked)
+        .sort((a, b) => (b.hits !== a.hits ? b.hits - a.hits : String(b.updated_at || '').localeCompare(String(a.updated_at || ''))));
+    return [...locked, ...unlocked.slice(0, Math.max(0, maxNotes - locked.length))];
+}
+
+export function normalizeLibrarianMemoryInBrowser(raw) {
+    const arr = Array.isArray(raw) ? raw : Array.isArray(raw?.notes) ? raw.notes : [];
+    const seen = new Set();
+    const out = [];
+    for (const item of arr) {
+        const n = normalizeMemNote(item);
+        if (!n || seen.has(n.id)) continue;
+        seen.add(n.id);
+        out.push(n);
+    }
+    return pruneMemNotes(out, MAX_LIBRARIAN_NOTES);
+}
+
+function extractMemTokens(text) {
+    const s = String(text || '').toLowerCase();
+    const tokens = new Set();
+    for (const w of s.match(/[a-z0-9_-]{2,}/g) || []) tokens.add(w);
+    for (const run of s.match(/[\u4e00-\u9fff]{2,}/g) || []) {
+        if (run.length <= 4) tokens.add(run);
+        for (let i = 0; i < run.length - 1; i++) tokens.add(run.slice(i, i + 2));
+    }
+    return tokens;
+}
+
+export function matchLibrarianNotesInBrowser(notes, queryText, { expandAliases = null, maxOrder = null, limit = 5 } = {}) {
+    const list = Array.isArray(notes) ? notes : [];
+    const rawQuery = String(queryText || '').trim();
+    if (!list.length || !rawQuery) return [];
+    const lowQuery = rawQuery.toLowerCase();
+    const expandedTerms = new Set();
+    if (typeof expandAliases === 'function') {
+        for (const piece of rawQuery.split(/[\s,，、。？！?!:：;；()（）《》「」【】"'`]+/)) {
+            const p = piece.trim();
+            if (p.length < 2 || p.length > 24) continue;
+            for (const alias of expandAliases(p) || []) {
+                const a = String(alias || '').trim().toLowerCase();
+                if (a.length >= 2) expandedTerms.add(a);
+            }
+        }
+    }
+    const expandedHay = expandedTerms.size ? `${lowQuery} ${[...expandedTerms].join(' ')}` : lowQuery;
+    const queryTokens = extractMemTokens(expandedHay);
+    const scored = [];
+    for (const note of list) {
+        const visibleRefs = maxOrder === null || maxOrder === undefined
+            ? note.refs || []
+            : (note.refs || []).filter((r) => isOrderAllowed(r.order, maxOrder));
+        if (!visibleRefs.length) continue;
+        let score = 0;
+        const topicLow = String(note.topic || '').toLowerCase();
+        if (topicLow.length >= 2 && (expandedHay.includes(topicLow) || expandedTerms.has(topicLow))) score += 8;
+        let triggerHits = 0;
+        for (const trig of note.triggers || []) {
+            const tLow = String(trig || '').toLowerCase();
+            if (tLow.length < 2) continue;
+            if (expandedHay.includes(tLow) || expandedTerms.has(tLow)) {
+                score += 5;
+                triggerHits += 1;
+            }
+        }
+        const noteTokens = extractMemTokens(`${note.topic} ${(note.triggers || []).join(' ')} ${note.summary || ''}`);
+        let overlap = 0;
+        for (const tok of noteTokens) if (queryTokens.has(tok)) overlap += 1;
+        if (overlap >= 2) score += Math.min(6, overlap * 1.2);
+        if (score < 4.5 && triggerHits === 0) continue;
+        score += Math.min(2.5, Math.log2(1 + (Number(note.hits) || 1)) * 0.8);
+        const visibleArcRefs = maxOrder === null || maxOrder === undefined
+            ? note.arc_refs || []
+            : (note.arc_refs || []).filter((a) => isOrderAllowed(a.order, maxOrder));
+        scored.push({ note, visibleRefs, visibleArcRefs, score: Number(score.toFixed(2)) });
+    }
+    scored.sort((a, b) => b.score - a.score || (b.note.hits || 1) - (a.note.hits || 1));
+    const maxOut = Math.max(1, limit);
+    const hasGate = maxOrder !== null && maxOrder !== undefined;
+    const direct = scored.slice(0, maxOut).map((x) => {
+        const trimmed = hasGate && (x.visibleRefs.length < (x.note.refs || []).length || x.visibleArcRefs.length < (x.note.arc_refs || []).length);
+        return { ...x.note, summary: trimmed ? '' : x.note.summary, refs: x.visibleRefs, arc_refs: x.visibleArcRefs, _score: x.score };
+    });
+    if (direct.length > 0 && direct.length < maxOut) {
+        const pickedIds = new Set(direct.map((n) => n.id));
+        const byId = new Map(list.map((n) => [n.id, n]));
+        const linkedCandidates = [];
+        for (const src of direct) {
+            for (const [targetId, weight] of Object.entries(src.links || {})) {
+                if (pickedIds.has(targetId) || !(weight > 0)) continue;
+                const target = byId.get(targetId);
+                if (!target) continue;
+                const visibleRefs = !hasGate
+                    ? target.refs || []
+                    : (target.refs || []).filter((r) => isOrderAllowed(r.order, maxOrder));
+                if (!visibleRefs.length) continue;
+                const visibleArcRefs = !hasGate
+                    ? target.arc_refs || []
+                    : (target.arc_refs || []).filter((a) => isOrderAllowed(a.order, maxOrder));
+                linkedCandidates.push({ note: target, visibleRefs, visibleArcRefs, weight, fromTopic: src.topic });
+                pickedIds.add(targetId);
+            }
+        }
+        linkedCandidates.sort((a, b) => b.weight - a.weight || (b.note.hits || 1) - (a.note.hits || 1));
+        for (const lc of linkedCandidates.slice(0, Math.min(2, maxOut - direct.length))) {
+            const trimmed = hasGate && (lc.visibleRefs.length < (lc.note.refs || []).length || lc.visibleArcRefs.length < (lc.note.arc_refs || []).length);
+            direct.push({
+                ...lc.note,
+                summary: trimmed ? '' : lc.note.summary,
+                refs: lc.visibleRefs,
+                arc_refs: lc.visibleArcRefs,
+                _score: Number((1 + Math.min(2, lc.weight * 0.5)).toFixed(2)),
+                _linked_from: lc.fromTopic,
+            });
+        }
+    }
+    return direct;
+}
+
+function formatLibrarianHintsInBrowser(matchedNotes) {
+    if (!Array.isArray(matchedNotes) || !matchedNotes.length) return '';
+    const lines = matchedNotes.map((n) => {
+        const refText = (n.refs || [])
+            .slice(0, 6)
+            .map((r) => `${r.node_id}${r.order !== null && r.order !== undefined ? `(序${r.order})` : ''}`)
+            .join(', ');
+        const sum = n.summary ? `：${n.summary}` : '';
+        const linkTag = n._linked_from ? `|关联←《${n._linked_from}》` : '';
+        const arcText = (n.arc_refs || []).length
+            ? ` | 宏观卷: ${(n.arc_refs || []).slice(0, 5).map((a) => a.arc_id).join(', ')}`
+            : '';
+        return `- 《${n.topic}》[命中${n.hits || 1}次${linkTag}]${sum} -> 原文节点: ${refText}${arcText}`;
+    });
+    return `【图书馆管理员笔记（过往查证过的直达索引；若与当前问题相关，首轮可直接对所列节点调 read_scene 核实原文，切勿不读原文直接照搬）】\n${lines.join('\n')}`;
+}
+
+function deriveLibrarianNoteInBrowser({ parsedMemoryNote, guide, scenes, outlines = [], forcedFinal = false }) {
+    if (forcedFinal || !Array.isArray(scenes) || !scenes.length) return null;
+    const refs = scenes.slice(0, 10).map((s) => ({
+        node_id: String(s.node_id || ''),
+        arc_id: String(s.arc_id || ''),
+        title: cleanMemStr(s.title || s.arc_title || '', 80),
+        order: normalizeOrder(s.order),
+    })).filter((r) => r.node_id);
+    if (!refs.length) return null;
+    const mn = parsedMemoryNote && typeof parsedMemoryNote === 'object' ? parsedMemoryNote : null;
+    const topic = mn ? cleanMemStr(mn.topic, 60) : '';
+    if (topic.length < 2) return null;
+    const arcRefs = normalizeMemArcRefs(
+        (Array.isArray(outlines) ? outlines : []).map((o) => ({
+            arc_id: o?.arc_id,
+            title: o?.title,
+            order: o?.order,
+        }))
+    );
+    return {
+        topic,
+        triggers: normalizeMemTriggers(mn.triggers),
+        summary: cleanMemStr(mn.summary || guide, 180),
+        refs,
+        arc_refs: arcRefs,
+    };
+}
+
+function recordLibrarianNoteInBrowser(notes, candidate, { matchedIds = [], maxNotes = MAX_LIBRARIAN_NOTES } = {}) {
+    const list = normalizeLibrarianMemoryInBrowser(notes);
+    const now = new Date().toISOString();
+    const cand = normalizeMemNote(candidate);
+    if (!cand) return { notes: list, saved: null };
+    const matchedSet = new Set(Array.isArray(matchedIds) ? matchedIds : []);
+    const overlapRatio = (aRefs, bRefs) => {
+        const aSet = new Set((aRefs || []).map((r) => r.node_id));
+        const bSet = new Set((bRefs || []).map((r) => r.node_id));
+        if (!aSet.size || !bSet.size) return 0;
+        let inter = 0;
+        for (const id of aSet) if (bSet.has(id)) inter += 1;
+        const union = aSet.size + bSet.size - inter;
+        return union > 0 ? inter / union : 0;
+    };
+    let targetIdx = -1;
+    let bestScore = 0;
+    for (let i = 0; i < list.length; i++) {
+        const existing = list[i];
+        const sameTopic = existing.topic.toLowerCase() === cand.topic.toLowerCase();
+        const overlap = overlapRatio(existing.refs, cand.refs);
+        const wasMatched = matchedSet.has(existing.id);
+        let score = 0;
+        if (sameTopic) score += 10;
+        if (overlap >= 0.6) score += 6 + overlap;
+        else if (wasMatched && overlap >= 0.4) score += 5 + overlap;
+        if (score > bestScore) {
+            bestScore = score;
+            targetIdx = i;
+        }
+    }
+    const reinforceLinks = (arr, savedId) => {
+        const peerIds = [...new Set((matchedIds || []).filter((id) => id && id !== savedId))];
+        if (!peerIds.length) return arr;
+        const peerSet = new Set(peerIds);
+        const delta = LINK_STEP / peerIds.length;
+        const decayAll = (linksObj) => {
+            const out = {};
+            for (const [k, v] of Object.entries(linksObj || {})) {
+                const decayed = Number(v) * LINK_DECAY_GAMMA;
+                if (decayed >= LINK_PRUNE_THRESHOLD) out[k] = decayed;
+            }
+            return out;
+        };
+        return arr.map((n) => {
+            if (n.id === savedId) {
+                const nl = decayAll(n.links);
+                for (const pid of peerIds) nl[pid] = (nl[pid] || 0) + delta;
+                return { ...n, links: normalizeMemLinks(nl) };
+            }
+            if (peerSet.has(n.id)) {
+                const nl = decayAll(n.links);
+                nl[savedId] = (nl[savedId] || 0) + delta;
+                return { ...n, links: normalizeMemLinks(nl) };
+            }
+            return n;
+        });
+    };
+    if (targetIdx >= 0) {
+        const cur = list[targetIdx];
+        const next = cur.locked
+            ? { ...cur, hits: (cur.hits || 1) + 1, updated_at: now }
+            : {
+                ...cur,
+                triggers: normalizeMemTriggers([...(cur.triggers || []), ...(cand.triggers || [])]),
+                summary: cand.summary && cand.summary.length >= cur.summary.length ? cand.summary : cur.summary,
+                refs: normalizeMemRefs([...(cur.refs || []), ...(cand.refs || [])]),
+                arc_refs: normalizeMemArcRefs([...(cur.arc_refs || []), ...(cand.arc_refs || [])]),
+                hits: (cur.hits || 1) + 1,
+                updated_at: now,
+            };
+        const updated = [...list];
+        updated[targetIdx] = next;
+        return {
+            notes: pruneMemNotes(reinforceLinks(updated, next.id), maxNotes),
+            saved: { id: next.id, topic: next.topic, hits: next.hits, action: cur.locked ? 'hit' : 'merged' },
+        };
+    }
+    const created = { ...cand, hits: 1, created_at: now, updated_at: now };
+    return {
+        notes: pruneMemNotes(reinforceLinks([created, ...list], created.id), maxNotes),
+        saved: { id: created.id, topic: created.topic, hits: 1, action: 'created' },
+    };
+}
+
+export function applyLibrarianMemoryActionInBrowser(notes, payload = {}) {
+    const body = payload && typeof payload === 'object' ? payload : {};
+    const list = normalizeLibrarianMemoryInBrowser(notes);
+    const action = String(body.action || '').trim().toLowerCase();
+    const id = cleanMemStr(body.id, 64);
+    if (action === 'clear') {
+        const keep = body.includeLocked ? [] : list.filter((n) => n.locked);
+        return { notes: keep, changed: list.length - keep.length };
+    }
+    if (action === 'delete' && id) {
+        const next = list.filter((n) => n.id !== id);
+        return { notes: next, changed: list.length - next.length };
+    }
+    if (action === 'toggle_lock' && id) {
+        let changed = 0;
+        const next = list.map((n) => {
+            if (n.id !== id) return n;
+            changed = 1;
+            return { ...n, locked: body.locked !== undefined ? Boolean(body.locked) : !n.locked };
+        });
+        return { notes: next, changed };
+    }
+    if (action === 'upsert') {
+        const rawNote = body.note && typeof body.note === 'object' ? body.note : body;
+        const incoming = normalizeMemNote({ ...rawNote, id: id || rawNote.id });
+        if (!incoming) throw new Error('笔记至少需要主题与 1 个原文节点引用');
+        const idx = list.findIndex((n) => n.id === incoming.id);
+        const next = [...list];
+        if (idx >= 0) {
+            const existing = list[idx];
+            next[idx] = {
+                ...existing,
+                ...incoming,
+                hits: rawNote.hits !== undefined ? incoming.hits : existing.hits,
+                locked: rawNote.locked !== undefined ? incoming.locked : existing.locked,
+                updated_at: new Date().toISOString(),
+            };
+        } else {
+            next.unshift(incoming);
+        }
+        return { notes: pruneMemNotes(next, MAX_LIBRARIAN_NOTES), changed: 1, note: idx >= 0 ? next[idx] : incoming };
+    }
+    throw new Error(`不支持的操作: ${action || 'empty'}`);
+}
+
+export async function idbGetLibrarianMemory(corpusId) {
+    if (!corpusId || typeof indexedDB === 'undefined') return [];
+    try {
+        const raw = await idbGetMeta(`librarian_memory:${corpusId}`);
+        return normalizeLibrarianMemoryInBrowser(raw);
+    } catch (_) {
+        return [];
+    }
+}
+
+export async function idbUpdateLibrarianMemory(corpusId, payload = {}) {
+    const current = await idbGetLibrarianMemory(corpusId);
+    const res = applyLibrarianMemoryActionInBrowser(current, payload);
+    if (typeof indexedDB !== 'undefined') {
+        await idbSetMeta(`librarian_memory:${corpusId}`, res.notes);
+    }
+    return { ok: true, corpus_id: corpusId, count: res.notes.length, changed: res.changed, notes: res.notes };
+}
+
 export async function idbDeleteCorpus(id) {
     const db = await openIdb();
     const hasLegacy = db.objectStoreNames.contains(IDB_LEGACY_STORE);
-    const stores = hasLegacy
-        ? [IDB_CORPUS_META_STORE, IDB_CORPUS_TEXTS_STORE, IDB_LEGACY_STORE]
-        : [IDB_CORPUS_META_STORE, IDB_CORPUS_TEXTS_STORE];
+    const hasMeta = db.objectStoreNames.contains(IDB_META_STORE);
+    const stores = [IDB_CORPUS_META_STORE, IDB_CORPUS_TEXTS_STORE];
+    if (hasLegacy) stores.push(IDB_LEGACY_STORE);
+    if (hasMeta) stores.push(IDB_META_STORE);
     return new Promise((resolve, reject) => {
         const tx = db.transaction(stores, 'readwrite');
         tx.objectStore(IDB_CORPUS_META_STORE).delete(id);
         tx.objectStore(IDB_CORPUS_TEXTS_STORE).delete(id);
         if (hasLegacy) {
             tx.objectStore(IDB_LEGACY_STORE).delete(id);
+        }
+        if (hasMeta) {
+            tx.objectStore(IDB_META_STORE).delete(`librarian_memory:${id}`);
         }
         tx.oncomplete = () => resolve(true);
         tx.onerror = () => reject(tx.error);
@@ -1661,37 +2079,7 @@ export function createBrowserTreeAgent(pack) {
     const indexData = pack.indexData || { arcs: [] };
     const textsData = pack.textsData || {};
     const seriesSummaries = indexData.series_summaries || {};
-    const graphEdges = Array.isArray(pack.graphData) ? pack.graphData.filter((e) => e && e.s && e.r && e.o) : [];
-    const graphEntities = (() => {
-        const set = new Set();
-        for (const e of graphEdges) {
-            set.add(String(e.s));
-            set.add(String(e.o));
-        }
-        return [...set].sort((a, b) => b.length - a.length);
-    })();
-
-    function lookupGraph(text, limit = 10, perEnt = 4) {
-        if (!graphEdges.length || !text) return [];
-        const hay = String(text);
-        const hits = new Set();
-        for (const ent of graphEntities) {
-            if (ent.length >= 2 && hay.includes(ent)) hits.add(ent);
-        }
-        if (!hits.size) return [];
-        const counts = new Map();
-        const out = [];
-        for (const e of graphEdges) {
-            const matched = hits.has(e.s) ? e.s : hits.has(e.o) ? e.o : null;
-            if (!matched) continue;
-            const cur = counts.get(matched) || 0;
-            if (cur >= perEnt) continue;
-            counts.set(matched, cur + 1);
-            out.push(`${e.s} -[${e.r}]-> ${e.o}${e.w > 1 ? `(×${e.w})` : ''}`);
-            if (out.length >= limit) break;
-        }
-        return out;
-    }
+    let librarianNotes = normalizeLibrarianMemoryInBrowser(pack.librarianMemory || []);
 
     const arcMap = new Map();
     const sceneMetaMap = new Map();
@@ -1821,7 +2209,6 @@ export function createBrowserTreeAgent(pack) {
         max_order: maxOrderAvailable,
         llm_scenes: Number(indexData.stats?.llm_scenes || 0),
         llm_arcs: Number(indexData.stats?.llm_arcs || 0),
-        graph_edges: graphEdges.length,
     };
     const categories = [...categorySet];
     const seriesList = [...seriesStatsMap.values()].map((s) => ({
@@ -2157,7 +2544,7 @@ export function createBrowserTreeAgent(pack) {
 
     async function search(payload, apiCfg, { onProgress = null } = {}) {
         const t0 = Date.now();
-        const maxOrder = normalizeOrder(payload.maxOrder) ?? corpusConfig.spoiler_gate?.default_max_order ?? null;
+        const maxOrder = resolveMaxOrder(payload.maxOrder);
         const maxTurns = Math.min(Math.max(Number(payload.maxTurns) || 8, 2), 12);
         const rawMaxScenes = Number(payload.maxScenes);
         const maxScenes = rawMaxScenes > 0 ? Math.min(rawMaxScenes, 12) : 10;
@@ -2271,17 +2658,30 @@ export function createBrowserTreeAgent(pack) {
             ? `\n【核心世界观与设定术语】\n` + filteredGlossary.join('\n')
             : '';
 
-        const sysPrompt = `你是《${corpusConfig.name}》后台树形记忆检索 Agent（浏览器内置引擎），负责定位并核实原著文本。
-${corpusConfig.world_premise || ''}
-语料规模：${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}。${maxOrder ? `当前防剧透锁定：order <= ${maxOrder}，严禁泄露后续内容。` : ''}${glossaryBlock}
-【检索策略】
+        const sysPrompt = `你是《${corpusConfig.name}》树形记忆检索 Agent（${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}）。${maxOrder ? `防剧透锁定：order <= ${maxOrder}，严禁泄露后续内容。` : ''}
+${corpusConfig.world_premise || ''}${glossaryBlock}
+【规则】
 1. 跳过判定：纯无关闲聊或未收录原创设定直接输出 {"skip":true,"reason":"..."}；涉及过往经历、设定或台词细节时主动检索。
-2. 高效寻路：首轮可并发调用目录工具与 grep_scenes（自动展开别名）；read_scene 尽量一次批量传入多个纯编号 scene_node_ids（最多 10 个，如 ["0080","0601"]）。
-3. 按跨度选幕：定点查证读 1~3 幕；长跨度回顾、群像或组织/势力过往读 4~10 幕，结合词表与目录人物表跨阶段/全分支覆盖（如前任/新晋/分队），宏观梳理可填 selected_arcs。
-4. 事实核实：selected_nodes 须经 read_scene 核实，严禁编造。
-5. 原作未载的事：对话提到的往事可能来自同人设定、角色卡前情或本局经历，原作里没有不代表没发生过。用户的说法常和原文措辞不同，grep_scenes 没命中不等于原作没有：先用 list_story_arcs（按 character/keyword 过滤）和 get_arc_scenes 翻相关人物的篇章摘要找这件事。grep 和目录各翻过一轮仍找不到这件事本身，才算原作未载：停止搜索这件事，不要再换关键词、换情绪标签重搜；下一轮最多 read_scene 一次，只补其中原作人物、地点、组织的相关原文作背景，然后直接输出；连背景也没有就 skip。guide 只写“此事原作未载”和原作里能对上的部分，不要否定、纠正或要求澄清用户的说法。
-6. 严格输出 JSON：
-{"skip":false,"selected_nodes":["经read_scene核实的node_id"],"selected_arcs":["可选宏观arc_id"],"timeline_note":"时间线阶段","guide":"结构化记忆导读并标注[node_id]"}`;
+2. 寻路：若【图书馆管理员笔记】与当前问题相关，首轮直接 read_scene 核实所列节点；否则并发组合目录与 grep_scenes（自动展开别名）。read_scene 尽量批量传 1~10 个纯编号；selected_nodes 须经 read_scene 核实，严禁编造。
+3. 选幕：定点查证 1~3 幕；宏观/群像/势力过往 4~10 幕并跨阶段全分支覆盖，宏观脉络可填 selected_arcs。
+4. 原作未载：对话往事可能来自同人、角色卡或本局经历。grep_scenes 未命中先翻相关人物目录（list_story_arcs + get_arc_scenes）一轮；仍找不到即停搜，最多再 read_scene 一次补原作背景后输出（无背景则 skip）。guide 只写“此事原作未载”及原作能对上的部分，不否定或纠正用户。
+5. 停止调工具后仅输出单个严格 JSON：
+{"skip":false,"selected_nodes":["经read_scene核实的node_id"],"selected_arcs":["可选宏观arc_id"],"timeline_note":"时间线阶段","guide":"结构化导读并标注[node_id]","memory_note":{"topic":"可选：8~24字主题","triggers":["3~6个角色+场景线索词"],"summary":"1句话路标"}}`;
+
+        if (typeof indexedDB !== 'undefined') {
+            librarianNotes = await idbGetLibrarianMemory(corpusId);
+        }
+        const memoryQueryCtx = [
+            payload.query,
+            payload.onDemand,
+            ...(Array.isArray(payload.recentChat) ? payload.recentChat.slice(-2).map((m) => m?.text) : []),
+        ].filter(Boolean).join('\n');
+        const matchedNotes = matchLibrarianNotesInBrowser(librarianNotes, memoryQueryCtx, {
+            expandAliases,
+            maxOrder,
+            limit: 5,
+        });
+        const librarianHints = formatLibrarianHintsInBrowser(matchedNotes);
 
         const userParts = [];
         const anchorBits = [];
@@ -2290,6 +2690,7 @@ ${corpusConfig.world_premise || ''}
         if (anchorBits.length) userParts.push(anchorBits.join(' | '));
         const sessionRecall = normalizeSessionRecall(payload.sessionRecall);
         if (sessionRecall.length) userParts.push(`【本局记忆召回】（本局已发生的事，不是原作内容；只用于理解对话里的指代，不要据此去原作里找本局独有的事件）\n${sessionRecall.join('\n')}`);
+        if (librarianHints) userParts.push(librarianHints);
         if (Array.isArray(payload.recentChat) && payload.recentChat.length) {
             userParts.push(`【最近对话】\n` + payload.recentChat.map((m) => `[${m.name || m.role}]: ${m.text}`).join('\n'));
         }
@@ -2717,13 +3118,33 @@ ${corpusConfig.world_premise || ''}
         }
 
         const guide = (parsed && typeof parsed.guide === 'string' ? parsed.guide : rawAnswer).trim();
-        const graphQuery = [
-            payload.query || '',
-            guide,
-            ...finalOutlines.map((o) => o.title),
-            ...finalScenes.map((s) => `${s.arc_title} ${s.title}`),
-        ].join(' ');
-        const relations = lookupGraph(graphQuery);
+        let savedMemory = null;
+        const forcedFinal = steps.some((s) => s.kind === 'final_forced');
+        if (finalScenes.length > 0 && payload.disableMemoryWrite !== true) {
+            try {
+                const candidate = deriveLibrarianNoteInBrowser({
+                    parsedMemoryNote: parsed?.memory_note,
+                    guide,
+                    scenes: finalScenes,
+                    outlines: finalOutlines.map((o) => ({ ...o, order: arcMap.get(o.arc_id)?.order ?? null })),
+                    forcedFinal,
+                });
+                if (candidate) {
+                    const usedMatchedIds = matchedNotes
+                        .filter((n) => (n.refs || []).some((r) => readNodesSet.has(r.node_id)))
+                        .map((n) => n.id);
+                    const memRes = recordLibrarianNoteInBrowser(librarianNotes, candidate, {
+                        matchedIds: usedMatchedIds,
+                    });
+                    librarianNotes = memRes.notes;
+                    pack.librarianMemory = librarianNotes;
+                    savedMemory = memRes.saved;
+                    if (typeof indexedDB !== 'undefined') {
+                        idbSetMeta(`librarian_memory:${corpusId}`, librarianNotes).catch(() => {});
+                    }
+                }
+            } catch (_) {}
+        }
         return {
             ok: true,
             corpus_id: corpusId,
@@ -2743,7 +3164,11 @@ ${corpusConfig.world_premise || ''}
             guide,
             scenes: finalScenes,
             outlines: finalOutlines,
-            relations,
+            relations: [],
+            librarian_memory: {
+                matched: matchedNotes.map((n) => ({ id: n.id, topic: n.topic, hits: n.hits, score: n._score })),
+                saved: savedMemory,
+            },
         };
     }
 
@@ -2758,7 +3183,16 @@ ${corpusConfig.world_premise || ''}
         getTreeIndex,
         getSceneText,
         grepScenes,
-        lookupGraph,
+        getLibrarianMemory: () => librarianNotes,
+        updateLibrarianMemory: async (actionPayload) => {
+            const res = applyLibrarianMemoryActionInBrowser(librarianNotes, actionPayload);
+            librarianNotes = res.notes;
+            pack.librarianMemory = librarianNotes;
+            if (typeof indexedDB !== 'undefined') {
+                await idbSetMeta(`librarian_memory:${corpusId}`, librarianNotes).catch(() => {});
+            }
+            return { ok: true, corpus_id: corpusId, count: librarianNotes.length, changed: res.changed, notes: librarianNotes };
+        },
         search,
     };
 }
@@ -2913,30 +3347,6 @@ function mergeGlossaryInBrowser(existingList = [], newList = [], maxItems = 40, 
         out.push(item);
     }
     return out.slice(0, Math.max(maxItems, lockedHeads.size));
-}
-
-function mergeRelationsInBrowser(existingEdges = [], newEdges = [], maxEdges = 500) {
-    const edgeMap = new Map();
-    for (const raw of [...(existingEdges || []), ...(newEdges || [])]) {
-        if (!raw || typeof raw !== 'object') continue;
-        const s = String(raw.s || '').trim();
-        const r = String(raw.r || '').trim();
-        const o = String(raw.o || '').trim();
-        if (!s || !r || !o || s === o) continue;
-        const w = Math.max(1, parseInt(raw.w, 10) || 1);
-        const key = `${s.toLowerCase()}\u0000${r.toLowerCase()}\u0000${o.toLowerCase()}`;
-        if (edgeMap.has(key)) {
-            const cur = edgeMap.get(key);
-            cur.w = (cur.w || 1) + w;
-        } else {
-            const rec = { s, r, o, w };
-            if (Array.isArray(raw.ev)) rec.ev = raw.ev;
-            edgeMap.set(key, rec);
-        }
-    }
-    return [...edgeMap.values()]
-        .sort((a, b) => (b.w || 1) - (a.w || 1))
-        .slice(0, maxEdges);
 }
 
 function buildSeriesDigestInBrowser(serArcs, maxSamples = 80, maxChars = 6500) {
@@ -3934,9 +4344,8 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
                     `你是《${bookName}》文本资料库总编。请根据以下「${serName}」的章节脉络与高频人物表，提炼全卷级检索元数据与知识图谱：\n` +
                     `1. series_summary: 60-120字精炼概括本卷主线剧情、核心舞台与关键转折；\n` +
                     `2. aliases: 同一人物/实体的本名、化名、外号、简称对照二维数组（每组至少2项，严禁把不同人混为一组，最多25组）；\n` +
-                    `3. glossary: 本卷重要势力、组织、小队编制、能力体系、核心地点或器物速查数组（每条“名称：一句话说明”，对核心小队/组织务必写全各分队或各期成员名单与更迭，如一队/二队/新老成员，最多20条）；\n` +
-                    `4. relations: 人物与人物、人物与组织/小队的知识图谱关系三元组数组，格式 [{"s":"主体","r":"关系(如:属于/队长/搭档/旧友/宿敌/救过/接任)","o":"客体"}]（最多40条）。\n` +
-                    `只输出严格 JSON：{"series_summary":"60-120字概括本卷主线、核心舞台与转折","aliases":[["正式名","化名/外号/简称"]],"glossary":["重要势力/小队/组织/地点：一句话说明（写明成员或分支）"],"relations":[{"s":"主体","r":"关系","o":"客体"}]}\n\n` +
+                    `3. glossary: 本卷重要势力、组织、小队编制、能力体系、核心地点或器物速查数组（每条“名称：一句话说明”，对核心小队/组织务必写全各分队或各期成员名单与更迭，如一队/二队/新老成员，最多20条）。\n` +
+                    `只输出严格 JSON：{"series_summary":"60-120字概括本卷主线、核心舞台与转折","aliases":[["正式名","化名/外号/简称"]],"glossary":["重要势力/小队/组织/地点：一句话说明（写明成员或分支）"]}\n\n` +
                     `高频人物：${topChars.length ? topChars.join(', ') : '（暂无）'}\n` +
                     `章节脉络（共 ${fullSerArcs.length} 章）：\n${digestText}`;
                 const tMeta = Date.now();
@@ -3952,9 +4361,6 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
                     }
                     if (Array.isArray(parsedMeta.glossary)) {
                         extractedGlossary.push(...parsedMeta.glossary);
-                    }
-                    if (Array.isArray(parsedMeta.relations)) {
-                        extractedRelations.push(...parsedMeta.relations);
                     }
                 } catch (err) {
                     if (signal?.aborted || runSignal.aborted) throw err;
@@ -3981,9 +4387,6 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             }
             if (extractedGlossary.length) {
                 pack.config.glossary = mergeGlossaryInBrowser(pack.config.glossary || [], extractedGlossary, 40, pack.config.locked_glossary || []);
-            }
-            if (extractedRelations.length) {
-                pack.graphData = mergeRelationsInBrowser(pack.graphData || [], extractedRelations);
             }
             await persistStatsAndCheckpoint(true);
         }

@@ -30,6 +30,7 @@ LoreCodex 的做法是：
 1. **建一次目录。** 把原作切成 `卷 → 篇 → 幕` 三级，由 LLM 为每一幕写摘要、为每一卷写总览，并整理出人物别名表和专有名词表。
 2. **每轮对话前，检索模型自己翻。** 它用工具查卷目录、展开篇章、按人名和别名全文搜索，最后读原文场景。最终交给正文模型的场景**必须是它真正读过原文的**，不是凭摘要猜的。
 3. **把完整原文场景注入正文模型。** 不截断、不切碎，正文模型能直接参考原作的语气和细节。
+4. **会成长的司书手账（笺语 / Loria）。** 每次成功查证后，司书「笺语」会在本地手账记下主题线索、原文节点指针、宏观卷路标与共现关联边（零向量、严格遵守防剧透门控）。下次再聊到同一或关联事件，首轮即可直达原文，大幅减少检索轮数与 token 消耗；你也可以在工作台「司书手账」里随时查看、锁定或清理。
 
 ## 和其他做法的区别
 
@@ -123,10 +124,10 @@ LoreCodex 的做法是：
 
 | 发行包 | 适用场景 | 包含内容 |
 | :--- | :--- | :--- |
-| `lorecodex-sillytavern-tauritavern-extension-v2.5.0.zip` | SillyTavern / TauriTavern 玩家（免后台） | `st-tree-lore` 酒馆扩展、IndexedDB 前端引擎、内嵌工作台 UI、前端建库与 LLM 目录升级器、`demo-chronicles.lorepack.json` |
-| `lorecodex-cloud-builder-kit-v2.5.0.zip` | 用云端 AI 建库（Gemini / Claude / Grok / Qoder / WorkBuddy 等） | 零依赖 Python 脚本（`build_novel.py`、`build_lore.py`、`slice_batches.py`、`pack_lorepack.py`）和 `AGENT_INSTRUCTIONS.md`，连同小说发给云端 AI 即可生成 `.lorepack.json`，无需另配 API Key |
-| `lorecodex-agent-dsh-mcp-plugin-v2.5.0.zip` | AI Agent 集成（DeepSeek Harness `dsh` / Claude Code / Cursor / Antigravity） | DeepSeek Harness (`@deepseek-ai/cordis`) 插件、MCP stdio 服务端、Agent Skill 与核心树引擎（不含酒馆和 Web UI） |
-| `lorecodex-full-server-workbench-v2.5.0.zip` | 独立运行桌面工作台 / 本地命令行建库 | 完整 Node HTTP 服务端（`127.0.0.1:5240`，也可绕过部分中转站的浏览器 CORS 限制）、独立 Web UI、Python 批量建树脚本、酒馆扩展与 Agent 插件 |
+| `lorecodex-sillytavern-tauritavern-extension-v3.0.0.zip` | SillyTavern / TauriTavern 玩家（免后台） | `st-tree-lore` 酒馆扩展、IndexedDB 前端引擎、内嵌工作台 UI、前端建库与 LLM 目录升级器、`demo-chronicles.lorepack.json` |
+| `lorecodex-cloud-builder-kit-v3.0.0.zip` | 用云端 AI 建库（Gemini / Claude / Grok / Qoder / WorkBuddy 等） | 零依赖 Python 脚本（`build_novel.py`、`build_lore.py`、`slice_batches.py`、`pack_lorepack.py`）和 `AGENT_INSTRUCTIONS.md`，连同小说发给云端 AI 即可生成 `.lorepack.json`，无需另配 API Key |
+| `lorecodex-agent-dsh-mcp-plugin-v3.0.0.zip` | AI Agent 集成（DeepSeek Harness `dsh` / Claude Code / Cursor / Antigravity） | DeepSeek Harness (`@deepseek-ai/cordis`) 插件、MCP stdio 服务端、Agent Skill 与核心树引擎（不含酒馆和 Web UI） |
+| `lorecodex-full-server-workbench-v3.0.0.zip` | 独立运行桌面工作台 / 本地命令行建库 | 完整 Node HTTP 服务端（`127.0.0.1:5240`，也可绕过部分中转站的浏览器 CORS 限制）、独立 Web UI、Python 批量建树脚本、酒馆扩展与 Agent 插件 |
 
 ---
 
@@ -213,7 +214,7 @@ lorecodex/
 │   ├── tree_agent.js      # Node 端目录树检索与多轮工具循环
 │   ├── prompt_builder.js  # 基于 corpus.json 的提示词与工具 Schema 生成
 │   ├── grep_engine.js     # 内存别名与客串感知 grep
-│   ├── graph_engine.js    # 可选一跳实体关系图谱查询
+│   ├── librarian_memory.js # 司书笺语手账（原文指针索引、衰减关联边与防剧透门控）
 │   └── utils.js           # 跨平台 Python 探测、文本清洗与 order 门控
 ├── skills/
 │   └── lorecodex/SKILL.md # AI Agent Skill 说明文件

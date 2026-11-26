@@ -269,7 +269,7 @@ function renderCoverSheet(sheet) {
   sheet.innerHTML = `
     <div class="running-head">
       <span>${esc(corpusName())} · 典籍档案总目</span>
-      <span>LoreCodex v2.2 · 模型 ${esc(state.modelName)}</span>
+      <span>LoreCodex v3.0 · 模型 ${esc(state.modelName)}</span>
     </div>
     <div class="cover-hero">
       <h1 class="book-h1" style="font-size:28px;">${esc(corpusName())}</h1>

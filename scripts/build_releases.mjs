@@ -42,7 +42,7 @@ function copyRecursive(src, dest) {
   if (st.isDirectory()) {
     fs.mkdirSync(dest, { recursive: true });
     for (const ent of fs.readdirSync(src)) {
-      if (ent === '__pycache__' || ent.endsWith('.pyc') || ent.endsWith('.ckpt.jsonl') || ent === 'ARCHITECTURE-V3-DESIGN.md' || /^migrate_.*\.mjs$/i.test(ent)) continue;
+      if (ent === '__pycache__' || ent.endsWith('.pyc') || ent.endsWith('.ckpt.jsonl') || ent === 'ARCHITECTURE-V3-DESIGN.md' || ent === 'librarian_memory.json' || /^migrate_.*\.mjs$/i.test(ent)) continue;
       copyRecursive(path.join(src, ent), path.join(dest, ent));
     }
   } else {
@@ -153,7 +153,7 @@ function main() {
     'llm_stream.js',
     'prompt_builder.js',
     'grep_engine.js',
-    'graph_engine.js',
+    'librarian_memory.js',
     'utils.js',
   ]) {
     fs.copyFileSync(path.join(ROOT, 'src', f), path.join(agentStage, 'src', f));

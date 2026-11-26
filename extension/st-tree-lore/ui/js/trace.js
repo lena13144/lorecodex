@@ -1,4 +1,4 @@
-import { $, esc, state, actions } from './state.js';
+import { $, esc, prefs, state, actions } from './state.js';
 import { fetchRuns, runTreeSearch } from './api.js';
 
 export function renderPresets() {
@@ -77,6 +77,21 @@ export function renderTrace(out) {
     ? `<strong style="color:var(--ochre);">判定跳过</strong>（${esc(out.reason || '')}）`
     : `<strong style="color:var(--seal);">入选 ${(out.scenes || []).length} 幕</strong>${out.max_order ? ` · 序<=${Number(out.max_order) || 0}` : ''}`;
 
+  const lm = out.librarian_memory || {};
+  const lmMatched = Array.isArray(lm.matched) ? lm.matched : [];
+  const lmSaved = lm.saved || null;
+  const lmParts = [];
+  if (lmMatched.length) {
+    lmParts.push(`笺语命中：${lmMatched.slice(0, 3).map((m) => `《${esc(m.topic)}》`).join('、')}`);
+  }
+  if (lmSaved?.topic) {
+    const actLabel = lmSaved.action === 'created' ? '新录' : lmSaved.action === 'merged' ? '合并' : '复用';
+    lmParts.push(`手账${actLabel}：《${esc(lmSaved.topic)}》`);
+  }
+  const lmRow = lmParts.length
+    ? `<div style="margin-top:4px;font-size:11px;color:var(--seal);line-height:1.45;">${lmParts.join(' · ')}</div>`
+    : '';
+
   const summary = `
     <div class="ledger-summary">
       <div>${statusStr} <span style="color:var(--ink-muted);font-size:11px;">[${esc(out.corpus_name || out.corpus_id || '')}]</span></div>
@@ -86,6 +101,7 @@ export function renderTrace(out) {
       <div style="color:var(--ink-muted);font-family:var(--mono);font-size:10.5px;margin-top:2px;">
         ${Number(out.took_ms) || 0} ms · ${Number(out.turns) || 0} 轮 · tokens ${Number(out.usage?.prompt) || 0}+${Number(out.usage?.completion) || 0}
       </div>
+      ${lmRow}
       ${!out.skip ? `<button type="button" class="btn-seal btn-sm mobile-only-inline trace-open-dossier" style="margin-top:7px;">查看选段卷宗与导读 →</button>` : ''}
     </div>
   `;
@@ -210,7 +226,7 @@ export function renderRunsList() {
   box.querySelectorAll('.run-card').forEach((el) => el.addEventListener('click', () => selectRun(el.dataset.rid)));
 }
 
-export async function selectRun(rid) {
+export async function selectRun(rid, { switchTab = true } = {}) {
   const run = state.runs.find((r) => r.id === rid);
   if (!run) return;
   state.activeRunId = rid;
@@ -221,7 +237,7 @@ export async function selectRun(rid) {
   renderRunsList();
   renderTrace(run.output);
   actions.renderToc?.();
-  actions.setStageTab?.('dossier');
+  if (switchTab) actions.setStageTab?.('dossier');
 }
 
 export async function pollRuns({ autoSelectNewest = true, preferHashRunId = '' } = {}) {
@@ -240,7 +256,7 @@ export async function pollRuns({ autoSelectNewest = true, preferHashRunId = '' }
       return;
     }
     if (autoSelectNewest && hasNewTop) {
-      await selectRun(topId);
+      await selectRun(topId, { switchTab: !prefs.traceCollapsed });
     }
   } catch (_) {}
 }

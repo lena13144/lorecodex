@@ -3,7 +3,6 @@
 const fs = require('fs');
 const path = require('path');
 const { stripMarkup, extractJsonObject, normalizeOrder, isOrderAllowed, formatCharCount } = require('./utils');
-const { createGraphEngine } = require('./graph_engine');
 const { createGrepEngine } = require('./grep_engine');
 const { postChatCompletion } = require('./llm_stream');
 const {
@@ -12,21 +11,27 @@ const {
   buildSystemPrompt,
   buildUserMessage,
 } = require('./prompt_builder');
+const {
+  loadLibrarianMemory,
+  saveLibrarianMemory,
+  matchLibrarianNotes,
+  formatLibrarianHints,
+  deriveNoteFromSearch,
+  recordLibrarianNote,
+  applyMemoryAction,
+} = require('./librarian_memory');
 
 function resolveCorpusFiles(corpusDir) {
   const idxCandidates = ['tree_index.json', 'full_tree_index.json'].map((f) => path.join(corpusDir, f));
   const txtCandidates = ['tree_texts.json', 'full_tree_texts.json'].map((f) => path.join(corpusDir, f));
   const indexPath = idxCandidates.find((p) => fs.existsSync(p)) || null;
   const textsPath = txtCandidates.find((p) => fs.existsSync(p)) || null;
-  const graphPath = ['graph.json', 'graph-compact.json']
-    .map((f) => path.join(corpusDir, f))
-    .find((p) => fs.existsSync(p)) || null;
-  return { indexPath, textsPath, graphPath };
+  return { indexPath, textsPath };
 }
 
 function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbackSearchFn = null }) {
   const corpusConfig = normalizeCorpusConfig(rawConfig, corpusId);
-  const { indexPath, textsPath, graphPath } = resolveCorpusFiles(corpusDir);
+  const { indexPath, textsPath } = resolveCorpusFiles(corpusDir);
 
   if (!indexPath || !textsPath) {
     console.warn(`[tree-agent:${corpusId}] tree_index.json or tree_texts.json missing in ${corpusDir}`);
@@ -58,7 +63,6 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
 
   const indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
   const textsData = JSON.parse(fs.readFileSync(textsPath, 'utf8'));
-  const graphEngine = createGraphEngine(graphPath);
   const seriesSummaries =
     indexData.series_summaries && typeof indexData.series_summaries === 'object'
       ? indexData.series_summaries
@@ -173,7 +177,6 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     scenes: sceneMetaMap.size,
     total_chars: indexData.stats?.total_chars || totalChars,
     max_order: maxOrderAvailable,
-    graph_edges: graphEngine.edgeCount,
     llm_scenes: Number(indexData.stats?.llm_scenes || 0),
     llm_arcs: Number(indexData.stats?.llm_arcs || 0),
   };
@@ -191,8 +194,9 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
   }));
 
   const grepEngine = createGrepEngine(searchableScenes, corpusConfig);
+  let librarianNotes = loadLibrarianMemory(corpusDir);
   console.log(
-    `[tree-agent:${corpusId}] loaded ${stats.arcs} arcs, ${stats.scenes} scenes (${formatCharCount(stats.total_chars)}, graph=${graphEngine.edgeCount})`
+    `[tree-agent:${corpusId}] loaded ${stats.arcs} arcs, ${stats.scenes} scenes (${formatCharCount(stats.total_chars)}, notes=${librarianNotes.length})`
   );
 
   function resolveMaxOrder(rawMaxOrder) {
@@ -965,12 +969,30 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       };
     }
 
-    const graphQuery = [
-      query || '',
-      guide,
-      ...outlines.map((o) => o.title),
-      ...finalScenes.map((s) => `${s.arc_title} ${s.title}`),
-    ].join(' ');
+    let savedMemory = null;
+    const forcedFinal = Array.isArray(steps) && steps.some((s) => s.kind === 'final_forced');
+    if (finalScenes.length > 0 && state.disableMemoryWrite !== true) {
+      try {
+        const candidate = deriveNoteFromSearch({
+          parsedMemoryNote: parsed?.memory_note,
+          guide,
+          scenes: finalScenes,
+          outlines: outlines.map((o) => ({ ...o, order: arcMap.get(o.arc_id)?.order ?? null })),
+          forcedFinal,
+        });
+        if (candidate) {
+          // Only reinforce co-access links with matched notes the agent actually read via read_scene
+          const usedMatchedIds = (state.matchedNotes || [])
+            .filter((n) => (n.refs || []).some((r) => state.traversal.readScenes.has(r.node_id)))
+            .map((n) => n.id);
+          const res = recordLibrarianNote(librarianNotes, candidate, {
+            matchedIds: usedMatchedIds,
+          });
+          librarianNotes = saveLibrarianMemory(corpusDir, res.notes);
+          savedMemory = res.saved;
+        }
+      } catch (_) {}
+    }
 
     return {
       ok: true,
@@ -998,7 +1020,11 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       scenes: finalScenes,
       chunks: finalChunks,
       profiles: [],
-      relations: maxOrder !== null ? [] : graphEngine.lookup(graphQuery),
+      relations: [],
+      librarian_memory: {
+        matched: (state.matchedNotes || []).map((n) => ({ id: n.id, topic: n.topic, hits: n.hits, score: n._score })),
+        saved: savedMemory,
+      },
     };
   }
 
@@ -1043,6 +1069,18 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       .filter(Boolean)
       .join('\n');
 
+    // Exclude pov from memory matching so POV character name never cross-triggers unrelated notes
+    const memoryQueryContext = [query, onDemand, ...recentChat.slice(-2).map((m) => String(m?.text || ''))]
+      .filter(Boolean)
+      .join('\n');
+
+    const matchedNotes = matchLibrarianNotes(librarianNotes, memoryQueryContext, {
+      expandAliases: grepEngine.expandAliases,
+      maxOrder,
+      limit: 5,
+    });
+    const librarianHints = formatLibrarianHints(matchedNotes);
+
     const sysPrompt = buildSystemPrompt({
       corpusConfig,
       stats,
@@ -1064,6 +1102,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       recentChat,
       sceneAnchor: { ...sceneAnchor, pov },
       sessionRecall: payload.sessionRecall,
+      librarianHints,
       onDemand,
       corpusConfig,
       maxOrder,
@@ -1076,6 +1115,8 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
 
     const state = {
       maxOrder,
+      matchedNotes,
+      disableMemoryWrite: Boolean(payload.disableMemoryWrite),
       readScenes: new Map(),
       fallbackHits: new Map(),
       traversal: {
@@ -1336,6 +1377,14 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
     },
     getAliases() {
       return corpusConfig.aliases || [];
+    },
+    getLibrarianMemory() {
+      return librarianNotes;
+    },
+    updateLibrarianMemory(actionPayload) {
+      const res = applyMemoryAction(librarianNotes, actionPayload);
+      librarianNotes = saveLibrarianMemory(corpusDir, res.notes);
+      return { notes: librarianNotes, changed: res.changed, note: res.note || null };
     },
     grepScenes,
     search,

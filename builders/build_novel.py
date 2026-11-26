@@ -1390,29 +1390,6 @@ def merge_glossary(existing_list, new_list, max_items=40, locked_glossary=None):
     return res
 
 
-def merge_relations(existing_edges, new_edges, max_edges=500):
-    edge_map = collections.OrderedDict()
-    for raw in list(existing_edges or []) + list(new_edges or []):
-        if not isinstance(raw, dict):
-            continue
-        s = str(raw.get("s") or "").strip()
-        r = str(raw.get("r") or "").strip()
-        o = str(raw.get("o") or "").strip()
-        if not s or not r or not o or s == o:
-            continue
-        w = max(1, int(raw.get("w") or 1))
-        key = (s.lower(), r.lower(), o.lower())
-        if key in edge_map:
-            edge_map[key]["w"] = edge_map[key].get("w", 1) + w
-        else:
-            rec = {"s": s, "r": r, "o": o, "w": w}
-            if isinstance(raw.get("ev"), list):
-                rec["ev"] = raw["ev"]
-            edge_map[key] = rec
-    sorted_edges = sorted(edge_map.values(), key=lambda x: x.get("w", 1), reverse=True)
-    return sorted_edges[:max_edges]
-
-
 def build_series_digest(ser_arcs, max_samples=80, max_chars=6500):
     if len(ser_arcs) <= max_samples:
         sampled = ser_arcs
@@ -1851,7 +1828,6 @@ def main():
     series_summaries = dict(existing_series_summaries)
     extracted_aliases = []
     extracted_glossary = []
-    extracted_relations = []
 
     if args.no_llm:
         for a in new_arcs:
@@ -2029,8 +2005,6 @@ def main():
                         print(f"[build_novel] arc progress: {arc_done}/{len(todo_arcs)}")
 
         if not args.skip_meta and target_arcs:
-            graph_path = os.path.join(out_corpus_dir, "graph.json")
-            has_existing_graph = os.path.exists(graph_path)
             grouped = collections.OrderedDict()
             for a in target_arcs:
                 ser_name = str(a.get("series") or a.get("category") or "正文卷").strip()
@@ -2047,9 +2021,8 @@ def main():
                         f"你是《{args.name}》文本资料库总编。请根据以下「{ser_name}」的章节脉络与高频人物表，提炼全卷级检索元数据与知识图谱：\n"
                         "1. series_summary: 60-120字精炼概括本卷主线剧情、核心舞台与关键转折；\n"
                         "2. aliases: 同一人物/实体的本名、化名、外号、简称对照二维数组（每组至少2项，严禁把不同人混为一组，最多25组）；\n"
-                        "3. glossary: 本卷重要势力、组织、小队编制、能力体系、核心地点或器物速查数组（每条“名称：一句话说明”，对核心小队/组织务必写全各分队或各期成员名单与更迭，如一队/二队/新老成员，最多20条）；\n"
-                        "4. relations: 人物与人物、人物与组织/小队的知识图谱关系三元组数组，格式 [{\"s\":\"主体\",\"r\":\"关系(如:属于/队长/搭档/旧友/宿敌/救过/接任)\",\"o\":\"客体\"}]（最多40条）。\n"
-                        "只输出严格 JSON：{\"series_summary\":\"60-120字概括本卷主线、核心舞台与转折\",\"aliases\":[[\"正式名\",\"化名/外号/简称\"]],\"glossary\":[\"重要势力/小队/组织/地点：一句话说明（写明成员或分支）\"],\"relations\":[{\"s\":\"主体\",\"r\":\"关系\",\"o\":\"客体\"}]}\n\n"
+                        "3. glossary: 本卷重要势力、组织、小队编制、能力体系、核心地点或器物速查数组（每条“名称：一句话说明”，对核心小队/组织务必写全各分队或各期成员名单与更迭，如一队/二队/新老成员，最多20条）。\n"
+                        "只输出严格 JSON：{\"series_summary\":\"60-120字概括本卷主线、核心舞台与转折\",\"aliases\":[[\"正式名\",\"化名/外号/简称\"]],\"glossary\":[\"重要势力/小队/组织/地点：一句话说明（写明成员或分支）\"]}\n\n"
                         f"高频人物：{', '.join(top_chars) if top_chars else '（暂无）'}\n"
                         f"章节脉络（共 {len(ser_arcs)} 章）：\n{digest_text}"
                     )
@@ -2061,13 +2034,12 @@ def main():
                             "series_summary": str(parsed.get("series_summary", "")).strip(),
                             "aliases": parsed.get("aliases") if isinstance(parsed.get("aliases"), list) else [],
                             "glossary": [str(x).strip() for x in (parsed.get("glossary") or []) if str(x).strip()],
-                            "relations": parsed.get("relations") if isinstance(parsed.get("relations"), list) else [],
                         }
                         save_ckpt(rec)
                         print(
                             f"[build_novel] synthesized meta for '{ser_name}': "
                             f"summary={len(rec['series_summary'])}c, aliases={len(rec['aliases'])}, "
-                            f"glossary={len(rec['glossary'])}, relations={len(rec['relations'])}"
+                            f"glossary={len(rec['glossary'])}"
                         )
                     except Exception as err:
                         print(f"[build_novel] warn series_meta '{ser_name}' skipped ({err})")
@@ -2080,8 +2052,6 @@ def main():
                         extracted_aliases.extend(rec["aliases"])
                     if rec.get("glossary"):
                         extracted_glossary.extend(rec["glossary"])
-                    if rec.get("relations") and (not from_ckpt or not has_existing_graph):
-                        extracted_relations.extend(rec["relations"])
 
         for a in arcs:
             for sc in a.get("scenes") or []:
@@ -2177,22 +2147,6 @@ def main():
                 f"[build_novel] merged corpus.json metadata: aliases={len(old_aliases)}->{len(new_aliases)}, "
                 f"glossary={len(old_glossary)}->{len(new_glossary)}"
             )
-
-    if extracted_relations:
-        graph_path = os.path.join(out_corpus_dir, "graph.json")
-        existing_edges = []
-        if os.path.exists(graph_path):
-            try:
-                with open(graph_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, list):
-                    existing_edges = loaded
-            except Exception:
-                existing_edges = []
-        merged_edges = merge_relations(existing_edges, extracted_relations)
-        if merged_edges:
-            atomic_write_json(graph_path, merged_edges, indent=2)
-            print(f"[build_novel] merged graph.json: {len(existing_edges)}->{len(merged_edges)} edges")
 
     if not args.no_llm:
         print(

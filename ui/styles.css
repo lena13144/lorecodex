@@ -605,7 +605,7 @@ pre.raw-pre {
 .modal-body { padding: 16px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
 .modal-foot {
   padding: 11px 18px; background: var(--paper-alt); border-top: 1px solid var(--rule);
-  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap;
 }
 .fld-group { display: flex; flex-direction: column; gap: 4px; }
 .fld-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

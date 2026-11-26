@@ -91,7 +91,7 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
       type: 'function',
       function: {
         name: 'list_series',
-        description: `列出《${name}》的 Level-0 卷宗/分部总览（共 ${seriesList.length} 个分部，${stats.arcs} 个篇章，${stats.scenes} 幕）。当篇章总数庞大或需先定大方向时，可先按分部缩小范围。`,
+        description: `列出 Level-0 分部总览（共 ${seriesList.length} 个分部），用于大书库先定范围。`,
         parameters: {
           type: 'object',
           properties: {
@@ -105,14 +105,14 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
 
   const arcProps = {
     category: { type: 'string', description: `可选分类：${catDesc}` },
-    character: { type: 'string', description: '可选人物/实体名（自动按别名表展开）' },
-    keyword: { type: 'string', description: '可选主题/组织/地点/事件关键词（匹配标题、简介、key_items 与子幕摘要）' },
-    tone: { type: 'string', description: `可选场景氛围标签：${toneDesc}` },
+    character: { type: 'string', description: '可选人物名（自动展开别名）' },
+    keyword: { type: 'string', description: '可选主题/组织/地点/事件词' },
+    tone: { type: 'string', description: `可选氛围：${toneDesc}` },
   };
   if (seriesList.length) {
     arcProps.series = {
       type: 'string',
-      description: `可选分部/卷宗名：${seriesList.slice(0, 12).map((s) => s.series).join(' / ')}`,
+      description: `可选分部：${seriesList.slice(0, 12).map((s) => s.series).join(' / ')}`,
     };
   }
 
@@ -120,7 +120,7 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
     type: 'function',
     function: {
       name: 'list_story_arcs',
-      description: `列出《${name}》目录树篇章（共 ${stats.arcs} 卷，${stats.scenes} 幕，${formatCharCount(stats.total_chars)}）。可按 series、category、character、keyword 或 tone 过滤；若篇章过多且无过滤参数，会自动折叠返回 Level-0 分部概览。`,
+      description: '按条件列出目录树篇章；无过滤且篇章过多时自动折叠为分部概览。',
       parameters: {
         type: 'object',
         properties: arcProps,
@@ -133,14 +133,14 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
     type: 'function',
     function: {
       name: 'get_arc_scenes',
-      description: '展开 1~5 个篇章下的全部分幕目录（node_id、title、order、tone_tags、chars、summary），不含正文。',
+      description: '展开 1~5 个篇章的分幕摘要目录（不含正文）。',
       parameters: {
         type: 'object',
         properties: {
           arc_ids: {
             type: 'array',
             items: { type: 'string' },
-            description: '篇章 arc_id 列表（最多 5 个），例如 ["0001"]',
+            description: 'arc_id 列表（最多 5 个）',
           },
         },
         required: ['arc_ids'],
@@ -152,18 +152,18 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
     type: 'function',
     function: {
       name: 'read_scene',
-      description: '批量读取 1~10 个场景节点的完整无截断正文（推荐一次传入多个 scene_node_ids 批量核实，节省轮次）。',
+      description: '批量读取 1~10 个场景节点的完整无截断正文。',
       parameters: {
         type: 'object',
         properties: {
           scene_node_ids: {
             type: 'array',
             items: { type: 'string' },
-            description: 'scene node_id 数组（单次最多 10 个，强烈建议将候选节点合并在一次调用中批量读取）',
+            description: 'scene node_id 数组（1~10 个，尽量合并批量读取）',
           },
           focus_query: {
             type: 'string',
-            description: '可选聚焦关键词（空格分隔，自动展开别名）。提供时仅抽取命中行及其上下文窗口，节省长场景的上下文预算。',
+            description: '可选聚焦词（空格分隔，自动展开别名）：仅返回命中行上下文窗口',
           },
         },
         required: ['scene_node_ids'],
@@ -175,21 +175,21 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
     type: 'function',
     function: {
       name: 'grep_scenes',
-      description: `全库 ${formatCharCount(stats.total_chars)} 正文与档案毫秒级精确扫描（自动展开人物别名）。专门解决“非主要角色在别人篇章里只客串说了几句话、目录未标出”的盲区，以及原句定位、跨卷时间线关键词（如“十年前”“解散”）、两角色同框、专有设定词条直查。多个词用空格分隔（默认优先同幕共现），支持按 category/tone 过滤，可从第一轮起随时与目录工具并发调用。`,
+      description: '全库正文毫秒级精确扫描（自动展开别名、发现客串/原句/跨卷词条；多词空格分隔优先同幕共现）。',
       parameters: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: '待扫描的人名/别名、原句片段或空格分隔的共现关键词' },
-          category: { type: 'string', description: `可选限定分类：${catDesc}` },
-          tone: { type: 'string', description: `可选限定氛围标签：${toneDesc}` },
+          query: { type: 'string', description: '人名/别名、原句或空格分隔的共现词' },
+          category: { type: 'string', description: `可选分类：${catDesc}` },
+          tone: { type: 'string', description: `可选氛围：${toneDesc}` },
           sort_by: {
             type: 'string',
             enum: ['relevance', 'diversity', 'rarity'],
-            description: '排序策略：relevance（默认相关性与客串优先）、diversity（跨早期/中期/后期 order 分桶均衡采样）、rarity（低频稀少线索优先）',
+            description: 'relevance(默认) | diversity(跨进度分桶防刷屏) | rarity(低频稀有优先)',
           },
           offset: {
             type: 'integer',
-            description: '分页偏移量（默认 0），配合分布雷达提示翻看后续命中',
+            description: '分页偏移量（默认 0）',
           },
         },
         required: ['query'],
@@ -202,11 +202,11 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
       type: 'function',
       function: {
         name: 'fallback_search',
-        description: '可选混合检索兜底通道。仅当目录树与 grep_scenes 均无法定位冷门概念时从 Turn 2 起按需调用，禁止在第一轮调用。',
+        description: '兜底检索；仅当目录与 grep 均未命中时从 Turn 2 起按需调用。',
         parameters: {
           type: 'object',
           properties: {
-            query: { type: 'string', description: '检索关键词或短句' },
+            query: { type: 'string', description: '关键词或短句' },
           },
           required: ['query'],
         },
@@ -281,23 +281,22 @@ function buildSystemPrompt({
     ? '\n  "selected_chunks": ["可选 chunk_id，否则 []"],'
     : '';
 
-  return `你是《${corpusConfig.name}》后台树形记忆检索 Agent，负责定位与核实原著文本供正文模型衔接。
-语料规模：${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}（分类：${categories.join('、') || '通用'}${toneTags.length ? `；tone：${toneTags.join('、')}` : ''}）。
+  return `你是《${corpusConfig.name}》树形记忆检索 Agent，负责核实原著文本供正文衔接（${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}；分类：${categories.join('、') || '通用'}${toneTags.length ? `；tone：${toneTags.join('、')}` : ''}）。
 ${corpusConfig.world_premise}
 ${spoilerBlock}${glossaryBlock}
-【检索策略】
-${gateRule}
-2. 高效寻路：${turn1Rule}${fallbackStep}；首次未命中可换词或别名重试。调用 \`read_scene\` 时尽量单次批量传入多个 \`scene_node_ids\`（最多 10 个）。
-3. 按跨度选幕（上限 ${maxScenes} 幕${maxChars ? ` / ${maxChars.toLocaleString()} 字` : ''}）：定点查证选 1~3 幕（跨幕剧情注意连读相邻幕）；宏观回顾、群像或组织/势力过往选 4~10 幕，结合词表与目录人物表跨阶段、全分支覆盖（如前任/新晋/分队），宏观脉络可填 \`selected_arcs\`（1~10 个）${toneRoutingExtra}。
-4. 事实核实：\`selected_nodes\` 必须经 \`read_scene\` 核实；未收录原创角色或外部设定${ocHint}直接输出 {"skip":true,"reason":"未收录原创或外部设定"}；严禁编造。
-5. 原作未载的事：对话提到的往事可能来自同人设定、角色卡前情或本局经历，原作里没有不代表没发生过。用户的说法常和原文措辞不同，\`grep_scenes\` 没命中不等于原作没有：先用 \`list_story_arcs\`（按 character/keyword 过滤）和 \`get_arc_scenes\` 翻相关人物的篇章摘要找这件事。grep 和目录各翻过一轮仍找不到这件事本身，才算原作未载：停止搜索这件事，不要再换关键词、换情绪标签重搜；下一轮最多 read_scene 一次，只补其中原作人物、地点、组织的相关原文作背景，然后直接输出；连背景也没有就 skip。\`guide\` 只写“此事原作未载”和原作里能对上的部分，不要否定、纠正或要求澄清用户的说法。
-6. 严格输出 JSON（停止调工具后仅输出单个 JSON 对象）：
+【规则】
+${gateRule}未收录原创/外部设定${ocHint}直接 skip。
+2. 寻路：若【图书馆管理员笔记】与当前问题相关，首轮直接 \`read_scene\` 核实所列节点；否则${turn1Rule}${fallbackStep}。\`read_scene\` 尽量批量读（最多 10 个），\`selected_nodes\` 必须经 \`read_scene\` 核实，严禁编造。
+3. 选幕（上限 ${maxScenes} 幕${maxChars ? ` / ${maxChars.toLocaleString()} 字` : ''}）：定点查证 1~3 幕（注意连读相邻幕）；宏观/群像/势力过往 4~10 幕并跨阶段全分支覆盖，宏观脉络可填 \`selected_arcs\`（1~10 个）${toneRoutingExtra}。
+4. 原作未载：对话提及的往事可能来自同人、角色卡或本局经历。\`grep_scenes\` 未命中先翻相关人物目录（\`list_story_arcs\` + \`get_arc_scenes\`）一轮；仍找不到即停搜，最多再 \`read_scene\` 一次补原作人物/地点背景后输出（无背景则 skip）。\`guide\` 只写“此事原作未载”及原作能对上的部分，不否定或纠正用户。
+5. 停止调工具后仅输出单个严格 JSON：
 {
   "skip": false,
   "selected_nodes": ["经 read_scene 核实的 node_id"],
   "selected_arcs": ["可选宏观 arc_id，否则 []"],${fallbackFieldLine}
   "timeline_note": "时间线阶段或跨度",
-  "guide": "结构化记忆导读并标注对应 [node_id]"
+  "guide": "结构化导读并标注 [node_id]",
+  "memory_note": {"topic": "可选：8~24字主题（仅核实有复用价值的原文时填）", "triggers": ["3~6个角色+场景线索词"], "summary": "1句话路标"}
 }`;
 }
 
@@ -316,7 +315,7 @@ function normalizeSessionRecall(raw) {
   return out;
 }
 
-function buildUserMessage({ query, recentChat, sceneAnchor, sessionRecall, onDemand, corpusConfig, maxOrder }) {
+function buildUserMessage({ query, recentChat, sceneAnchor, sessionRecall, librarianHints, onDemand, corpusConfig, maxOrder }) {
   const parts = [];
   const anchorBits = [];
 
@@ -349,6 +348,10 @@ function buildUserMessage({ query, recentChat, sceneAnchor, sessionRecall, onDem
   const recall = normalizeSessionRecall(sessionRecall);
   if (recall.length) {
     parts.push(`【本局记忆召回】（本局已发生的事，不是原作内容；只用于理解对话里的指代，不要据此去原作里找本局独有的事件）\n${recall.join('\n')}`);
+  }
+
+  if (librarianHints) {
+    parts.push(String(librarianHints).trim());
   }
 
   if (Array.isArray(recentChat) && recentChat.length) {

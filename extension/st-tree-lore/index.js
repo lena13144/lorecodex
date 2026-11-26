@@ -113,8 +113,16 @@ const TOOL_LABELS = {
 const retrievalProgress = { el: null, timer: null, t0: 0, detail: '' };
 
 function progressHost() {
-    if (typeof document === 'undefined' || !document.getElementById) return null;
-    return document.getElementById('form_sheld');
+    if (typeof document === 'undefined' || !document.getElementById) return { host: null, fixed: false };
+    const form = document.getElementById('form_sheld');
+    if (form) {
+        if (typeof getComputedStyle !== 'function') return { host: form, fixed: false };
+        const st = getComputedStyle(form);
+        if (st.display !== 'none' && st.overflow === 'visible' && st.overflowY === 'visible') {
+            return { host: form, fixed: false };
+        }
+    }
+    return { host: document.body || form, fixed: true };
 }
 
 function renderRetrievalProgress() {
@@ -126,16 +134,15 @@ function renderRetrievalProgress() {
 }
 
 function startRetrievalProgress(cfg) {
-    const host = progressHost();
+    const { host, fixed } = progressHost();
     if (!host) return;
     stopRetrievalProgress();
     const el = document.createElement('div');
-    el.className = 'lorecodex-progress';
+    el.className = fixed ? 'lorecodex-progress lorecodex-progress-fixed' : 'lorecodex-progress';
     el.setAttribute('data-lc-theme', cfg?.uiTheme === 'paper' ? 'paper' : 'lamp');
     el.setAttribute('role', 'status');
     el.innerHTML = '<span class="lorecodex-progress-dot"></span><span class="lorecodex-progress-text"></span><span class="lorecodex-progress-time"></span>';
-    // 挂在输入区内部、绝对定位浮在其上方：不占布局，聊天区不会因此跳动。
-    host.classList?.add('lorecodex-progress-host');
+    if (!fixed) host.classList?.add('lorecodex-progress-host');
     host.appendChild(el);
     Object.assign(retrievalProgress, { el, t0: Date.now(), detail: '' });
     renderRetrievalProgress();
@@ -602,10 +609,25 @@ function renderLastPreview(cfg) {
         return;
     }
     const snap = lastInjectionSnapshot;
+    const lm = snap.librarian_memory || {};
+    const lmMatched = Array.isArray(lm.matched) ? lm.matched : [];
+    const lmSaved = lm.saved || null;
     const statusPill = snap.skip
         ? `<span class="lorecodex-pill skip">跳过注入</span>`
         : `<span class="lorecodex-pill ok">命中 ${snap.scenes.length} 幕${snap.outlines?.length ? ` · ${snap.outlines.length}大纲` : ''}</span>${snap.reused ? '<span class="lorecodex-pill" title="用户消息未变，沿用上次检索结果">复用</span>' : ''}`;
+    const memPill = lmMatched.length
+        ? `<span class="lorecodex-pill accent" title="司书笺语直达索引命中">笺语×${lmMatched.length}</span>`
+        : (lmSaved?.action === 'created' ? `<span class="lorecodex-pill accent" title="司书笺语记入新条目">新录笺语</span>` : '');
     const orderPill = snap.max_order ? `<span class="lorecodex-pill accent">序≤${escHtml(snap.max_order)}</span>` : '';
+    const memDetails = [];
+    if (lmMatched.length) memDetails.push(`笺语命中：${lmMatched.slice(0, 3).map((m) => `《${escHtml(m.topic)}》`).join('、')}`);
+    if (lmSaved?.topic) {
+        const actLabel = lmSaved.action === 'created' ? '新录' : lmSaved.action === 'merged' ? '合并' : '复用';
+        memDetails.push(`手账${actLabel}：《${escHtml(lmSaved.topic)}》`);
+    }
+    const memBlock = memDetails.length
+        ? `<div class="lorecodex-muted" style="font-size:0.86em;line-height:1.45;">${memDetails.join(' · ')}</div>`
+        : '';
     const scenesHtml = (snap.scenes || []).map(s => `
         <div class="lorecodex-scene-item">
             <span><code>${escHtml(s.node_id)}</code> ${escHtml(s.arc_title)} · ${escHtml(s.title)}</span>
@@ -619,16 +641,18 @@ function renderLastPreview(cfg) {
                 <span class="lorecodex-row" style="gap:5px;flex-wrap:nowrap;min-width:0;">
                     <span class="lorecodex-muted" style="flex-shrink:0;">上次检索</span>
                     ${statusPill}
+                    ${memPill}
                     ${orderPill}
                 </span>
                 <span class="lorecodex-muted" style="flex-shrink:0;">${Number(snap.took_ms) || 0}ms · ${Number(snap.turns) || 0}轮</span>
             </summary>
             <div class="lorecodex-last-body">
+                ${memBlock}
                 ${snap.skip
                     ? `<div class="lorecodex-muted">原因：${escHtml(snap.reason || '无命中')}</div>`
                     : `${snap.guide ? `<div class="lorecodex-muted" style="line-height:1.45;white-space:pre-line;">${escHtml(snap.guide)}</div>` : ''}${scenesHtml ? `<div class="lorecodex-preview-scenes">${scenesHtml}</div>` : ''}`
                 }
-                <button type="button" id="lorecodex_preview_open_wb" class="menu_button" style="width:100%;padding:4px 8px;font-size:0.84em;">在大面板查看完整轨迹</button>
+                <button type="button" id="lorecodex_preview_open_wb" class="lorecodex-ghost-btn sm" style="width:100%;">在大面板查看完整轨迹</button>
             </div>
         </details>
     `);
@@ -779,6 +803,7 @@ async function runTreeRetrieval(cfg, ctx, chat, { query, onDemand, sessionRecall
         guide: data.guide || '',
         scenes,
         outlines,
+        librarian_memory: data.librarian_memory || null,
         run_id: data.run_id || '',
         prompt_chars: promptText.length,
     };
@@ -1084,6 +1109,9 @@ jQuery(async () => {
     };
 
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        lastInjectionSnapshot = null;
+        lastRetrievalCache = null;
+        renderLastPreview(cfg);
         const charKey = getActiveCharKey();
         const b = charKey ? cfg.charBindings?.[charKey] : null;
         if (b) {

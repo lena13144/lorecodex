@@ -583,7 +583,19 @@
     }
 
     .lorecodex-wb-head {
-        padding: 7px 10px;
+        padding: max(7px, env(safe-area-inset-top)) 10px 7px 10px;
+    }
+}
+
+@media (pointer: coarse) {
+    .lorecodex-icon-btn {
+        width: 34px;
+        height: 34px;
+    }
+
+    .lorecodex-ghost-btn.sm {
+        min-height: 34px;
+        padding: 0 11px;
     }
 }
 
@@ -767,6 +779,12 @@
     -webkit-backdrop-filter: blur(6px);
     pointer-events: none;
     animation: lorecodex-progress-in 0.18s ease-out;
+}
+
+.lorecodex-progress.lorecodex-progress-fixed {
+    position: fixed;
+    bottom: max(16px, env(safe-area-inset-bottom));
+    z-index: 9998;
 }
 
 .lorecodex-progress[data-lc-theme="paper"] {

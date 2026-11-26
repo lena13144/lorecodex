@@ -30,6 +30,7 @@ What LoreCodex does:
 1. **Build the index once.** Split the work into `volume → arc → scene`; an LLM writes a summary for every scene and an overview for every volume, plus a character alias table and a glossary.
 2. **Before each reply, the retrieval model looks things up itself.** It browses volumes, expands arcs, searches the full text by name and alias, and finally reads source scenes. Scenes handed to the main model **must have been read in full**, not guessed from summaries.
 3. **Inject complete source scenes.** Nothing is truncated or chunked, so the main model can match the original tone and details.
+4. **Living Librarian Notebook (Loria).** After verified lookups, Loria records pointer-only notes (scene refs, macro arc refs, and exponentially decaying co-access links — zero embeddings, strictly spoiler-gated). Follow-up or related queries jump straight to `read_scene`, cutting search turns and token spend; you can inspect, lock, or clear notes anytime in the workbench.
 
 ## How it differs
 
@@ -107,10 +108,10 @@ Runs purely in the browser by default—no backend process required on desktop o
 
 [**GitHub Releases**](https://github.com/lena13144/lorecodex/releases) provides **4 standalone packages** so you only download what you need:
 
-1. **`lorecodex-sillytavern-tauritavern-extension-v2.5.0.zip`** — Frontend extension for SillyTavern & TauriTavern (mobile/desktop): sidebar card, IndexedDB serverless engine, embedded workbench UI, in-browser TXT/GB18030/EPUB/JSON builders, LLM directory upgrader, and `demo-chronicles.lorepack.json`.
-2. **`lorecodex-cloud-builder-kit-v2.5.0.zip`** — Zero-dependency Python scripts (`build_novel.py`, `build_lore.py`, `slice_batches.py`, `pack_lorepack.py`) plus `AGENT_INSTRUCTIONS.md`. Upload alongside your novel to a cloud AI task (Gemini / Claude / Grok / Qoder / WorkBuddy, etc.) to produce a `.lorepack.json` without an external API key.
-3. **`lorecodex-agent-dsh-mcp-plugin-v2.5.0.zip`** — Agent-only bundle containing the **DeepSeek Harness (`@deepseek-ai/dsh` / Cordis)** plugin (`src/dsh_plugin.js` + `cordis.patch.yml`), zero-dependency **MCP stdio server** (`src/mcp_server.js`), and **Agent Skill** (`skills/lorecodex/SKILL.md`), exposing 9 tools (`lorecodex_list_corpora`, `lorecodex_list_series`, `lorecodex_list_arcs`, `lorecodex_expand_arc`, `lorecodex_grep_scenes`, `lorecodex_read_scenes`, `lorecodex_build_corpus`, `lorecodex_update_index_meta`, and `lorecodex_ask_agent`).
-4. **`lorecodex-full-server-workbench-v2.5.0.zip`** — Full package with the optional Node HTTP server (`src/server.js`, also useful for bypassing browser CORS on custom API relays), Python CLI builders (`builders/`, with web/MediaWiki noise stripping and `--h1-is-volume` / `--strip-block` / `--allow-noisy`), standalone workbench UI, SillyTavern extension, and agent integrations.
+1. **`lorecodex-sillytavern-tauritavern-extension-v3.0.0.zip`** — Frontend extension for SillyTavern & TauriTavern (mobile/desktop): sidebar card, IndexedDB serverless engine, embedded workbench UI, in-browser TXT/GB18030/EPUB/JSON builders, LLM directory upgrader, and `demo-chronicles.lorepack.json`.
+2. **`lorecodex-cloud-builder-kit-v3.0.0.zip`** — Zero-dependency Python scripts (`build_novel.py`, `build_lore.py`, `slice_batches.py`, `pack_lorepack.py`) plus `AGENT_INSTRUCTIONS.md`. Upload alongside your novel to a cloud AI task (Gemini / Claude / Grok / Qoder / WorkBuddy, etc.) to produce a `.lorepack.json` without an external API key.
+3. **`lorecodex-agent-dsh-mcp-plugin-v3.0.0.zip`** — Agent-only bundle containing the **DeepSeek Harness (`@deepseek-ai/dsh` / Cordis)** plugin (`src/dsh_plugin.js` + `cordis.patch.yml`), zero-dependency **MCP stdio server** (`src/mcp_server.js`), and **Agent Skill** (`skills/lorecodex/SKILL.md`), exposing 9 tools (`lorecodex_list_corpora`, `lorecodex_list_series`, `lorecodex_list_arcs`, `lorecodex_expand_arc`, `lorecodex_grep_scenes`, `lorecodex_read_scenes`, `lorecodex_build_corpus`, `lorecodex_update_index_meta`, and `lorecodex_ask_agent`).
+4. **`lorecodex-full-server-workbench-v3.0.0.zip`** — Full package with the optional Node HTTP server (`src/server.js`, also useful for bypassing browser CORS on custom API relays), Python CLI builders (`builders/`, with web/MediaWiki noise stripping and `--h1-is-volume` / `--strip-block` / `--allow-noisy`), standalone workbench UI, SillyTavern extension, and agent integrations.
 
 ```bash
 # Install directly into DeepSeek Harness (dsh)

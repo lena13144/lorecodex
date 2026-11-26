@@ -4,6 +4,12 @@ let browserEnginePromise = null;
 const localJobsMap = new Map();
 const localJobControllers = new Map();
 const localAgentsCache = new Map();
+let localRowsCache = null;
+
+function clearLocalCaches() {
+  localAgentsCache.clear();
+  localRowsCache = null;
+}
 
 async function getBrowserEngine() {
   if (!browserEnginePromise) {
@@ -15,8 +21,12 @@ async function getBrowserEngine() {
 }
 
 async function ensureLocalDemoSeeded(be) {
+  if (localRowsCache && localRowsCache.length > 0) return localRowsCache;
   const rows = await be.idbListCorpora();
-  if (rows.length > 0) return rows;
+  if (rows.length > 0) {
+    localRowsCache = rows;
+    return rows;
+  }
   try {
     const demoUrl = new URL('../demo-chronicles.lorepack.json', import.meta.url).href;
     const r = await fetch(demoUrl);
@@ -28,7 +38,8 @@ async function ensureLocalDemoSeeded(be) {
         name: rawPack.corpus_name || rawPack.indexData?.corpus_name || '苍穹残响·灰烬星港编年史',
       });
       await be.idbSaveCorpus(pack);
-      return await be.idbListCorpora();
+      localRowsCache = await be.idbListCorpora();
+      return localRowsCache;
     }
   } catch (_) {}
   return rows;
@@ -41,13 +52,16 @@ async function getLocalAgentAndPack(corpusId) {
   if (!meta) {
     throw new Error('内置免服务端书库为空，请先点击顶栏「导入建树」导入小说 (.txt / .md)、世界书 (.json) 或 .lorepack.json');
   }
+  const cacheKey = `${meta.id}:${meta.updatedAt || ''}`;
+  const cached = localAgentsCache.get(cacheKey);
+  if (cached) {
+    return { be, pack: cached.pack, agent: cached.agent, rows };
+  }
   const fullPack = typeof be.idbGetCorpus === 'function' ? await be.idbGetCorpus(meta.id) : null;
   const pack = fullPack || meta;
-  const cacheKey = `${pack.id}:${pack.updatedAt || ''}`;
-  if (!localAgentsCache.has(cacheKey)) {
-    localAgentsCache.set(cacheKey, be.createBrowserTreeAgent(pack));
-  }
-  return { be, pack, agent: localAgentsCache.get(cacheKey), rows };
+  const agent = be.createBrowserTreeAgent(pack);
+  localAgentsCache.set(cacheKey, { pack, agent });
+  return { be, pack, agent, rows };
 }
 
 function parseOptionalTemp(val) {
@@ -112,7 +126,7 @@ export async function fetchHealth() {
   return {
     ok: true,
     engine: 'lorecodex-browser',
-    version: '2.4.1',
+    version: '3.0.0',
     mode: 'browser-idb',
     boot_ms: 1,
     defaultCorpus: active?.id || 'demo-chronicles',
@@ -163,7 +177,7 @@ export async function reloadCorpora() {
   if (!forceLocalMode) {
     return reqJson('/corpora/reload', { method: 'POST' });
   }
-  localAgentsCache.clear();
+  clearLocalCaches();
   const res = await fetchCorpora();
   return { ok: true, ...res };
 }
@@ -207,8 +221,32 @@ export async function saveCorpusConfig(id, patch) {
   pack.config = normalized;
   if (pack.config.name) pack.indexData.corpus_name = pack.config.name;
   await be.idbSaveCorpus(pack);
-  localAgentsCache.clear();
+  clearLocalCaches();
   return { ok: true, corpus: await fetchCorpusDetail(pack.id) };
+}
+
+export async function fetchLibrarianMemory(id) {
+  if (!forceLocalMode) {
+    return reqJson(`/corpora/${encodeURIComponent(id)}/memory`);
+  }
+  const be = await getBrowserEngine();
+  const notes = typeof be.idbGetLibrarianMemory === 'function' ? await be.idbGetLibrarianMemory(id) : [];
+  return { ok: true, corpus_id: id, count: notes.length, notes };
+}
+
+export async function updateLibrarianMemory(id, payload) {
+  if (!forceLocalMode) {
+    return reqJson(`/corpora/${encodeURIComponent(id)}/memory`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {}),
+    });
+  }
+  const be = await getBrowserEngine();
+  if (typeof be.idbUpdateLibrarianMemory !== 'function') {
+    throw new Error('当前浏览器引擎不支持管理员笔记');
+  }
+  return await be.idbUpdateLibrarianMemory(id, payload || {});
 }
 
 export async function fetchTreeIndex(corpusId, maxOrder = 0) {
@@ -526,7 +564,7 @@ export async function importCorpus(payload) {
             existingPack: appendPack,
           });
       await be.idbSaveCorpus(pack);
-      localAgentsCache.clear();
+      clearLocalCaches();
       const st = pack.indexData?.stats || {};
       const report = be.inspectCorpusStructure(pack);
       job.structureReport = report;
@@ -591,7 +629,7 @@ export async function importCorpus(payload) {
                 },
                 async onSave(updatedPack) {
                   await be.idbSaveCorpus(updatedPack);
-                  localAgentsCache.clear();
+                  clearLocalCaches();
                 },
               });
               job.logs.push(
@@ -618,7 +656,7 @@ export async function importCorpus(payload) {
     } catch (e) {
       if (pack) {
         await be.idbSaveCorpus(pack).catch(() => {});
-        localAgentsCache.clear();
+        clearLocalCaches();
       }
       const aborted = abortCtrl.signal.aborted;
       job.error = e?.message || String(e);
@@ -748,11 +786,11 @@ export async function upgradeCorpus(id, payload = {}) {
         },
         async onSave(updatedPack) {
           await be.idbSaveCorpus(updatedPack);
-          localAgentsCache.clear();
+          clearLocalCaches();
         },
       });
       await be.idbSaveCorpus(pack);
-      localAgentsCache.clear();
+      clearLocalCaches();
       if (res.message) {
         job.logs.push(res.message);
       } else {
@@ -774,7 +812,7 @@ export async function upgradeCorpus(id, payload = {}) {
       job.finishedAt = new Date().toISOString();
     } catch (e) {
       await be.idbSaveCorpus(pack).catch(() => {});
-      localAgentsCache.clear();
+      clearLocalCaches();
       const aborted = abortCtrl.signal.aborted;
       job.error = e?.message || String(e);
       job.progress = {
@@ -835,9 +873,7 @@ export async function deleteCorpus(id) {
   }
   const be = await getBrowserEngine();
   await be.idbDeleteCorpus(cid);
-  for (const key of Array.from(localAgentsCache.keys())) {
-    if (key.startsWith(`${cid}:`)) localAgentsCache.delete(key);
-  }
+  clearLocalCaches();
   const listRes = await fetchCorpora();
   return { ok: true, deleted: cid, ...listRes };
 }

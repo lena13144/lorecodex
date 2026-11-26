@@ -603,7 +603,7 @@ const server = http.createServer(async (req, res) => {
     return send({
       ok: true,
       engine: 'lorecodex',
-      version: '2.4.0',
+      version: require('../package.json').version || '3.0.0',
       mode: 'tree-only',
       boot_ms: bootMs,
       defaultCorpus: activeId,
@@ -748,6 +748,32 @@ const server = http.createServer(async (req, res) => {
         force: Boolean(payload.force),
       });
       return send({ ok: true, job }, 202);
+    } catch (e) {
+      return send({ error: e.message }, e.statusCode || 400);
+    }
+  }
+
+  const corpusMemMatch = pathname.match(/^\/corpora\/([^/]+)\/memory$/);
+  if (corpusMemMatch && (req.method === 'GET' || req.method === 'POST')) {
+    const cid = decodeURIComponent(corpusMemMatch[1]).trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(cid) || !corpusManager.hasCorpus(cid)) {
+      return send({ error: `corpus "${cid}" not found` }, 404);
+    }
+    const agent = corpusManager.getAgent(cid);
+    if (!agent?.loaded) {
+      return send({ error: `corpus "${cid}" not loaded` }, 503);
+    }
+    if (req.method === 'GET') {
+      const notes = typeof agent.getLibrarianMemory === 'function' ? agent.getLibrarianMemory() : [];
+      return send({ ok: true, corpus_id: cid, count: notes.length, notes });
+    }
+    if (!isLocalOrAllowedOrigin(req.headers.origin, req)) {
+      return send({ error: 'origin not allowed' }, 403);
+    }
+    try {
+      const payload = await readJsonBody(req);
+      const res = agent.updateLibrarianMemory(payload);
+      return send({ ok: true, corpus_id: cid, count: res.notes.length, changed: res.changed, notes: res.notes });
     } catch (e) {
       return send({ error: e.message }, e.statusCode || 400);
     }

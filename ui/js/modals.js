@@ -5,6 +5,8 @@ import {
   fetchModels,
   fetchCorpusDetail,
   saveCorpusConfig,
+  fetchLibrarianMemory,
+  updateLibrarianMemory,
   deleteCorpus,
   reloadCorpora,
   importCorpus,
@@ -777,6 +779,7 @@ export async function openCorpusModal(initialTab = 'basic') {
       <div class="modal-tabs">
         <div class="modal-tab active" data-ctab="basic">基础与世界观</div>
         <div class="modal-tab" data-ctab="aliases">别名与编制表</div>
+        <div class="modal-tab" data-ctab="memory">司书手账</div>
         <div class="modal-tab" data-ctab="framing">防误判与注入包装</div>
         <div class="modal-tab" data-ctab="upgrade">LLM 目录补全</div>
       </div>
@@ -823,6 +826,17 @@ export async function openCorpusModal(initialTab = 'basic') {
             <div class="fld-group"><label class="fld">防张冠李戴 OC 示例（逗号分隔）</label><input id="ccOc" type="text" value="${esc((c.oc_examples || []).join(', '))}" /></div>
             <div class="fld-group"><label class="fld">英文短语扫描排除词（逗号分隔）</label><input id="ccEnExcl" type="text" value="${esc((c.grep?.english_exclude_terms || []).join(', '))}" /></div>
           </div>
+        </div>
+
+        <div id="ctab-memory" class="ctab-pane" style="display:none;flex-direction:column;gap:10px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <div class="pane-sub" id="ccMemStats" style="margin:0;">正在翻开司书笺语的手账...</div>
+            <button id="ccMemClearBtn" type="button" class="btn-sm">清空未锁定笔记</button>
+          </div>
+          <div class="fld-group">
+            <input id="ccMemSearch" type="text" placeholder="按主题、线索词或节点编号检索笺语手账..." />
+          </div>
+          <div id="ccMemList" style="display:flex;flex-direction:column;gap:8px;max-height:330px;overflow-y:auto;padding-right:2px;"></div>
         </div>
 
         <div id="ctab-framing" class="ctab-pane" style="display:none;flex-direction:column;gap:10px;">
@@ -971,11 +985,151 @@ export async function openCorpusModal(initialTab = 'basic') {
       inputs?.[inputs.length - 1]?.focus();
     });
 
+    let memNotes = [];
+    let memLoaded = false;
+
+    const renderMemoryList = () => {
+      const statsEl = $('#ccMemStats');
+      const listEl = $('#ccMemList');
+      if (!statsEl || !listEl) return;
+      const totalHits = memNotes.reduce((acc, n) => acc + (Number(n.hits) || 1), 0);
+      const lockedCount = memNotes.filter((n) => n.locked).length;
+      statsEl.innerHTML = `司书笺语已记下 <b>${memNotes.length}</b> 条直达路标（锁定 ${lockedCount} 条 · 累计复用 ${totalHits} 次，只存原文指针，防剧透且不替代原文）`;
+      const kw = String($('#ccMemSearch')?.value || '').trim().toLowerCase();
+      const byId = new Map(memNotes.map((n) => [n.id, n]));
+      const filtered = kw
+        ? memNotes.filter((n) => {
+            const hay = `${n.topic} ${(n.triggers || []).join(' ')} ${n.summary || ''} ${(n.refs || []).map((r) => r.node_id).join(' ')} ${(n.arc_refs || []).map((a) => `${a.arc_id} ${a.title || ''}`).join(' ')}`.toLowerCase();
+            return hay.includes(kw);
+          })
+        : memNotes;
+      if (!filtered.length) {
+        listEl.innerHTML = `<div class="pane-sub" style="margin:0;">${memNotes.length ? '手账里没有匹配该关键词的记录。' : '手账还是空的——开始检索后，司书笺语会自动把查证过的原文路标与关联线索记在这里，越用越快！'}</div>`;
+        return;
+      }
+      listEl.innerHTML = filtered
+        .map((n) => {
+          const triggersHtml = (n.triggers || [])
+            .slice(0, 6)
+            .map((t) => `<span style="padding:1px 6px;border-radius:4px;background:var(--paper-alt);border:1px solid var(--rule);font-size:11px;">${esc(t)}</span>`)
+            .join('');
+          const refsHtml = (n.refs || [])
+            .slice(0, 6)
+            .map((r) => `<button type="button" class="btn-sm cc-mem-jump-node" data-nid="${esc(r.node_id)}" style="font-family:var(--mono);font-size:11px;padding:1px 6px;height:auto;">${esc(r.node_id)}${r.order != null ? `(序${r.order})` : ''}</button>`)
+            .join('');
+          const arcRefsHtml = (n.arc_refs || [])
+            .slice(0, 5)
+            .map((a) => `<button type="button" class="btn-sm cc-mem-jump-arc" data-aid="${esc(a.arc_id)}" style="font-size:11px;padding:1px 6px;height:auto;">${esc(a.title || a.arc_id)}${a.order != null ? `(序${a.order})` : ''}</button>`)
+            .join('');
+          const linkEntries = Object.entries(n.links || {})
+            .filter(([tid, w]) => w > 0 && byId.has(tid))
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3);
+          const linksHtml = linkEntries
+            .map(([tid, w]) => `<button type="button" class="btn-sm cc-mem-jump-note" data-tid="${esc(tid)}" style="font-size:11px;padding:1px 6px;height:auto;">${esc(byId.get(tid).topic)} (${Number(w).toFixed(2)})</button>`)
+            .join('');
+          const lockTag = n.locked
+            ? `<span style="font-size:10.5px;font-weight:500;padding:1px 5px;border-radius:3px;border:1px solid var(--seal);color:var(--seal);margin-right:5px;">已锁</span>`
+            : '';
+          return `
+            <div class="cc-mem-card" data-mem-id="${esc(n.id)}" style="border:1px solid var(--rule-strong);border-radius:8px;padding:8px 10px;display:flex;flex-direction:column;gap:5px;transition:border-color .2s;">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                <div style="font-weight:600;font-size:13px;">${lockTag}${esc(n.topic)} <span style="font-weight:400;font-size:11px;opacity:.75;">· 命中 ${Number(n.hits) || 1} 次</span></div>
+                <div style="display:flex;gap:6px;flex-shrink:0;">
+                  <button type="button" class="btn-sm cc-mem-lock" data-id="${esc(n.id)}">${n.locked ? '解锁' : '锁定'}</button>
+                  <button type="button" class="btn-sm cc-mem-del" data-id="${esc(n.id)}">删除</button>
+                </div>
+              </div>
+              ${n.summary ? `<div style="font-size:12px;opacity:.88;line-height:1.45;">${esc(n.summary)}</div>` : ''}
+              <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;">${triggersHtml}</div>
+              <div style="font-size:11px;opacity:.88;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"><span>原文指针：</span>${refsHtml}</div>
+              ${arcRefsHtml ? `<div style="font-size:11px;opacity:.88;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"><span>宏观卷：</span>${arcRefsHtml}</div>` : ''}
+              ${linksHtml ? `<div style="font-size:11px;opacity:.88;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"><span>关联线索：</span>${linksHtml}</div>` : ''}
+            </div>`;
+        })
+        .join('');
+      listEl.querySelectorAll('.cc-mem-jump-node').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const nid = btn.dataset.nid;
+          if (!nid) return;
+          closeModal();
+          actions.openScene?.(nid);
+        });
+      });
+      listEl.querySelectorAll('.cc-mem-jump-arc').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const aid = btn.dataset.aid;
+          if (!aid) return;
+          closeModal();
+          actions.openArc?.(aid);
+        });
+      });
+      listEl.querySelectorAll('.cc-mem-jump-note').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const tid = btn.dataset.tid;
+          const targetCard = [...listEl.querySelectorAll('.cc-mem-card')].find((el) => el.dataset.memId === tid);
+          if (!targetCard) return;
+          targetCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          targetCard.style.borderColor = 'var(--seal)';
+          setTimeout(() => { targetCard.style.borderColor = 'var(--rule-strong)'; }, 1200);
+        });
+      });
+      listEl.querySelectorAll('.cc-mem-lock').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          try {
+            const res = await updateLibrarianMemory(c.id, { action: 'toggle_lock', id: btn.dataset.id });
+            memNotes = res.notes || [];
+            renderMemoryList();
+          } catch (e) {
+            showToast('更新锁定状态失败: ' + e.message, 'err');
+          }
+        });
+      });
+      listEl.querySelectorAll('.cc-mem-del').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          try {
+            const res = await updateLibrarianMemory(c.id, { action: 'delete', id: btn.dataset.id });
+            memNotes = res.notes || [];
+            renderMemoryList();
+            showToast('已从司书手账删除该条记录', 'ok');
+          } catch (e) {
+            showToast('删除失败: ' + e.message, 'err');
+          }
+        });
+      });
+    };
+
+    const loadMemoryIfNeeded = async () => {
+      if (memLoaded) return;
+      try {
+        const res = await fetchLibrarianMemory(c.id);
+        memNotes = Array.isArray(res?.notes) ? res.notes : [];
+        memLoaded = true;
+        renderMemoryList();
+      } catch (e) {
+        if ($('#ccMemStats')) $('#ccMemStats').textContent = '加载失败: ' + e.message;
+      }
+    };
+
+    $('#ccMemSearch')?.addEventListener('input', renderMemoryList);
+    $('#ccMemClearBtn')?.addEventListener('click', async () => {
+      if (!window.confirm('确认清空司书手账中所有未锁定的记录？（已锁定记录会保留）')) return;
+      try {
+        const res = await updateLibrarianMemory(c.id, { action: 'clear', includeLocked: false });
+        memNotes = res.notes || [];
+        renderMemoryList();
+        showToast(`已清空 ${res.changed || 0} 条未锁定笔记`, 'ok');
+      } catch (e) {
+        showToast('清空失败: ' + e.message, 'err');
+      }
+    });
+
     const activateCorpusTab = (targetTab) => {
       $('#modalDialog').querySelectorAll('[data-ctab]').forEach((t) => t.classList.toggle('active', t.dataset.ctab === targetTab));
       $('#modalDialog').querySelectorAll('.ctab-pane').forEach((p) => (p.style.display = 'none'));
       const pane = $(`#ctab-${targetTab}`);
       if (pane) pane.style.display = 'flex';
+      if (targetTab === 'memory') loadMemoryIfNeeded();
     };
     $('#modalDialog')
       .querySelectorAll('[data-ctab]')
