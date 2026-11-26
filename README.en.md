@@ -40,9 +40,10 @@ What LoreCodex does:
 | When it applies | A keyword appears | Semantically similar | The retrieval model decides whether and what to look up |
 | What gets injected | Entry text | Short fragments | Complete source scenes |
 | Nicknames, codenames | Hand-written triggers | Often missed | Expanded from the alias table |
-| Spoiler control | None | None | Visibility locked to your chapter progress |
+| Spoiler control | None | None | Visibility locked to chapter progress (including notebook) |
+| Repeat & related lookups | Static keywords | Re-searches chunks every time | Living notebook caches source pointers & decaying co-access links |
 
-**The cost, stated plainly:** every turn calls the retrieval model once, and lookups that need source text run several tool-call rounds, adding latency and API spend. For pure small talk the model decides to skip, but that decision is itself a call. Building the index is a one-time LLM cost. It fits settings with **a lot of source text where faithfulness matters**; for original cards or light lore, a worldbook is enough.
+**Costs & trade-offs, stated plainly:** every turn invokes the retrieval model. While v3.0 cuts repeat/related token spend by ~60%–70% via the Librarian Notebook and slimmer prompts, multi-turn tool calls still take 2–4 requests per lookup, which **can hit rate limits on strict low-RPM or per-request relay APIs** (even skipping small talk takes 1 call). Building the index is a one-time LLM cost (or zero API cost with `cloud-builder-kit`). Spoiler gating follows reading `order`; for heavily non-linear / flashback works where you don't need spoiler gating, sorting volumes chronologically before import (while keeping original prose intact) works best. It fits settings with **a lot of source text where faithfulness matters**; for original cards or light lore, a worldbook is enough.
 
 ## Features
 
@@ -50,9 +51,10 @@ What LoreCodex does:
 2. **Many sources, one tree.** Supports `.txt` (auto UTF-8 / GB18030), `.epub`, `.md`, SillyTavern worldbook `.json`, Character Card V2 `.json` with `character_book`, and single-file `.lorepack.json` bundles.
 3. **LLM indexing with checkpoint resume.** Generates scene summaries and volume overviews per volume in parallel, resolves pronouns to names, and builds the alias table (`aliases`) and glossary (`glossary`). Progress is saved to IndexedDB continuously, so you can pause and resume.
 4. **Alias-aware full-text search.** Searching any name expands to all of that character's aliases; millions of characters usually finish in under 15 ms. Scenes where a character speaks without being credited in the TOC are flagged `[CAMEO]`.
-5. **Spoiler gate (`maxOrder`).** Once set, the TOC, search, and reads never return later chapters; timeless lore with no chapter order is unaffected.
-6. **Session recall.** If your database-style memory extension appends a `# 记忆召回` block (`id(summary)` items) to your message, the retrieval model uses it to resolve references, but does not search the original work for events that only happened in this session.
-7. **Shareable packs.** A built index can be exported as `.lorepack.json`; others import it and skip the indexing cost.
+5. **Living Librarian Notebook (Loria).** Stores verified scene pointers, macro arc pointers, and exponentially decaying co-access links locally (zero embeddings, strictly `maxOrder`-gated). Manage, lock, search, and jump straight to source scenes from the workbench.
+6. **Spoiler gate (`maxOrder`).** Once set, the TOC, search, reads, and librarian notebook never return later chapters; timeless lore with no chapter order is unaffected.
+7. **Session recall.** If your database-style memory extension appends a `# 记忆召回` block (`id(summary)` items) to your message, the retrieval model uses it to resolve references, but does not search the original work for events that only happened in this session.
+8. **Shareable packs.** A built index can be exported as `.lorepack.json`; others import it and skip the indexing cost.
 
 ---
 
