@@ -8,10 +8,13 @@ Zero external dependencies (Python 3.12 standard library only).
 import argparse
 import collections
 import concurrent.futures
+import datetime
+import email.utils
 import html.parser
 import json
 import os
 import posixpath
+import random
 import re
 import sys
 import threading
@@ -971,9 +974,82 @@ def heuristic_scene_meta(arc_title, scene_idx, total_in_arc, text, alias_pool=No
 
 
 class _LlmHttpError(Exception):
-    def __init__(self, code, body):
+    def __init__(self, code, body, retry_after=None):
         super().__init__(f"HTTP {code}: {body[:150]}")
         self.code = code
+        self.retry_after = retry_after
+
+
+def _parse_retry_after(val):
+    """Parse HTTP Retry-After header (seconds or HTTP-date) into delay seconds."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        return max(0.0, float(s))
+    except ValueError:
+        pass
+    try:
+        dt = email.utils.parsedate_to_datetime(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return max(0.0, dt.timestamp() - time.time())
+    except Exception:
+        return None
+
+
+class _RateLimitCoordinator:
+    """Shared adaptive concurrency limiter & cooldown gate for HTTP 429 backoff."""
+
+    def __init__(self, max_workers):
+        self._max_workers = max(1, int(max_workers or 1))
+        self._active_limit = self._max_workers
+        self._in_flight = 0
+        self._cooldown_until = 0.0
+        self._consecutive_ok = 0
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+
+    def acquire(self):
+        with self._cond:
+            while True:
+                now = time.monotonic()
+                if now < self._cooldown_until:
+                    self._cond.wait(timeout=self._cooldown_until - now)
+                    continue
+                if self._in_flight >= self._active_limit:
+                    self._cond.wait(timeout=0.5)
+                    continue
+                self._in_flight += 1
+                return
+
+    def release(self, ok=True):
+        with self._cond:
+            self._in_flight = max(0, self._in_flight - 1)
+            if ok:
+                self._consecutive_ok += 1
+                if self._active_limit < self._max_workers and self._consecutive_ok >= max(4, self._active_limit * 2):
+                    self._active_limit += 1
+                    self._consecutive_ok = 0
+            self._cond.notify_all()
+
+    def on_rate_limit(self, wait_s):
+        with self._cond:
+            self._consecutive_ok = 0
+            old_limit = self._active_limit
+            self._active_limit = max(1, self._active_limit // 2)
+            until = time.monotonic() + max(0.5, float(wait_s))
+            if until > self._cooldown_until:
+                self._cooldown_until = until
+            self._cond.notify_all()
+        if old_limit != self._active_limit:
+            print(
+                f"[build_novel] rate-limited (429): pausing {wait_s:.1f}s, "
+                f"concurrency {old_limit}->{self._active_limit}",
+                file=sys.stderr,
+            )
 
 
 def _post_chat(url, key, payload, stream=True, idle_timeout=90, total_timeout=60):
@@ -1004,7 +1080,10 @@ def _post_chat(url, key, payload, stream=True, idle_timeout=90, total_timeout=60
         err_body = e.read().decode("utf-8", errors="replace")
         if stream and e.code in (400, 404, 415, 422):
             return _post_chat(url, key, payload, stream=False, idle_timeout=idle_timeout, total_timeout=total_timeout)
-        raise _LlmHttpError(e.code, err_body)
+        retry_after = None
+        if e.headers:
+            retry_after = e.headers.get("Retry-After") or e.headers.get("retry-after")
+        raise _LlmHttpError(e.code, err_body, retry_after=retry_after)
     with resp:
         ctype = (resp.headers.get("Content-Type") or "").lower()
         if not stream or ("json" in ctype and "event-stream" not in ctype):
@@ -1043,7 +1122,7 @@ def _post_chat(url, key, payload, stream=True, idle_timeout=90, total_timeout=60
         return "".join(parts), finish, usage
 
 
-def llm_json(cfg, prompt, retries=4):
+def llm_json(cfg, prompt, retries=5, rate_limiter=None):
     url = cfg["chatBase"].rstrip("/") + "/chat/completions"
     raw_mt = cfg.get("maxTokens") if cfg.get("maxTokens") is not None else cfg.get("max_tokens")
     max_tokens_val = None
@@ -1063,6 +1142,10 @@ def llm_json(cfg, prompt, retries=4):
             pass
     raw_re = str(cfg.get("reasoningEffort") or cfg.get("reasoning_effort") or "").strip().lower()
     use_stream = cfg.get("llmStream") is not False
+    try:
+        retry_base_s = max(0.0, float(os.environ.get("LORECODEX_RETRY_BASE_SEC", "1.2") or 1.2))
+    except (TypeError, ValueError):
+        retry_base_s = 1.2
     last_err = None
     for attempt in range(retries):
         payload = {
@@ -1075,6 +1158,9 @@ def llm_json(cfg, prompt, retries=4):
             payload["reasoning_effort"] = raw_re
         if max_tokens_val is not None:
             payload["max_tokens"] = max_tokens_val
+        ok = False
+        if rate_limiter is not None:
+            rate_limiter.acquire()
         try:
             txt, finish_reason, usage = _post_chat(url, cfg["chatKey"], payload, stream=use_stream)
             if not txt or not str(txt).strip():
@@ -1098,14 +1184,27 @@ def llm_json(cfg, prompt, retries=4):
             raw = m.group(1) if m else txt
             m2 = re.search(r"(\{[\s\S]*\})", raw)
             parsed = json.loads(m2.group(1) if m2 else raw)
+            ok = True
             return parsed, usage
         except _LlmHttpError as e:
             last_err = str(e)
-            wait_s = min(25.0, 1.5 * (2 ** attempt)) if e.code in (429, 500, 502, 503, 504) else 1.2 * (attempt + 1)
+            if e.code == 429:
+                base_wait = min(60.0, 2.0 * (2 ** attempt)) + random.uniform(0.1, 0.8)
+                ra = _parse_retry_after(e.retry_after)
+                wait_s = max(base_wait, min(120.0, ra)) if ra is not None else base_wait
+                if rate_limiter is not None:
+                    rate_limiter.on_rate_limit(wait_s)
+            elif e.code in (500, 502, 503, 504):
+                wait_s = min(25.0, 1.5 * (2 ** attempt))
+            else:
+                wait_s = retry_base_s * (attempt + 1)
             time.sleep(wait_s)
         except Exception as e:
             last_err = str(e)
-            time.sleep(1.2 * (attempt + 1))
+            time.sleep(retry_base_s * (attempt + 1))
+        finally:
+            if rate_limiter is not None:
+                rate_limiter.release(ok=ok)
     raise RuntimeError(f"LLM failed after {retries} attempts: {last_err}")
 
 
@@ -1116,12 +1215,33 @@ def atomic_write_json(path, obj, indent=None):
     os.replace(tmp_path, path)
 
 
-def merge_alias_groups(existing_groups, new_groups, max_groups=60):
+def merge_alias_groups(existing_groups, new_groups, max_groups=60, locked_aliases=None):
     existing_terms_lower = set()
+    locked_set = {str(x or "").strip().lower() for x in (locked_aliases or []) if str(x or "").strip()}
     merged = []
+    locked_indices = set()
+
+    def _is_locked_group(grp):
+        if not locked_set:
+            return False
+        terms = [str(t or "").strip().lower() for t in grp if str(t or "").strip()]
+        if not terms:
+            return False
+        if ", ".join(terms) in locked_set or ",".join(terms) in locked_set:
+            return True
+        return any(t in locked_set for t in terms)
 
     def _absorb(group, is_new=False):
+        nonlocal locked_indices
         if not isinstance(group, (list, tuple)):
+            return
+        if not is_new and _is_locked_group(group):
+            clean_locked = [str(x or "").strip() for x in group if str(x or "").strip()]
+            if clean_locked:
+                for t in clean_locked:
+                    existing_terms_lower.add(t.lower())
+                locked_indices.add(len(merged))
+                merged.append(clean_locked)
             return
         seen_local = set()
         clean = []
@@ -1148,6 +1268,9 @@ def merge_alias_groups(existing_groups, new_groups, max_groups=60):
             if any(t.lower() in clean_lower for t in grp):
                 hit_indices.append(idx)
 
+        if any(idx in locked_indices for idx in hit_indices):
+            return
+
         if not hit_indices:
             merged.append(clean)
             return
@@ -1167,15 +1290,27 @@ def merge_alias_groups(existing_groups, new_groups, max_groups=60):
         merged[primary] = combined
         for idx in reversed(hit_indices[1:]):
             merged.pop(idx)
+            locked_indices = {i - 1 if i > idx else i for i in locked_indices}
 
     for grp in existing_groups or []:
         _absorb(grp, is_new=False)
     for grp in new_groups or []:
         _absorb(grp, is_new=True)
-    return merged[:max_groups]
+    if len(merged) <= max_groups:
+        return merged
+    non_locked_budget = max(0, max_groups - len(locked_indices))
+    out = []
+    nl_seen = 0
+    for idx, grp in enumerate(merged):
+        if idx in locked_indices:
+            out.append(grp)
+        elif nl_seen < non_locked_budget:
+            out.append(grp)
+            nl_seen += 1
+    return out
 
 
-def merge_glossary(existing_list, new_list, max_items=40):
+def merge_glossary(existing_list, new_list, max_items=40, locked_glossary=None):
     def _head(item):
         for sep in ("：", ":"):
             if sep in item:
@@ -1183,6 +1318,13 @@ def merge_glossary(existing_list, new_list, max_items=40):
                 if h:
                     return h
         return item.strip().lstrip("- ").lower()
+
+    locked_set = {str(x or "").strip().lower() for x in (locked_glossary or []) if str(x or "").strip()}
+    locked_heads = set()
+    locked_indices = set()
+
+    def _is_locked_item(item, h):
+        return bool(locked_set and (item.lower() in locked_set or h in locked_set))
 
     out = []
     head_to_idx = {}
@@ -1193,16 +1335,23 @@ def merge_glossary(existing_list, new_list, max_items=40):
             continue
         h = _head(item)
         full = item.lower()
+        is_locked = _is_locked_item(item, h)
         if full in seen_full:
             continue
         if h in head_to_idx:
+            if is_locked or head_to_idx[h] in locked_indices:
+                continue
             prev = out[head_to_idx[h]]
             if len(item) > len(prev) and len(item) <= 240:
                 out[head_to_idx[h]] = item
             continue
-        head_to_idx[h] = len(out)
+        idx = len(out)
+        head_to_idx[h] = idx
         seen_full.add(full)
         out.append(item)
+        if is_locked:
+            locked_heads.add(h)
+            locked_indices.add(idx)
 
     for raw in new_list or []:
         item = str(raw or "").strip()
@@ -1210,9 +1359,13 @@ def merge_glossary(existing_list, new_list, max_items=40):
             continue
         h = _head(item)
         full = item.lower()
+        if h in locked_heads or _is_locked_item(item, h):
+            continue
         if full in seen_full:
             continue
         if h in head_to_idx:
+            if head_to_idx[h] in locked_indices:
+                continue
             prev = out[head_to_idx[h]]
             if len(item) > len(prev):
                 out[head_to_idx[h]] = item
@@ -1223,7 +1376,18 @@ def merge_glossary(existing_list, new_list, max_items=40):
         head_to_idx[h] = len(out)
         seen_full.add(full)
         out.append(item)
-    return out[:max_items]
+    if len(out) <= max_items:
+        return out
+    non_locked_budget = max(0, max_items - len(locked_indices))
+    res = []
+    nl_seen = 0
+    for idx, item in enumerate(out):
+        if idx in locked_indices:
+            res.append(item)
+        elif nl_seen < non_locked_budget:
+            res.append(item)
+            nl_seen += 1
+    return res
 
 
 def merge_relations(existing_edges, new_edges, max_edges=500):
@@ -1275,6 +1439,26 @@ def build_series_digest(ser_arcs, max_samples=80, max_chars=6500):
                 char_freq[cs] += 1
     top_chars = [c for c, _ in char_freq.most_common(20)]
     return "\n".join(lines), top_chars
+
+
+def apply_virtual_series_buckets(arcs, bucket_size=80):
+    """Split any series exceeding bucket_size arcs into '<series> (start-end)' buckets."""
+    if not bucket_size or bucket_size <= 0 or not arcs:
+        return arcs
+    by_series = collections.defaultdict(list)
+    for a in arcs:
+        ser = str(a.get("series") or "正文卷").strip() or "正文卷"
+        by_series[ser].append(a)
+    for ser, ser_arcs in by_series.items():
+        total = len(ser_arcs)
+        if total <= bucket_size:
+            continue
+        for idx, a in enumerate(ser_arcs):
+            b_idx = idx // bucket_size
+            start_num = b_idx * bucket_size + 1
+            end_num = min((b_idx + 1) * bucket_size, total)
+            a["series"] = f"{ser} ({start_num}-{end_num})"
+    return arcs
 
 
 def select_target_arcs(arcs, series_filter="", start_arc=1, limit_arcs=0):
@@ -1407,6 +1591,8 @@ def main():
     parser.add_argument("--allow-noisy", action="store_true", help="Proceed with LLM summarization even when preflight detects high code/non-prose noise")
     parser.add_argument("--overwrite-config", action="store_true", help="Overwrite existing corpus.json if present")
     parser.add_argument("--upgrade", action="store_true", help="Upgrade an existing corpus index in place with LLM summaries")
+    parser.add_argument("--append", action="store_true", help="Append new chapters/scenes from --input to an existing corpus")
+    parser.add_argument("--virtual-series-size", type=int, default=80, help="Split any series exceeding this many arcs into virtual buckets like '<series> (1-80)' (0 = disable, default: 80)")
     parser.add_argument("--series", default="", help="Only LLM-summarize arcs belonging to this exact series")
     parser.add_argument("--start-arc", type=int, default=1, help="1-based arc offset inside filtered scope")
     parser.add_argument("--limit-arcs", type=int, default=0, help="Max arcs to LLM-summarize (0 = all)")
@@ -1433,6 +1619,10 @@ def main():
         except Exception:
             existing_corpus_cfg = {}
 
+    if args.upgrade and args.append:
+        raise RuntimeError("--append cannot be combined with --upgrade")
+
+    existing_stats = {}
     if args.upgrade:
         if args.no_llm:
             raise RuntimeError("--upgrade requires LLM mode and cannot be combined with --no-llm")
@@ -1445,6 +1635,7 @@ def main():
         with open(txt_path, "r", encoding="utf-8") as f:
             texts_map = json.load(f)
         arcs = existing_index.get("arcs") or []
+        new_arcs = arcs
         source_name = existing_index.get("source") or args.corpus_id
         existing_series_summaries = dict(existing_index.get("series_summaries") or {})
         if not args.name:
@@ -1457,10 +1648,56 @@ def main():
     else:
         if not args.input:
             raise RuntimeError("--input is required unless --upgrade is passed")
-        if not args.name:
-            args.name = os.path.splitext(os.path.basename(args.input))[0] or args.corpus_id
-        source_name = os.path.basename(os.path.normpath(args.input))
+
+        existing_arcs = []
+        texts_map = {}
         existing_series_summaries = {}
+        max_existing_order = 0
+        used_ids = set()
+        node_counter = 1
+
+        if args.append:
+            idx_path = os.path.join(out_corpus_dir, "tree_index.json")
+            txt_path = os.path.join(out_corpus_dir, "tree_texts.json")
+            if not os.path.exists(idx_path) or not os.path.exists(txt_path):
+                raise RuntimeError(f"Cannot --append: tree_index.json or tree_texts.json missing in {out_corpus_dir}")
+            with open(idx_path, "r", encoding="utf-8") as f:
+                existing_index = json.load(f)
+            with open(txt_path, "r", encoding="utf-8") as f:
+                texts_map = json.load(f)
+            existing_arcs = list(existing_index.get("arcs") or [])
+            existing_series_summaries = dict(existing_index.get("series_summaries") or {})
+            existing_stats = dict(existing_index.get("stats") or {})
+            source_name = existing_index.get("source") or os.path.basename(os.path.normpath(args.input))
+            if not args.name:
+                args.name = str(existing_corpus_cfg.get("name") or os.path.splitext(os.path.basename(args.input))[0] or args.corpus_id).strip()
+            max_num_id = 0
+            used_ids.update(str(k) for k in texts_map.keys())
+            for a in existing_arcs:
+                try:
+                    max_existing_order = max(max_existing_order, int(a.get("order") or 0))
+                except (TypeError, ValueError):
+                    pass
+                aid = str(a.get("arc_id") or "")
+                if aid:
+                    used_ids.add(aid)
+                    if aid.isdigit():
+                        max_num_id = max(max_num_id, int(aid))
+                for sc in a.get("scenes") or []:
+                    try:
+                        max_existing_order = max(max_existing_order, int(sc.get("order") or 0))
+                    except (TypeError, ValueError):
+                        pass
+                    nid = str(sc.get("node_id") or "")
+                    if nid:
+                        used_ids.add(nid)
+                        if nid.isdigit():
+                            max_num_id = max(max_num_id, int(nid))
+            node_counter = max_num_id + 1
+        else:
+            if not args.name:
+                args.name = os.path.splitext(os.path.basename(args.input))[0] or args.corpus_id
+            source_name = os.path.basename(os.path.normpath(args.input))
 
         lines = load_input_lines(args.input)
         clean_stats = {}
@@ -1476,18 +1713,28 @@ def main():
         if not chapters:
             raise RuntimeError(f"No readable chapters parsed from {args.input}")
 
-        cast_pool = build_book_cast(chapters, alias_pool=alias_pool)
+        if args.append and max_existing_order > 0:
+            for ch in chapters:
+                ch["order"] += max_existing_order
 
-        arcs = []
-        texts_map = {}
-        node_counter = 1
+        cast_pool = build_book_cast(chapters, alias_pool=alias_pool)
+        if args.append and existing_arcs:
+            freq = collections.Counter()
+            for a in existing_arcs:
+                for c in a.get("characters") or []:
+                    freq[c] += 1
+            cast_pool = list(dict.fromkeys(cast_pool + [c for c, _ in freq.most_common(45)]))
 
         def next_nid():
             nonlocal node_counter
-            v = f"{node_counter:04d}"
-            node_counter += 1
-            return v
+            while True:
+                v = f"{node_counter:04d}"
+                node_counter += 1
+                if v not in used_ids:
+                    used_ids.add(v)
+                    return v
 
+        new_arcs = []
         for ch in chapters:
             arc_id = next_nid()
             raw_scenes = split_chapter_to_scenes(
@@ -1520,7 +1767,7 @@ def main():
                     "tone_tags": [],
                 })
 
-            arcs.append({
+            new_arcs.append({
                 "arc_id": arc_id,
                 "arc_key": f"ch_{ch['order']:04d}",
                 "series": ch["series"],
@@ -1536,9 +1783,12 @@ def main():
                 "key_items": [],
             })
 
+        apply_virtual_series_buckets(new_arcs, args.virtual_series_size)
+        arcs = existing_arcs + new_arcs
+
     preflight = None
     if not args.upgrade:
-        preflight = _report_structure_preflight(chapters, arcs, texts_map, clean_stats=clean_stats)
+        preflight = _report_structure_preflight(chapters, new_arcs, texts_map, clean_stats=clean_stats)
         if (
             not args.no_llm
             and not args.allow_noisy
@@ -1604,7 +1854,7 @@ def main():
     extracted_relations = []
 
     if args.no_llm:
-        for a in arcs:
+        for a in new_arcs:
             arc_chars = collections.Counter()
             arc_tones = collections.Counter()
             for idx, sc in enumerate(a["scenes"], 1):
@@ -1621,7 +1871,9 @@ def main():
             a["description"] = "；".join(s["summary"][:60] for s in a["scenes"][:2])[:140]
             a["key_items"] = [s["title"] for s in a["scenes"][:8] if s["title"]]
     else:
-        target_arcs = select_target_arcs(arcs, args.series, args.start_arc, args.limit_arcs)
+        rate_limiter = _RateLimitCoordinator(args.workers)
+        scope_arcs = new_arcs if args.append else arcs
+        target_arcs = select_target_arcs(scope_arcs, args.series, args.start_arc, args.limit_arcs)
         print(
             f"[build_novel] LLM target scope: {len(target_arcs)}/{len(arcs)} arcs"
             + (f" (series={args.series})" if args.series else "")
@@ -1651,7 +1903,7 @@ def main():
                 "只输出严格 JSON：{\"title\":\"...\",\"summary\":\"...\",\"characters\":[],\"tone_tags\":[]}\n\n"
                 f"所属篇章：{a.get('series', '')} / {a['title']}\n正文：\n{txt}"
             )
-            parsed, usage = llm_json(cfg, prompt)
+            parsed, usage = llm_json(cfg, prompt, rate_limiter=rate_limiter)
             record_usage(usage)
             rec = {
                 "key": key,
@@ -1731,7 +1983,7 @@ def main():
                 "只输出 JSON：{\"description\":\"...\",\"characters\":[],\"tone_tags\":[]}\n\n"
                 f"篇章：{a.get('series', '')} / {a['title']}\n子场景：\n{sc_lines}"
             )
-            parsed, usage = llm_json(cfg, prompt)
+            parsed, usage = llm_json(cfg, prompt, rate_limiter=rate_limiter)
             record_usage(usage)
             rec = {
                 "key": key,
@@ -1802,7 +2054,7 @@ def main():
                         f"章节脉络（共 {len(ser_arcs)} 章）：\n{digest_text}"
                     )
                     try:
-                        parsed, usage = llm_json(cfg, meta_prompt)
+                        parsed, usage = llm_json(cfg, meta_prompt, rate_limiter=rate_limiter)
                         record_usage(usage)
                         rec = {
                             "key": meta_key,
@@ -1841,9 +2093,15 @@ def main():
         for a in arcs
     )
     ckpt_keys = set(ckpt.keys())
-    llm_scenes_count = 0
-    llm_arcs_count = 0
-    for a in arcs:
+    if args.append:
+        llm_scenes_count = int(existing_stats.get("llm_scenes") or 0)
+        llm_arcs_count = int(existing_stats.get("llm_arcs") or 0)
+        count_scope = new_arcs
+    else:
+        llm_scenes_count = 0
+        llm_arcs_count = 0
+        count_scope = arcs
+    for a in count_scope:
         sc_list = a.get("scenes") or []
         if sc_list and all(f"leaf:{sc['node_id']}" in ckpt_keys for sc in sc_list):
             if len(sc_list) == 1 or f"arc:{a['arc_id']}" in ckpt_keys:
@@ -1907,8 +2165,10 @@ def main():
         cur_cfg = dict(existing_corpus_cfg)
         old_aliases = cur_cfg.get("aliases") or []
         old_glossary = cur_cfg.get("glossary") or []
-        new_aliases = merge_alias_groups(old_aliases, extracted_aliases)
-        new_glossary = merge_glossary(old_glossary, extracted_glossary)
+        locked_aliases = cur_cfg.get("locked_aliases") or []
+        locked_glossary = cur_cfg.get("locked_glossary") or []
+        new_aliases = merge_alias_groups(old_aliases, extracted_aliases, locked_aliases=locked_aliases)
+        new_glossary = merge_glossary(old_glossary, extracted_glossary, locked_glossary=locked_glossary)
         if new_aliases != old_aliases or new_glossary != old_glossary:
             cur_cfg["aliases"] = new_aliases
             cur_cfg["glossary"] = new_glossary

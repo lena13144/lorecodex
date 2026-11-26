@@ -19,6 +19,7 @@ const [
     { SlashCommandParser },
     {
         idbListCorpora,
+        idbGetCorpus,
         idbSaveCorpus,
         idbGetMeta,
         idbSetMeta,
@@ -478,11 +479,13 @@ function isUsingLocalEngine(cfg) {
     return false;
 }
 
-function getLocalAgent(corpusId) {
+async function getLocalAgent(corpusId) {
     const id = String(corpusId || '').trim() || (localPacksCache[0]?.id || '');
     if (!id || !localPacksMap.has(id)) return null;
     if (!localAgentsCache.has(id)) {
-        localAgentsCache.set(id, createBrowserTreeAgent(localPacksMap.get(id)));
+        const fullPack = await idbGetCorpus(id);
+        if (!fullPack) return null;
+        localAgentsCache.set(id, createBrowserTreeAgent(fullPack));
     }
     return localAgentsCache.get(id);
 }
@@ -637,7 +640,7 @@ function renderLastPreview(cfg) {
 async function executeTreeSearchRequest(cfg, payload, { onProgress = null } = {}) {
     const cid = payload.corpus || cfg.corpus || serverDefaultCorpus || '';
     if (isUsingLocalEngine(cfg) || (cid && localPacksMap.has(cid) && !corporaCache.some(c => c.id === cid))) {
-        const localAgent = getLocalAgent(cid);
+        const localAgent = await getLocalAgent(cid);
         if (!localAgent) {
             throw new Error(`内置免服务端引擎中尚未导入书库 "${cid || '空'}"，请在下方「免服务端内置书库管理」导入小说或世界书`);
         }
@@ -1284,8 +1287,8 @@ jQuery(async () => {
     renderLastPreview(cfg);
 
     const runLocalLlmUpgrade = async (targetCorpusId) => {
-        const pack = localPacksMap.get(targetCorpusId);
-        if (!pack) {
+        const metaPack = localPacksMap.get(targetCorpusId);
+        if (!metaPack) {
             openWorkbenchModal(cfg, { corpusId: targetCorpusId, action: 'upgrade' });
             return;
         }
@@ -1297,17 +1300,24 @@ jQuery(async () => {
         }
         if (localUpgAbortCtrl) return;
 
-        const plan = estimateBrowserLlmUpgradePlan(pack, { series: '', workers: 8, limitArcs: 0 });
+        const plan = estimateBrowserLlmUpgradePlan(metaPack, { series: '', workers: 8, limitArcs: 0 });
         if (!plan.totalArcs) {
             renderStaticLlmWidget();
             if (typeof toastr !== 'undefined') toastr.info('当前书库已完成全部 LLM 目录构建');
             return;
         }
 
-        const buildLock = acquireCorpusBuildLock(pack.id, '酒馆扩展侧边栏');
+        const buildLock = acquireCorpusBuildLock(metaPack.id, '酒馆扩展侧边栏');
         if (!buildLock.ok) {
             const holderOwner = buildLock.holder?.owner || '其他窗口';
-            if (typeof toastr !== 'undefined') toastr.warning(`书库「${escHtml(pack.config.name)}」正在「${escHtml(holderOwner)}」执行 LLM 构建`);
+            if (typeof toastr !== 'undefined') toastr.warning(`书库「${escHtml(metaPack.config.name)}」正在「${escHtml(holderOwner)}」执行 LLM 构建`);
+            return;
+        }
+
+        const pack = await idbGetCorpus(targetCorpusId);
+        if (!pack) {
+            buildLock.release?.();
+            if (typeof toastr !== 'undefined') toastr.warning('无法读取书库正文数据');
             return;
         }
 

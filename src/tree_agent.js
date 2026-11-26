@@ -534,6 +534,20 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       const rawSids =
         args?.scene_node_ids ?? args?.node_ids ?? args?.scene_ids ?? args?.node_id ?? args?.scene_id ?? args?.id ?? [];
       const sids = (Array.isArray(rawSids) ? rawSids : [rawSids]).map(normalizeNodeId).filter(Boolean).slice(0, 10);
+      const focusQuery = String(args?.focus_query || '').trim();
+      const focusTerms = focusQuery
+        ? [
+            ...new Set(
+              focusQuery
+                .split(/[\s,，、]+/)
+                .map((tk) => tk.trim())
+                .filter(Boolean)
+                .flatMap((tk) => grepEngine.expandAliases(tk))
+                .map((t) => String(t || '').toLowerCase())
+                .filter(Boolean),
+            ),
+          ]
+        : [];
       const out = [];
       let totalChars = 0;
       let blockedCount = 0;
@@ -565,16 +579,51 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         };
         state.readScenes.set(sid, rec);
         state.traversal.readScenes.add(sid);
-        totalChars += cleanText.length;
-        out.push({
+
+        let displayText = cleanText;
+        if (focusTerms.length) {
+          const lines = cleanText.split(/\r?\n/);
+          const windows = [];
+          for (let i = 0; i < lines.length; i++) {
+            const low = lines[i].toLowerCase();
+            if (focusTerms.some((t) => low.includes(t))) {
+              const lo = Math.max(0, i - 3);
+              const hi = Math.min(lines.length - 1, i + 3);
+              if (windows.length && lo <= windows[windows.length - 1].hi + 1) {
+                windows[windows.length - 1].hi = Math.max(windows[windows.length - 1].hi, hi);
+              } else {
+                windows.push({ lo, hi });
+              }
+            }
+          }
+          if (windows.length) {
+            const parts = windows.map((w) => lines.slice(w.lo, w.hi + 1).join('\n'));
+            const prefix = windows[0].lo > 0 ? '…（前略）…\n' : '';
+            const suffix = windows[windows.length - 1].hi < lines.length - 1 ? '\n…（后略）…' : '';
+            displayText = prefix + parts.join('\n…（略）…\n') + suffix;
+          } else {
+            displayText =
+              `[未直接命中 focus_query="${focusQuery}"，以下为开头节选]\n` +
+              cleanText.slice(0, 400) +
+              (cleanText.length > 400 ? '\n…（后略）…' : '');
+          }
+        }
+
+        totalChars += displayText.length;
+        const outItem = {
           node_id: sid,
           arc: rec.arc_title,
           group: item.group,
           title: rec.title,
           order: scOrder,
           tone_tags: rec.tone_tags,
-          text: cleanText,
-        });
+          text: displayText,
+        };
+        if (focusTerms.length) {
+          outItem.focused = true;
+          outItem.full_chars = cleanText.length;
+        }
+        out.push(outItem);
       }
 
       const okList = out.filter((x) => !x.error);
@@ -584,7 +633,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
           node_ids: okList.map((x) => x.node_id),
           chars: totalChars,
           blocked: blockedCount,
-          summary: `读取 ${okList.length} 幕正文 (${totalChars} 字)${blockedCount ? `，拦截 ${blockedCount} 幕超进度片段` : ''}: ${okList.map((x) => `${x.node_id}《${x.title}》`).join(', ')}`,
+          summary: `读取 ${okList.length} 幕${focusTerms.length ? '聚焦片段' : '正文'} (${totalChars} 字)${blockedCount ? `，拦截 ${blockedCount} 幕超进度片段` : ''}: ${okList.map((x) => `${x.node_id}《${x.title}》`).join(', ')}`,
         },
       };
     }
@@ -593,27 +642,56 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       const q = String(args?.query || '').trim();
       const cat = String(args?.category || '').trim();
       const tone = String(args?.tone || '').trim();
+      const sortBy = String(args?.sort_by || 'relevance').trim().toLowerCase();
+      const offset = Math.max(0, Math.floor(Number(args?.offset) || 0));
+      const limit = args?.limit ? Math.min(Math.max(Number(args.limit) || 20, 1), 100) : 20;
       if (!q) {
         return { text: '未提供扫描关键词', meta: { count: 0, node_ids: [], summary: '空查询' } };
       }
-      const res = grepEngine.grepScenes(q, { limit: 20, maxOrder, category: cat, tone });
-      if (!res.hits.length) {
+      const res = grepEngine.grepScenes(q, { limit, offset, sort_by: sortBy, maxOrder, category: cat, tone });
+      if (!res.total) {
         return {
           text: `[全文扫描 ${res.took_ms}ms] 未在${maxOrder ? `当前进度(order<=${maxOrder})内的` : ''}全库正文与档案中找到 "${q}"（含别名）的字面出现记录。`,
           meta: { count: 0, took_ms: res.took_ms, node_ids: [], summary: `全文扫描 "${q}" 零命中 (${res.took_ms}ms)` },
         };
       }
-      const head = `[全文扫描 ${res.took_ms}ms | 共命中 ${res.total} 幕，其中目录未标客串 ${res.cameo_count} 幕${!res.all_matched ? ' | 注：无单幕同时包含全部词，以下为单词部分命中' : ''}]`;
+      if (!res.hits.length) {
+        return {
+          text: `[全文扫描 ${res.took_ms}ms] 共命中 ${res.total} 幕，但 offset=${offset} 已超出范围。`,
+          meta: { count: res.total, took_ms: res.took_ms, node_ids: [], summary: `全文扫描 "${q}" offset=${offset} 越界` },
+        };
+      }
+      const sortTag = res.sort_by !== 'relevance' ? ` | sort=${res.sort_by}` : '';
+      const pageTag = offset > 0 || res.has_more ? ` | 展示 ${offset + 1}~${offset + res.hits.length}/${res.total}` : '';
+      const head = `[全文扫描 ${res.took_ms}ms | 共命中 ${res.total} 幕，其中目录未标客串 ${res.cameo_count} 幕${sortTag}${pageTag}${!res.all_matched ? ' | 注：无单幕同时包含全部词，以下为单词部分命中' : ''}]`;
+
+      const radarParts = [];
+      if ((res.buckets && res.buckets.length > 1) || res.total > res.hits.length) {
+        if (res.buckets && res.buckets.length > 0) {
+          const distStr = res.buckets
+            .map((b) => (b.min_order === b.max_order ? `序${b.min_order}:${b.count}幕` : `序${b.min_order}~${b.max_order}:${b.count}幕`))
+            .join(' | ');
+          radarParts.push(`分布雷达: ${distStr}`);
+        }
+        if (res.has_more && res.next_offset !== null) {
+          radarParts.push(`翻页提示: 可传 offset=${res.next_offset} 查看后续命中`);
+        }
+      }
+
       const lines = res.hits.map((h) => {
         const ordTag = h.order !== null && h.order !== undefined ? `·序${h.order}` : '';
         return `- [node_id=${h.node_id} | arc_id=${h.arc_id}${ordTag}] ${h.arc_title} · ${h.title}${h.cameo ? ' [目录未标·客串]' : ''} (命中${h.match_count}处)\n  上下文：${h.snippet}`;
       });
+      const outLines = radarParts.length ? [head, `[${radarParts.join('；')}]`, ...lines] : [head, ...lines];
       return {
-        text: [head, ...lines].join('\n'),
+        text: outLines.join('\n'),
         meta: {
           count: res.total,
           cameo_count: res.cameo_count,
           took_ms: res.took_ms,
+          sort_by: res.sort_by,
+          offset: res.offset,
+          next_offset: res.next_offset,
           node_ids: res.hits.map((h) => h.node_id),
           arc_ids: [...new Set(res.hits.map((h) => h.arc_id))],
           summary: `全文扫描 "${q}" 命中 ${res.total} 幕（客串 ${res.cameo_count} 幕，${res.took_ms}ms）`,
@@ -804,9 +882,18 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
         txt = (lastNl > 400 ? cut.slice(0, lastNl) : cut) + '\n…（后文略）';
       }
       if (Number.isFinite(charBudget)) charBudget -= txt.length;
-      const present = pov
-        ? sc.text.includes(pov) || (sc.characters || []).some((c) => c.includes(pov))
-        : null;
+      let present = null;
+      if (pov) {
+        const povTerms = grepEngine
+          .expandAliases(pov)
+          .map((t) => String(t || '').toLowerCase())
+          .filter(Boolean);
+        const lowText = String(sc.text || '').toLowerCase();
+        const chars = Array.isArray(sc.characters) ? sc.characters : [];
+        present = povTerms.some(
+          (term) => lowText.includes(term) || chars.some((c) => String(c || '').toLowerCase().includes(term)),
+        );
+      }
       finalScenes.push({
         node_id: sc.node_id,
         arc_id: sc.arc_id,
@@ -952,6 +1039,10 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       hasFallback,
     });
 
+    const queryContext = [query, onDemand, pov, ...recentChat.slice(-6).map((m) => String(m?.text || ''))]
+      .filter(Boolean)
+      .join('\n');
+
     const sysPrompt = buildSystemPrompt({
       corpusConfig,
       stats,
@@ -965,6 +1056,7 @@ function createTreeAgent({ corpusId, corpusDir, corpusConfig: rawConfig, fallbac
       hasSeriesTool,
       hasFallback,
       visibleArcsCount: visibleArcs.length,
+      queryContext,
     });
 
     const userPrompt = buildUserMessage({

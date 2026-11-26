@@ -726,9 +726,38 @@ export async function openCorpusModal(initialTab = 'basic') {
     const detail = await fetchCorpusDetail(state.corpusId);
     if (seq !== modalSeq) return;
     const c = detail.config;
-    const aliasesText = (c.aliases || []).map((g) => g.join(', ')).join('\n');
-    const glossaryText = (c.glossary || []).join('\n');
     const stageText = (c.stage_card_patterns || []).join('\n');
+
+    const normalizeAliasRows = (cfg) => {
+      const lockedSet = new Set(
+        (Array.isArray(cfg?.locked_aliases) ? cfg.locked_aliases : [])
+          .map((x) => String(x || '').trim())
+          .filter(Boolean)
+      );
+      return (Array.isArray(cfg?.aliases) ? cfg.aliases : [])
+        .map((g) => (Array.isArray(g) ? g.map((x) => String(x || '').trim()).filter(Boolean) : []))
+        .filter((g) => g.length)
+        .map((g) => {
+          const text = g.join(', ');
+          const locked = lockedSet.has(text) || (g[0] ? lockedSet.has(g[0]) : false);
+          return { text, locked };
+        });
+    };
+
+    const normalizeGlossaryRows = (cfg) => {
+      const lockedSet = new Set(
+        (Array.isArray(cfg?.locked_glossary) ? cfg.locked_glossary : [])
+          .map((x) => String(x || '').trim())
+          .filter(Boolean)
+      );
+      return (Array.isArray(cfg?.glossary) ? cfg.glossary : [])
+        .map((x) => String(x || '').trim())
+        .filter(Boolean)
+        .map((text) => ({ text, locked: lockedSet.has(text) }));
+    };
+
+    let aliasRows = normalizeAliasRows(c);
+    let glossaryRows = normalizeGlossaryRows(c);
 
     const seriesList = Array.isArray(state.index?.series) ? state.index.series : [];
     const totalScenes = Number(state.index?.stats?.scenes || detail.stats?.scenes || 0);
@@ -777,12 +806,18 @@ export async function openCorpusModal(initialTab = 'basic') {
 
         <div id="ctab-aliases" class="ctab-pane" style="display:none;flex-direction:column;gap:10px;">
           <div class="fld-group">
-            <label class="fld">人物/实体别名组（每行一组，逗号分隔，如：可露凯, HK416, 416）</label>
-            <textarea id="ccAliases" rows="7">${esc(aliasesText)}</textarea>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <label class="fld" style="margin:0;">人物/实体别名组（逗号分隔，锁定后 LLM 补全不会覆盖）</label>
+              <button id="ccAddAliasBtn" type="button" class="btn-sm">+ 添加别名组</button>
+            </div>
+            <div id="ccAliasesList" style="display:flex;flex-direction:column;gap:6px;max-height:190px;overflow-y:auto;padding-right:2px;"></div>
           </div>
           <div class="fld-group">
-            <label class="fld">编制/势力/关系速查表（每行一条）</label>
-            <textarea id="ccGlossary" rows="5">${esc(glossaryText)}</textarea>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <label class="fld" style="margin:0;">编制/势力/关系速查表（锁定后 LLM 补全不会覆盖）</label>
+              <button id="ccAddGlossaryBtn" type="button" class="btn-sm">+ 添加词条</button>
+            </div>
+            <div id="ccGlossaryList" style="display:flex;flex-direction:column;gap:6px;max-height:170px;overflow-y:auto;padding-right:2px;"></div>
           </div>
           <div class="fld-row-2">
             <div class="fld-group"><label class="fld">防张冠李戴 OC 示例（逗号分隔）</label><input id="ccOc" type="text" value="${esc((c.oc_examples || []).join(', '))}" /></div>
@@ -859,6 +894,83 @@ export async function openCorpusModal(initialTab = 'basic') {
     $('#ccExportPackBtn')?.addEventListener('click', () => {
       exportCorpusLorepack(c.id).catch((e) => showToast('导出失败: ' + e.message, 'err'));
     });
+    const renderEditorRows = (containerId, rows, placeholder, emptyHint, rowKind) => {
+      const wrap = $(containerId);
+      if (!wrap) return;
+      if (!rows.length) {
+        wrap.innerHTML = `<div class="pane-sub" style="padding:6px 8px;border:1px dashed var(--rule);border-radius:var(--radius-sm);">${esc(emptyHint)}</div>`;
+        return;
+      }
+      wrap.innerHTML = rows
+        .map(
+          (item, idx) => `
+          <div class="cc-kv-row" data-kind="${esc(rowKind)}" data-idx="${idx}" style="display:flex;align-items:center;gap:6px;">
+            <input type="text" class="cc-kv-input" data-kind="${esc(rowKind)}" data-idx="${idx}" value="${esc(item.text)}" placeholder="${esc(placeholder)}" style="flex:1;min-width:0;" />
+            <label style="display:flex;align-items:center;gap:4px;font-size:11.5px;white-space:nowrap;cursor:pointer;" title="锁定后 LLM 补全不会覆盖此项">
+              <input type="checkbox" class="cc-kv-lock" data-kind="${esc(rowKind)}" data-idx="${idx}" ${item.locked ? 'checked' : ''} />
+              <span>锁定</span>
+            </label>
+            <button type="button" class="btn-sm btn-danger cc-kv-del" data-kind="${esc(rowKind)}" data-idx="${idx}" title="删除">✕</button>
+          </div>`
+        )
+        .join('');
+
+      wrap.querySelectorAll('.cc-kv-input').forEach((inp) => {
+        inp.addEventListener('input', () => {
+          const i = Number(inp.dataset.idx);
+          if (rows[i]) rows[i].text = inp.value;
+        });
+      });
+      wrap.querySelectorAll('.cc-kv-lock').forEach((chk) => {
+        chk.addEventListener('change', () => {
+          const i = Number(chk.dataset.idx);
+          if (rows[i]) rows[i].locked = chk.checked;
+        });
+      });
+      wrap.querySelectorAll('.cc-kv-del').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const i = Number(btn.dataset.idx);
+          rows.splice(i, 1);
+          renderEditorRows(containerId, rows, placeholder, emptyHint, rowKind);
+        });
+      });
+    };
+
+    const renderAliasesEditor = () =>
+      renderEditorRows(
+        '#ccAliasesList',
+        aliasRows,
+        '例如：可露凯, HK416, 416',
+        '暂无别名组，点击右上角「+ 添加别名组」或通过 LLM 目录补全自动提炼。',
+        'alias'
+      );
+
+    const renderGlossaryEditor = () =>
+      renderEditorRows(
+        '#ccGlossaryList',
+        glossaryRows,
+        '例如：格里芬：私人军事承包商',
+        '暂无设定词条，点击右上角「+ 添加词条」或通过 LLM 目录补全自动提炼。',
+        'glossary'
+      );
+
+    renderAliasesEditor();
+    renderGlossaryEditor();
+
+    $('#ccAddAliasBtn')?.addEventListener('click', () => {
+      aliasRows.push({ text: '', locked: false });
+      renderAliasesEditor();
+      const inputs = $('#ccAliasesList')?.querySelectorAll('.cc-kv-input');
+      inputs?.[inputs.length - 1]?.focus();
+    });
+
+    $('#ccAddGlossaryBtn')?.addEventListener('click', () => {
+      glossaryRows.push({ text: '', locked: false });
+      renderGlossaryEditor();
+      const inputs = $('#ccGlossaryList')?.querySelectorAll('.cc-kv-input');
+      inputs?.[inputs.length - 1]?.focus();
+    });
+
     const activateCorpusTab = (targetTab) => {
       $('#modalDialog').querySelectorAll('[data-ctab]').forEach((t) => t.classList.toggle('active', t.dataset.ctab === targetTab));
       $('#modalDialog').querySelectorAll('.ctab-pane').forEach((p) => (p.style.display = 'none'));
@@ -912,8 +1024,10 @@ export async function openCorpusModal(initialTab = 'basic') {
       if (seq !== modalSeq) return;
       if (freshDetail?.config) {
         const fc = freshDetail.config;
-        if ($('#ccAliases')) $('#ccAliases').value = (fc.aliases || []).map((g) => g.join(', ')).join('\n');
-        if ($('#ccGlossary')) $('#ccGlossary').value = (fc.glossary || []).join('\n');
+        aliasRows = normalizeAliasRows(fc);
+        glossaryRows = normalizeGlossaryRows(fc);
+        renderAliasesEditor();
+        renderGlossaryEditor();
       }
       const newLlm = state.index?.stats?.llm_scenes || 0;
       const newTot = state.index?.stats?.scenes || totalScenes;
@@ -991,7 +1105,22 @@ export async function openCorpusModal(initialTab = 'basic') {
       try {
         const splitLines = (v) => v.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
         const splitComma = (v) => v.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
-        const aliases = splitLines($('#ccAliases').value).map(splitComma).filter((g) => g.length);
+        const aliases = [];
+        const lockedAliases = [];
+        for (const row of aliasRows) {
+          const group = splitComma(row.text || '');
+          if (!group.length) continue;
+          aliases.push(group);
+          if (row.locked) lockedAliases.push(group.join(', '));
+        }
+        const glossary = [];
+        const lockedGlossary = [];
+        for (const row of glossaryRows) {
+          const term = String(row.text || '').trim();
+          if (!term) continue;
+          glossary.push(term);
+          if (row.locked) lockedGlossary.push(term);
+        }
 
         await saveCorpusConfig(c.id, {
           name: $('#ccName').value.trim() || c.id,
@@ -1000,7 +1129,9 @@ export async function openCorpusModal(initialTab = 'basic') {
           active_recall_triggers: $('#ccTriggers').value.trim(),
           skip_criteria: $('#ccSkip').value.trim(),
           aliases,
-          glossary: splitLines($('#ccGlossary').value),
+          locked_aliases: Array.from(new Set(lockedAliases)),
+          glossary,
+          locked_glossary: Array.from(new Set(lockedGlossary)),
           oc_examples: splitComma($('#ccOc').value),
           stage_card_patterns: splitLines($('#ccStage').value),
           tone_routing_hints: $('#ccToneHints').value.trim(),
@@ -1040,6 +1171,10 @@ export function openImportModal() {
   const mergeOptions = [
     '<option value="">（新建独立设定书库）</option>',
     ...state.corpora.map((c) => `<option value="${esc(c.id)}">并入已有书库：${esc(c.name)} (${esc(c.id)})</option>`),
+  ].join('');
+  const appendOptions = [
+    '<option value="">新建书库</option>',
+    ...state.corpora.map((c) => `<option value="${esc(c.id)}">追加到已有书库：${esc(c.name)} (${esc(c.id)})</option>`),
   ].join('');
 
   openDialog(`
@@ -1096,6 +1231,10 @@ export function openImportModal() {
       <div id="impLoreEntriesWrap" class="lore-pick" style="display:none;"></div>
 
       <div id="impNovelOpts" style="display:flex;flex-direction:column;gap:6px;">
+        <div class="fld-group">
+          <label class="fld">追更 / 追加到已有书库（可选）</label>
+          <select id="impAppendTo" class="fld-sel">${appendOptions}</select>
+        </div>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;">
           <input id="impCleanAds" type="checkbox" checked />
           <span>清洗网页残留：脚本/样式代码、盗版站广告与网址行、文件头横幅、水印乱码（只删整行噪声，正文句子不动）</span>
@@ -1346,7 +1485,9 @@ export function openImportModal() {
       fi.click();
       return;
     }
-    const corpusId = $('#impCorpusId').value.trim();
+    const kind = $('#impKind').value;
+    const appendTo = kind === 'novel' ? ($('#impAppendTo')?.value || '') : '';
+    const corpusId = (appendTo || $('#impCorpusId').value).trim();
     if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(corpusId)) {
       return showToast('书库 ID 仅支持英文/数字/连字符', 'err');
     }
@@ -1357,7 +1498,6 @@ export function openImportModal() {
 
     try {
       const contentBase64 = await readBase64(selectedFile);
-      const kind = $('#impKind').value;
       const isLorepack = selectedFile.name.toLowerCase().endsWith('.lorepack.json');
       const mergeInto = kind === 'lore' ? $('#impMergeInto').value : '';
       const res = await importCorpus({
@@ -1368,6 +1508,7 @@ export function openImportModal() {
         contentBase64,
         category: $('#impCategory').value.trim(),
         mergeInto,
+        appendTo,
         useLlm: false,
         workers: Math.min(Math.max(Number($('#impWorkers')?.value) || 8, 1), 24),
         allowLlmOnAnomaly: false,

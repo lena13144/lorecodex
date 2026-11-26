@@ -394,6 +394,7 @@ function startImportJob({
   category,
   series,
   mergeInto,
+  appendTo = '',
   useLlm,
   filterGameStats,
   overwriteConfig,
@@ -408,7 +409,7 @@ function startImportJob({
   const uploadPath = path.join(jobTmpDir, safeName);
   fs.writeFileSync(uploadPath, fileBuffer);
 
-  const targetCorpusId = kind === 'lore' && mergeInto ? mergeInto : corpusId;
+  const targetCorpusId = kind === 'lore' && mergeInto ? mergeInto : kind === 'novel' && appendTo ? appendTo : corpusId;
   let args = [];
   if (kind === 'novel') {
     const scriptPath = path.join(ROOT_DIR, 'builders', 'build_novel.py');
@@ -417,14 +418,15 @@ function startImportJob({
       '--input',
       uploadPath,
       '--corpus-id',
-      corpusId,
+      targetCorpusId,
       '--name',
-      name || corpusId,
+      name || targetCorpusId,
       '--out-dir',
       CORPORA_DIR,
       '--config',
       CFG_FILE,
     ];
+    if (appendTo) args.push('--append');
     if (category) args.push('--category', category);
     if (!useLlm) args.push('--no-llm');
     if (overwriteConfig) args.push('--overwrite-config');
@@ -642,7 +644,8 @@ const server = http.createServer(async (req, res) => {
     try {
       const payload = await readJsonBody(req, 40 * 1024 * 1024);
       const kind = payload.kind === 'lore' ? 'lore' : 'novel';
-      const corpusId = String(payload.corpusId || '').trim();
+      const appendTo = String(payload.appendTo || '').trim();
+      const corpusId = String(payload.corpusId || appendTo || '').trim();
       const mergeInto = String(payload.mergeInto || '').trim();
       const idRe = /^[a-z0-9][a-z0-9_-]{0,47}$/i;
       if (!idRe.test(corpusId)) {
@@ -651,10 +654,16 @@ const server = http.createServer(async (req, res) => {
       if (mergeInto && !idRe.test(mergeInto)) {
         return send({ error: 'mergeInto ID 格式不合法' }, 400);
       }
+      if (appendTo && !idRe.test(appendTo)) {
+        return send({ error: 'appendTo ID 格式不合法' }, 400);
+      }
       if (kind === 'lore' && mergeInto && !corpusManager.hasCorpus(mergeInto)) {
         return send({ error: `目标合并书库 "${mergeInto}" 不存在` }, 404);
       }
-      const targetId = kind === 'lore' && mergeInto ? mergeInto : corpusId;
+      if (kind === 'novel' && appendTo && !corpusManager.hasCorpus(appendTo)) {
+        return send({ error: `目标追加书库 "${appendTo}" 不存在` }, 404);
+      }
+      const targetId = kind === 'lore' && mergeInto ? mergeInto : kind === 'novel' && appendTo ? appendTo : corpusId;
       if (importJobs.some((j) => j.status === 'running' && j.corpusId === targetId)) {
         return send({ error: `书库 "${targetId}" 已有运行中的导入/升级任务，请等待完成后再试` }, 409);
       }
@@ -676,6 +685,7 @@ const server = http.createServer(async (req, res) => {
         category: String(payload.category || '').trim(),
         series: String(payload.series || '').trim(),
         mergeInto,
+        appendTo,
         useLlm: Boolean(payload.useLlm),
         filterGameStats: Boolean(payload.filterGameStats),
         overwriteConfig: Boolean(payload.overwriteConfig),

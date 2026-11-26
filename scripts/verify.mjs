@@ -642,23 +642,27 @@ with zipfile.ZipFile(epub_path, "w") as zf:
       mockCounts.leaf = 0;
       mockCounts.arc = 0;
       mockCounts.seriesMeta = 0;
-      const emptyRun = await execFileAsync(PYTHON_BIN, [
-        path.join(ROOT, 'builders', 'build_novel.py'),
-        '--upgrade',
-        '--corpus-id',
-        'llm-upgrade-smoke',
-        '--out-dir',
-        outDir,
-        '--config',
-        mockCfgPath,
-        '--series',
-        '第1卷',
-        '--workers',
-        '1',
-        '--max-tokens',
-        '8192',
-        '--force',
-      ]);
+      const emptyRun = await execFileAsync(
+        PYTHON_BIN,
+        [
+          path.join(ROOT, 'builders', 'build_novel.py'),
+          '--upgrade',
+          '--corpus-id',
+          'llm-upgrade-smoke',
+          '--out-dir',
+          outDir,
+          '--config',
+          mockCfgPath,
+          '--series',
+          '第1卷',
+          '--workers',
+          '1',
+          '--max-tokens',
+          '8192',
+          '--force',
+        ],
+        { env: { ...process.env, LORECODEX_RETRY_BASE_SEC: '0.01' } }
+      );
       const emptyErrText = String((emptyRun && (emptyRun.stdout || emptyRun.stderr)) || '');
       assert(
         emptyErrText.includes('empty message content'),
@@ -819,7 +823,184 @@ with zipfile.ZipFile(epub_path, "w") as zf:
         badErr = e;
       }
       assert(badErr && /X-404/.test(String(badErr.stderr)), 'unknown node_ids must be reported and fail --strict');
-      console.log(`  PASS: slice_batches.py cut ${manifest.total_batches} batches; per-batch apply advanced the manifest`);
+    console.log(`  PASS: slice_batches.py cut ${manifest.total_batches} batches; per-batch apply advanced the manifest`);
+    }
+
+    // v2.4.1 regression: build_lore.py --merge-into must preserve series_summaries, aliases, glossary, and stats.llm_scenes
+    {
+      const mergeTarget = path.join(tmpDir, 'merge-target');
+      fs.cpSync(path.join(ROOT, 'corpora', 'demo-chronicles'), mergeTarget, { recursive: true });
+      const beforeIdx = JSON.parse(fs.readFileSync(path.join(mergeTarget, 'tree_index.json'), 'utf8'));
+      const beforeCfg = JSON.parse(fs.readFileSync(path.join(mergeTarget, 'corpus.json'), 'utf8'));
+      if (!beforeIdx.series_summaries || !Object.keys(beforeIdx.series_summaries).length) {
+        beforeIdx.series_summaries = { 第一卷: '星港篇总览' };
+      }
+      if (!beforeIdx.stats || typeof beforeIdx.stats.llm_scenes !== 'number' || beforeIdx.stats.llm_scenes <= 0) {
+        beforeIdx.stats = { ...(beforeIdx.stats || {}), llm_scenes: 6 };
+      }
+      fs.writeFileSync(path.join(mergeTarget, 'tree_index.json'), JSON.stringify(beforeIdx), 'utf8');
+      assert(Array.isArray(beforeCfg.aliases) && beforeCfg.aliases.length > 0, 'demo-chronicles has aliases');
+      assert(Array.isArray(beforeCfg.glossary) && beforeCfg.glossary.length > 0, 'demo-chronicles has glossary');
+
+      await execFileAsync(PYTHON_BIN, [
+        path.join(ROOT, 'builders', 'build_lore.py'),
+        '--input',
+        cardPath,
+        '--corpus-id',
+        'demo-chronicles',
+        '--merge-into',
+        mergeTarget,
+        '--no-llm',
+      ]);
+      const afterIdx = JSON.parse(fs.readFileSync(path.join(mergeTarget, 'tree_index.json'), 'utf8'));
+      const afterCfg = JSON.parse(fs.readFileSync(path.join(mergeTarget, 'corpus.json'), 'utf8'));
+      assert.deepStrictEqual(afterIdx.series_summaries, beforeIdx.series_summaries, 'build_lore --merge-into must preserve series_summaries');
+      assert.strictEqual(afterIdx.stats.llm_scenes, beforeIdx.stats.llm_scenes, 'build_lore --merge-into must preserve stats.llm_scenes');
+      assert.deepStrictEqual(afterCfg.aliases, beforeCfg.aliases, 'build_lore --merge-into must preserve aliases');
+      assert.deepStrictEqual(afterCfg.glossary, beforeCfg.glossary, 'build_lore --merge-into must preserve glossary');
+    }
+
+    // v2.4.1 regression: build_novel.py handles headingless short plain-text (<400 chars with 作者：) and EPUB ../ relative hrefs
+    {
+      const headinglessPath = path.join(tmpDir, 'headingless.txt');
+      fs.writeFileSync(
+        headinglessPath,
+        '作者：夜雨\n这是一段不到四百字且没有任何章节标题的短篇正文，主人公林墨在雨夜的港湾点亮了旧灯塔，等待远航的船只归来。\n',
+        'utf8'
+      );
+      await execFileAsync(PYTHON_BIN, [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--input',
+        headinglessPath,
+        '--corpus-id',
+        'headingless-smoke',
+        '--out-dir',
+        outDir,
+        '--no-llm',
+      ]);
+      const hlIdx = JSON.parse(fs.readFileSync(path.join(outDir, 'headingless-smoke', 'tree_index.json'), 'utf8'));
+      const hlTxt = JSON.parse(fs.readFileSync(path.join(outDir, 'headingless-smoke', 'tree_texts.json'), 'utf8'));
+      assert(hlIdx.arcs.length >= 1 && hlIdx.arcs[0].scenes.length >= 1, 'headingless short text must produce at least 1 arc & scene');
+      const hlFirstText = hlTxt[hlIdx.arcs[0].scenes[0].node_id].text;
+      assert(hlFirstText.includes('点亮了旧灯塔'), 'headingless short text body must be preserved');
+
+      const relEpubPath = path.join(tmpDir, 'rel_href.epub');
+      const pyRelEpub = `
+import zipfile
+with zipfile.ZipFile(r"${relEpubPath.replace(/\\/g, '\\\\')}", "w") as zf:
+    zf.writestr("mimetype", "application/epub+zip")
+    zf.writestr("META-INF/container.xml", '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/OPF/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+    zf.writestr("OEBPS/OPF/content.opf", '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><manifest><item id="c1" href="../Text/ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>')
+    zf.writestr("OEBPS/Text/ch1.xhtml", '<html><body><h2>第1章 相对路径</h2><p>星舰穿过相对路径星门，顺利抵达锚点，观测站记录下完整航迹数据与信号频谱。</p></body></html>')
+`;
+      execFileSync(PYTHON_BIN, ['-c', pyRelEpub], { stdio: 'inherit' });
+      await execFileAsync(PYTHON_BIN, [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--input',
+        relEpubPath,
+        '--corpus-id',
+        'epub-rel-smoke',
+        '--out-dir',
+        outDir,
+        '--min-chars',
+        '10',
+        '--no-llm',
+      ]);
+      const relIdx = JSON.parse(fs.readFileSync(path.join(outDir, 'epub-rel-smoke', 'tree_index.json'), 'utf8'));
+      const relTxt = JSON.parse(fs.readFileSync(path.join(outDir, 'epub-rel-smoke', 'tree_texts.json'), 'utf8'));
+      assert.strictEqual(relIdx.arcs.length, 1, 'EPUB with ../ relative href must parse 1 chapter');
+      assert(relTxt[relIdx.arcs[0].scenes[0].node_id].text.includes('相对路径星门'), 'EPUB ../ relative href text preserved');
+    }
+
+    // v2.5 smoke: build_novel.py --append & --virtual-series-size
+    {
+      const appendBase = path.join(tmpDir, 'append_base.txt');
+      fs.writeFileSync(
+        appendBase,
+        [
+          '## 第1章 起点',
+          '林墨在星港仓库里整理旧式航行日志，确认了第一段坐标。'.repeat(5),
+          '## 第2章 启航',
+          '飞船离开港口，航向未知的深空星域。'.repeat(5),
+        ].join('\n'),
+        'utf8'
+      );
+      await execFileAsync(PYTHON_BIN, [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--input',
+        appendBase,
+        '--corpus-id',
+        'append-smoke',
+        '--out-dir',
+        outDir,
+        '--min-chars',
+        '20',
+        '--no-llm',
+      ]);
+      const appIdxPath = path.join(outDir, 'append-smoke', 'tree_index.json');
+      const appCfgPath = path.join(outDir, 'append-smoke', 'corpus.json');
+      const appIdx0 = JSON.parse(fs.readFileSync(appIdxPath, 'utf8'));
+      appIdx0.series_summaries = { 正文卷: '已有卷摘要' };
+      appIdx0.stats.llm_scenes = 2;
+      appIdx0.stats.llm_arcs = 2;
+      fs.writeFileSync(appIdxPath, JSON.stringify(appIdx0), 'utf8');
+      const appCfg0 = JSON.parse(fs.readFileSync(appCfgPath, 'utf8'));
+      appCfg0.aliases = [['林墨', '零号']];
+      appCfg0.locked_aliases = ['林墨, 零号'];
+      appCfg0.locked_glossary = ['星港：前沿中转站'];
+      fs.writeFileSync(appCfgPath, JSON.stringify(appCfg0), 'utf8');
+
+      const appendExtra = path.join(tmpDir, 'append_extra.txt');
+      fs.writeFileSync(
+        appendExtra,
+        ['## 第3章 汇合', '零号在空间站与苏夏汇合，核对了新航线。'.repeat(5)].join('\n'),
+        'utf8'
+      );
+      await execFileAsync(PYTHON_BIN, [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--append',
+        '--input',
+        appendExtra,
+        '--corpus-id',
+        'append-smoke',
+        '--out-dir',
+        outDir,
+        '--min-chars',
+        '20',
+        '--no-llm',
+      ]);
+      const appIdx1 = JSON.parse(fs.readFileSync(appIdxPath, 'utf8'));
+      const appCfg1 = JSON.parse(fs.readFileSync(appCfgPath, 'utf8'));
+      assert.strictEqual(appIdx1.arcs.length, 3, '--append must preserve existing arcs and add new arc');
+      assert.deepStrictEqual(appIdx1.arcs.map((a) => a.order), [1, 2, 3], '--append must continue order past max_existing_order');
+      const allIds = appIdx1.arcs.flatMap((a) => [a.arc_id, ...a.scenes.map((s) => s.node_id)]);
+      assert.strictEqual(new Set(allIds).size, allIds.length, '--append must produce collision-free arc_id/node_id');
+      assert.deepStrictEqual(appIdx1.series_summaries, { 正文卷: '已有卷摘要' }, '--append must preserve series_summaries');
+      assert.strictEqual(appIdx1.stats.llm_scenes, 2, '--append must preserve stats.llm_scenes');
+      assert.deepStrictEqual(appCfg1.locked_aliases, ['林墨, 零号'], '--append must preserve locked_aliases');
+      assert.deepStrictEqual(appCfg1.locked_glossary, ['星港：前沿中转站'], '--append must preserve locked_glossary');
+
+      const vsPath = path.join(tmpDir, 'virtual_series.txt');
+      const vsLines = [];
+      for (let i = 1; i <= 85; i++) {
+        vsLines.push(`第${i}章 航程${i}`, `第${i}章正文内容：舰队继续向星云深处推进，记录第${i}次跃迁。`.repeat(3));
+      }
+      fs.writeFileSync(vsPath, vsLines.join('\n'), 'utf8');
+      await execFileAsync(PYTHON_BIN, [
+        path.join(ROOT, 'builders', 'build_novel.py'),
+        '--input',
+        vsPath,
+        '--corpus-id',
+        'vs-smoke',
+        '--out-dir',
+        outDir,
+        '--min-chars',
+        '20',
+        '--no-llm',
+      ]);
+      const vsIdx = JSON.parse(fs.readFileSync(path.join(outDir, 'vs-smoke', 'tree_index.json'), 'utf8'));
+      const vsSeries = [...new Set(vsIdx.arcs.map((a) => a.series))];
+      assert.deepStrictEqual(vsSeries, ['正文卷 (1-80)', '正文卷 (81-85)'], '85-chapter single-series novel must split into virtual series buckets');
     }
 
     console.log(`  PASS: EPUB, web-novel, Character Card V2, in-place LLM --upgrade, and pack_lorepack verified via ${PYTHON_BIN}`);
@@ -880,6 +1061,35 @@ function testHygieneAndSyntax() {
 
   assert.strictEqual(badSecretHits.length, 0, `Potential leaked API key found in: ${badSecretHits.join(', ')}`);
   assert.strictEqual(badPrivacyHits.length, 0, `Private path or identifier found in: ${badPrivacyHits.join(', ')}`);
+
+  // v2.4.1 regression: build_releases.mjs excludes migrate_*.mjs and demo-chronicles.lorepack.json includes config
+  const buildReleasesSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'build_releases.mjs'), 'utf8');
+  assert(
+    /migrate_/.test(buildReleasesSrc) && /copyRecursive/.test(buildReleasesSrc),
+    'build_releases.mjs must exclude migrate_*.mjs from packaged ZIPs'
+  );
+  const demoLorepackPath = path.join(ROOT, 'extension', 'st-tree-lore', 'ui', 'demo-chronicles.lorepack.json');
+  const demoLorepack = JSON.parse(fs.readFileSync(demoLorepackPath, 'utf8'));
+  assert(
+    demoLorepack.config && typeof demoLorepack.config === 'object' && demoLorepack.config.name,
+    'demo-chronicles.lorepack.json must include config'
+  );
+  assert(
+    Array.isArray(demoLorepack.config.aliases) && demoLorepack.config.aliases.length > 0,
+    'demo-chronicles.lorepack.json config must include aliases'
+  );
+
+  // v2.5 smoke: UI visual aliases/glossary editor & locked_* passthrough
+  const modalsSrc = fs.readFileSync(path.join(ROOT, 'ui', 'js', 'modals.js'), 'utf8');
+  const apiSrc = fs.readFileSync(path.join(ROOT, 'ui', 'js', 'api.js'), 'utf8');
+  assert(
+    modalsSrc.includes('ccAliasesList') && modalsSrc.includes('ccGlossaryList') && modalsSrc.includes('locked_aliases') && modalsSrc.includes('locked_glossary'),
+    'ui/js/modals.js must include visual aliases/glossary editor and locked_* fields'
+  );
+  assert(
+    apiSrc.includes('locked_aliases') && apiSrc.includes('locked_glossary'),
+    'ui/js/api.js must preserve locked_aliases and locked_glossary'
+  );
 
   for (const f of fs.readdirSync(path.join(ROOT, 'src')).filter((x) => x.endsWith('.js'))) {
     execFileSync('node', ['--check', path.join(ROOT, 'src', f)], { stdio: 'inherit' });
@@ -1160,6 +1370,24 @@ async function testMcpAndBrowserEngine() {
       chatModel: 'mock-model',
     });
     assert.strictEqual(resumeRes.upgradedArcs, 0, 'Resume run must skip already completed chapters');
+
+    // v2.5 locked_aliases & locked_glossary preservation during Browser LLM upgrade
+    const lockedPack = browserMod.buildNovelCorpusInBrowser({
+      rawText: '# 第一卷 星港篇\n## 第1章 锁定测试\n苏璃在灰烬星港检查雷达脉冲。',
+      corpusId: 'locked-browser-smoke',
+      name: '锁定测试',
+    });
+    lockedPack.config.aliases = [['苏璃', '人工锁定别名']];
+    lockedPack.config.locked_aliases = ['苏璃'];
+    lockedPack.config.glossary = ['灰烬星港：人工锁定释义'];
+    lockedPack.config.locked_glossary = ['灰烬星港'];
+    await browserMod.upgradeBrowserCorpusWithLLM(lockedPack, {
+      chatBase: `http://127.0.0.1:${bPort}/v1`,
+      chatKey: 'mock-key',
+      chatModel: 'mock-model',
+    });
+    assert.deepStrictEqual(lockedPack.config.aliases, [['苏璃', '人工锁定别名']], 'Browser locked_aliases must not be mutated during LLM upgrade');
+    assert.deepStrictEqual(lockedPack.config.glossary, ['灰烬星港：人工锁定释义'], 'Browser locked_glossary must not be overwritten during LLM upgrade');
   } finally {
     browserMockSrv.close();
   }
@@ -1232,6 +1460,7 @@ async function testMcpAndBrowserEngine() {
     const sceneId = String(demoIdx.arcs[0].scenes[0].node_id);
     const seen = [];
     let rejectStream = false;
+    let nextReadFocus = '';
     const streamSrv = http.createServer((req, res) => {
       const chunks = [];
       req.on('data', (c) => chunks.push(c));
@@ -1242,7 +1471,12 @@ async function testMcpAndBrowserEngine() {
           res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant' } }] }) + '\n\n');
           return; // never finishes
         }
-        seen.push({ stream: body.stream === true, hasTools: Array.isArray(body.tools) });
+        seen.push({
+          stream: body.stream === true,
+          hasTools: Array.isArray(body.tools),
+          sysPrompt: String(body.messages?.find((m) => m.role === 'system')?.content || ''),
+          toolContent: String(body.messages?.find((m) => m.role === 'tool')?.content || ''),
+        });
         if (rejectStream && body.stream) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end('{"error":{"message":"stream not supported"}}');
@@ -1250,13 +1484,14 @@ async function testMcpAndBrowserEngine() {
         }
         const toolRound = !body.messages.some((m) => m.role === 'tool');
         if (toolRound) {
+          const readArgs = nextReadFocus ? { scene_node_ids: [sceneId], focus_query: nextReadFocus } : { scene_node_ids: [sceneId] };
           replyChat(
             res,
             body,
             {
               content: null,
               reasoning_content: '先读第一幕核实。',
-              tool_calls: [{ id: 'call_r1', type: 'function', function: { name: 'read_scene', arguments: JSON.stringify({ scene_node_ids: [sceneId] }) } }],
+              tool_calls: [{ id: 'call_r1', type: 'function', function: { name: 'read_scene', arguments: JSON.stringify(readArgs) } }],
             },
             { usage: { prompt_tokens: 50, completion_tokens: 10 }, finish: 'tool_calls' }
           );
@@ -1277,19 +1512,117 @@ async function testMcpAndBrowserEngine() {
       const q = { query: '雷达室那晚发生了什么', onDemand: '', recentChat: [], sceneAnchor: { charName: '灰烬星港', userName: '旅人' } };
 
       const progress = [];
-      const bOut = await localAgent.search(q, apiCfg, { onProgress: (d) => progress.push(d) });
+      const bOut = await localAgent.search({ ...q, pov: 'Zero-7' }, apiCfg, { onProgress: (d) => progress.push(d) });
       assert.deepStrictEqual(bOut.scenes.map((x) => String(x.node_id)), [sceneId], 'In-Browser agent must reassemble streamed tool_calls and final JSON');
+      assert.strictEqual(bOut.scenes[0].present, true, 'In-Browser agent withPresent must expand pov aliases (Zero-7 -> 苏璃)');
       assert(seen.every((x) => x.stream), 'In-Browser agent must stream by default');
       assert(progress.some((d) => d.kind === 'tool' && d.toolNames.includes('read_scene')), 'onProgress must report streamed tool names');
       assert(progress.some((d) => d.kind === 'reasoning' && d.reasoningChars > 0), 'onProgress must report streamed reasoning');
       assert.strictEqual(bOut.steps[0].reasoning, '先读第一幕核实。', 'streamed reasoning_content must be kept on the step');
 
+      assert.strictEqual(typeof browserMod.idbGetCorpus, 'function', 'browser_engine.js must export idbGetCorpus');
+
       const nodeAgent = createTreeAgent({ corpusId: 'demo-chronicles', corpusDir: path.join(ROOT, 'corpora', 'demo-chronicles') });
       seen.length = 0;
-      const nOut = await nodeAgent.search(q, apiCfg);
+      const nOut = await nodeAgent.search({ ...q, pov: 'Zero-7' }, apiCfg);
       assert.deepStrictEqual(nOut.scenes.map((x) => String(x.node_id)), [sceneId], 'Node agent must reassemble streamed tool_calls and final JSON');
+      assert.strictEqual(nOut.scenes[0].present, true, 'Node agent present must expand pov aliases (Zero-7 -> 苏璃)');
       assert(seen.every((x) => x.stream), 'Node agent must stream by default');
       assert.strictEqual(nOut.usage.prompt, 130, 'Node agent must read usage from the final stream chunk');
+
+      // v2.5 smoke: grep sort_by (diversity/rarity), offset, buckets, prompt_builder schema & glossary slimming
+      const { buildTools, buildSystemPrompt } = require('../src/prompt_builder.js');
+      const demoIdxData = JSON.parse(fs.readFileSync(path.join(ROOT, 'corpora', 'demo-chronicles', 'tree_index.json'), 'utf8'));
+      const demoCfgData = JSON.parse(fs.readFileSync(path.join(ROOT, 'corpora', 'demo-chronicles', 'corpus.json'), 'utf8'));
+      const divRes = nodeAgent.grepScenes('苏璃', { sort_by: 'diversity', limit: 2, offset: 0 });
+      assert.strictEqual(divRes.sort_by, 'diversity');
+      assert(Array.isArray(divRes.buckets) && divRes.buckets.length >= 1, 'grepScenes must return order buckets');
+      assert(divRes.has_more === true && divRes.next_offset === 2, 'grepScenes pagination must set has_more & next_offset');
+      const rarRes = nodeAgent.grepScenes('苏璃', { sort_by: 'rarity', limit: 2, offset: 2 });
+      assert.strictEqual(rarRes.sort_by, 'rarity');
+      assert.strictEqual(rarRes.offset, 2);
+      const toolDefs = buildTools({ corpusConfig: demoCfgData, stats: demoIdxData.stats, categories: [], seriesList: [], toneTags: [], hasGraph: false });
+      const grepToolSchema = toolDefs.find((t) => t.function.name === 'grep_scenes')?.function?.parameters?.properties || {};
+      const readToolSchema = toolDefs.find((t) => t.function.name === 'read_scene')?.function?.parameters?.properties || {};
+      assert(grepToolSchema.sort_by && grepToolSchema.offset, 'grep_scenes schema must expose sort_by & offset');
+      assert(readToolSchema.focus_query, 'read_scene schema must expose focus_query');
+      const bigGlossary = Array.from({ length: 35 }, (_, i) => `术语${i + 1}：第${i + 1}条设定说明`);
+      bigGlossary[32] = '苍穹信标：位于第33条的深空坐标装置';
+      const slimCfg = { ...demoCfgData, glossary: bigGlossary };
+      const chitchatSys = buildSystemPrompt({ corpusConfig: slimCfg, stats: demoIdxData.stats, categories: [], seriesList: [], toneTags: [], queryContext: '今天天气真不错，晚上吃什么？' });
+      assert(!chitchatSys.includes('术语1：') && !chitchatSys.includes('苍穹信标：'), '>15 glossary must be omitted on unrelated chitchat');
+      const hitSys = buildSystemPrompt({ corpusConfig: slimCfg, stats: demoIdxData.stats, categories: [], seriesList: [], toneTags: [], queryContext: '查一下苍穹信标的来历' });
+      assert(hitSys.includes('苍穹信标：位于第33条的深空坐标装置') && !hitSys.includes('术语1：'), 'matching glossary entry past #30 must be included while unrelated ones are omitted');
+
+      const demoTextsData = JSON.parse(fs.readFileSync(path.join(ROOT, 'corpora', 'demo-chronicles', 'tree_texts.json'), 'utf8'));
+      const slimBrowserAgent = browserMod.createBrowserTreeAgent({ id: 'demo-slim', config: slimCfg, indexData: demoIdxData, textsData: demoTextsData });
+      seen.length = 0;
+      await slimBrowserAgent.search({ ...q, query: '今天天气真不错，晚上吃什么？' }, apiCfg);
+      const bChitSys = seen[0]?.sysPrompt || '';
+      assert(!bChitSys.includes('人物本名/化名/代号对照表') && !bChitSys.includes('核心世界观与设定术语') && !bChitSys.includes('术语1：'), 'browser sysPrompt must omit aliasBlock and >15 glossary on chitchat');
+      seen.length = 0;
+      await slimBrowserAgent.search({ ...q, query: '查一下苍穹信标的来历' }, apiCfg);
+      const bHitSys = seen[0]?.sysPrompt || '';
+      assert(bHitSys.includes('苍穹信标：位于第33条的深空坐标装置') && !bHitSys.includes('术语1：'), 'browser sysPrompt must include matching glossary entry past #30 while omitting unrelated entries');
+
+      // v2.5 browser parity: grep diversity/rarity + offset, read_scene focus_query, virtual series & existingPack append, Python locked merge
+      const bDiv = slimBrowserAgent.grepScenes('苏璃', { sort_by: 'diversity', limit: 2, offset: 0 });
+      assert.strictEqual(bDiv.sort_by, 'diversity');
+      assert(Array.isArray(bDiv.buckets) && bDiv.buckets.length >= 1 && bDiv.has_more === true && bDiv.next_offset === 2, 'browser grepScenes diversity/buckets/pagination');
+      const bRar = slimBrowserAgent.grepScenes('苏璃', { sort_by: 'rarity', limit: 2, offset: 2 });
+      assert.strictEqual(bRar.sort_by, 'rarity');
+      assert.strictEqual(bRar.offset, 2);
+
+      const longLines = Array.from({ length: 40 }, (_, i) => (i === 20 ? '第21行：苏璃在观测台发现关键信标。' : `第${i + 1}行：无关日常填充文本内容。`)).join('\n');
+      const focusPack = {
+        id: 'focus-smoke',
+        config: slimCfg,
+        indexData: demoIdxData,
+        textsData: { ...demoTextsData, [sceneId]: { ...demoTextsData[sceneId], text: longLines } },
+      };
+      const focusBrowserAgent = browserMod.createBrowserTreeAgent(focusPack);
+      seen.length = 0;
+      nextReadFocus = '银鸢';
+      await focusBrowserAgent.search(q, apiCfg);
+      nextReadFocus = '';
+      const focusToolOut = seen[1]?.toolContent || '';
+      assert(focusToolOut.includes('第21行：苏璃在观测台发现关键信标') && !focusToolOut.includes('第1行：无关日常填充文本内容'), 'browser read_scene focus_query must extract context window around alias-expanded match');
+
+      const ch85Text = Array.from({ length: 85 }, (_, i) => `第${i + 1}章 篇章${i + 1}\n正文第${i + 1}章内容。`).join('\n');
+      const vPack = browserMod.buildNovelCorpusInBrowser({ rawText: ch85Text, corpusId: 'vseries-smoke', name: '分桶测试' });
+      assert.strictEqual(vPack.indexData.arcs.length, 85);
+      assert.strictEqual(vPack.indexData.arcs[0].series, '正文卷 (1-80)', 'browser virtual series bucket 1-80');
+      assert.strictEqual(vPack.indexData.arcs[80].series, '正文卷 (81-85)', 'browser virtual series bucket 81-85');
+      vPack.indexData.series_summaries['正文卷 (1-80)'] = '已有卷总览';
+      vPack.config.locked_aliases = ['林渊'];
+      vPack.config.locked_glossary = ['星环'];
+      const appendedPack = browserMod.buildNovelCorpusInBrowser({
+        rawText: '第86章 新追更\n追加章节正文内容。',
+        corpusId: 'vseries-smoke',
+        name: '分桶测试',
+        existingPack: vPack,
+      });
+      assert.strictEqual(appendedPack.indexData.arcs.length, 86, 'existingPack append must keep existing arcs and add new chapter');
+      assert.strictEqual(appendedPack.indexData.arcs[85].order, 86, 'appended chapter order must continue from maxExistingOrder + 1');
+      assert.strictEqual(new Set(appendedPack.indexData.arcs.map((a) => a.arc_id)).size, 86, 'appended arc_ids must not collide');
+      assert.strictEqual(appendedPack.indexData.series_summaries['正文卷 (1-80)'], '已有卷总览', 'append must preserve series_summaries');
+      assert.deepStrictEqual(appendedPack.config.locked_aliases, ['林渊'], 'append must preserve locked_aliases');
+
+      execFileSync(
+        PYTHON_BIN,
+        [
+          '-c',
+          [
+            `import sys; sys.path.insert(0, r"${path.join(ROOT, 'builders').replace(/\\/g, '\\\\')}")`,
+            'import build_novel as bn',
+            'a = bn.merge_alias_groups([["苏璃", "人工锁定别名"]], [["苏璃", "新别名"], ["林夜", "夜哥"]], locked_aliases=["苏璃"])',
+            'assert ["苏璃", "人工锁定别名"] in a and ["林夜", "夜哥"] in a and not any("新别名" in g for g in a), a',
+            'g = bn.merge_glossary(["灰烬星港：人工锁定释义"], ["灰烬星港：更长的新自动释义会被忽略", "银鸢号：飞船"], locked_glossary=["灰烬星港"])',
+            'assert "灰烬星港：人工锁定释义" in g and "银鸢号：飞船" in g and not any("更长的新自动释义" in x for x in g), g',
+          ].join('\n'),
+        ],
+        { stdio: 'inherit' }
+      );
 
       seen.length = 0;
       await nodeAgent.search(q, { ...apiCfg, llmStream: false });
@@ -1480,6 +1813,14 @@ async function main() {
 
     const cfgOriginBlocked = await postJson('/config', {}, { Origin: 'https://evil.example' });
     assert.strictEqual(cfgOriginBlocked.status, 403, 'POST /config from foreign origin must return 403');
+
+    const cfgNullOriginBlocked = await postJson('/config', {}, { Origin: 'null' });
+    assert.strictEqual(cfgNullOriginBlocked.status, 403, 'POST /config from Origin: null must return 403');
+
+    const malformedRes = await getJson('/corpora/%ZZ');
+    assert.strictEqual(malformedRes.status, 400, 'GET /corpora/%ZZ must return 400 instead of crashing');
+    const healthAfterMalformed = await getJson('/health');
+    assert.strictEqual(healthAfterMalformed.status, 200, 'Server must stay healthy after malformed URL');
 
     const impOriginBlocked = await postJson('/corpora/import', { kind: 'novel', corpusId: 'x' }, { Origin: 'https://evil.example' });
     assert.strictEqual(impOriginBlocked.status, 403, 'POST /corpora/import from foreign origin must return 403');

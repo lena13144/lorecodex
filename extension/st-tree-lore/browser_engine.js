@@ -1,5 +1,8 @@
 const IDB_NAME = 'lorecodex_browser_store_v2';
-const IDB_STORE = 'corpora';
+const IDB_VERSION = 3;
+const IDB_LEGACY_STORE = 'corpora';
+const IDB_CORPUS_META_STORE = 'corpora_meta';
+const IDB_CORPUS_TEXTS_STORE = 'corpora_texts';
 const IDB_META_STORE = 'runtime_meta';
 
 const DEFAULT_STAGE_PATTERNS = [
@@ -80,6 +83,8 @@ export function normalizeCorpusConfig(raw, corpusId) {
             '完全属于与原著过往/世界观设定无关的纯日常琐事、普通闲聊且没有任何怀旧或设定查阅需求',
         aliases: Array.isArray(cfg.aliases) ? cfg.aliases : [],
         glossary: Array.isArray(cfg.glossary) ? cfg.glossary.map(String).filter(Boolean) : [],
+        locked_aliases: Array.isArray(cfg.locked_aliases) ? cfg.locked_aliases.map(String).filter(Boolean) : [],
+        locked_glossary: Array.isArray(cfg.locked_glossary) ? cfg.locked_glossary.map(String).filter(Boolean) : [],
         stage_card_patterns:
             Array.isArray(cfg.stage_card_patterns) && cfg.stage_card_patterns.length
                 ? cfg.stage_card_patterns
@@ -125,14 +130,44 @@ function openIdb() {
             cachedIdbPromise = null;
             return reject(new Error('当前环境不支持 IndexedDB'));
         }
-        const req = indexedDB.open(IDB_NAME, 2);
+        const req = indexedDB.open(IDB_NAME, IDB_VERSION);
         req.onupgradeneeded = () => {
             const db = req.result;
-            if (!db.objectStoreNames.contains(IDB_STORE)) {
-                db.createObjectStore(IDB_STORE, { keyPath: 'id' });
+            const tx = req.transaction;
+            if (!db.objectStoreNames.contains(IDB_CORPUS_META_STORE)) {
+                db.createObjectStore(IDB_CORPUS_META_STORE, { keyPath: 'id' });
+            }
+            if (!db.objectStoreNames.contains(IDB_CORPUS_TEXTS_STORE)) {
+                db.createObjectStore(IDB_CORPUS_TEXTS_STORE, { keyPath: 'id' });
             }
             if (!db.objectStoreNames.contains(IDB_META_STORE)) {
                 db.createObjectStore(IDB_META_STORE, { keyPath: 'key' });
+            }
+            if (db.objectStoreNames.contains(IDB_LEGACY_STORE) && tx) {
+                const legacyStore = tx.objectStore(IDB_LEGACY_STORE);
+                const metaStore = tx.objectStore(IDB_CORPUS_META_STORE);
+                const textsStore = tx.objectStore(IDB_CORPUS_TEXTS_STORE);
+                const cursorReq = legacyStore.openCursor();
+                cursorReq.onsuccess = (ev) => {
+                    const cursor = ev.target.result;
+                    if (!cursor) return;
+                    const row = cursor.value;
+                    if (row && row.id) {
+                        metaStore.put({
+                            id: row.id,
+                            config: row.config,
+                            indexData: row.indexData,
+                            graphData: Array.isArray(row.graphData) ? row.graphData : [],
+                            updatedAt: row.updatedAt || new Date().toISOString(),
+                        });
+                        textsStore.put({
+                            id: row.id,
+                            textsData: row.textsData || {},
+                        });
+                    }
+                    cursor.delete();
+                    cursor.continue();
+                };
             }
         };
         req.onsuccess = () => {
@@ -214,8 +249,8 @@ export async function idbListRuns(corpusId = '') {
 export async function idbListCorpora() {
     const db = await openIdb();
     return new Promise((resolve, reject) => {
-        const tx = db.transaction(IDB_STORE, 'readonly');
-        const st = tx.objectStore(IDB_STORE);
+        const tx = db.transaction(IDB_CORPUS_META_STORE, 'readonly');
+        const st = tx.objectStore(IDB_CORPUS_META_STORE);
         const req = st.getAll();
         req.onsuccess = () => {
             const rows = Array.isArray(req.result) ? req.result : [];
@@ -225,32 +260,95 @@ export async function idbListCorpora() {
     });
 }
 
+export async function idbGetCorpus(id) {
+    const cid = String(id || '').trim();
+    if (!cid) return null;
+    const db = await openIdb();
+    const hasLegacy = db.objectStoreNames.contains(IDB_LEGACY_STORE);
+    const stores = hasLegacy
+        ? [IDB_CORPUS_META_STORE, IDB_CORPUS_TEXTS_STORE, IDB_LEGACY_STORE]
+        : [IDB_CORPUS_META_STORE, IDB_CORPUS_TEXTS_STORE];
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(stores, 'readonly');
+        const metaReq = tx.objectStore(IDB_CORPUS_META_STORE).get(cid);
+        const textsReq = tx.objectStore(IDB_CORPUS_TEXTS_STORE).get(cid);
+        const legacyReq = hasLegacy ? tx.objectStore(IDB_LEGACY_STORE).get(cid) : null;
+        tx.oncomplete = () => {
+            const meta = metaReq.result;
+            const texts = textsReq.result;
+            if (meta) {
+                resolve({
+                    ...meta,
+                    textsData: texts ? (texts.textsData || {}) : {},
+                });
+                return;
+            }
+            const legacy = legacyReq?.result;
+            if (legacy) {
+                resolve({
+                    id: legacy.id,
+                    config: legacy.config,
+                    indexData: legacy.indexData,
+                    graphData: Array.isArray(legacy.graphData) ? legacy.graphData : [],
+                    updatedAt: legacy.updatedAt || '',
+                    textsData: legacy.textsData || {},
+                });
+                return;
+            }
+            resolve(null);
+        };
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('IndexedDB 事务中止'));
+    });
+}
+
 export async function idbSaveCorpus(pack) {
     const db = await openIdb();
+    const hasLegacy = db.objectStoreNames.contains(IDB_LEGACY_STORE);
+    const stores = hasLegacy
+        ? [IDB_CORPUS_META_STORE, IDB_CORPUS_TEXTS_STORE, IDB_LEGACY_STORE]
+        : [IDB_CORPUS_META_STORE, IDB_CORPUS_TEXTS_STORE];
+    const updatedAt = new Date().toISOString();
+    const metaRecord = {
+        id: pack.id,
+        config: normalizeCorpusConfig(pack.config, pack.id),
+        indexData: pack.indexData,
+        graphData: Array.isArray(pack.graphData) ? pack.graphData : [],
+        updatedAt,
+    };
+    const textsRecord = {
+        id: pack.id,
+        textsData: pack.textsData || {},
+    };
     return new Promise((resolve, reject) => {
-        const tx = db.transaction(IDB_STORE, 'readwrite');
-        const st = tx.objectStore(IDB_STORE);
-        const req = st.put({
-            id: pack.id,
-            config: normalizeCorpusConfig(pack.config, pack.id),
-            indexData: pack.indexData,
-            textsData: pack.textsData,
-            graphData: Array.isArray(pack.graphData) ? pack.graphData : [],
-            updatedAt: new Date().toISOString(),
-        });
-        req.onsuccess = () => resolve(true);
-        req.onerror = () => reject(req.error);
+        const tx = db.transaction(stores, 'readwrite');
+        tx.objectStore(IDB_CORPUS_META_STORE).put(metaRecord);
+        tx.objectStore(IDB_CORPUS_TEXTS_STORE).put(textsRecord);
+        if (hasLegacy) {
+            tx.objectStore(IDB_LEGACY_STORE).delete(pack.id);
+        }
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('IndexedDB 事务中止'));
     });
 }
 
 export async function idbDeleteCorpus(id) {
     const db = await openIdb();
+    const hasLegacy = db.objectStoreNames.contains(IDB_LEGACY_STORE);
+    const stores = hasLegacy
+        ? [IDB_CORPUS_META_STORE, IDB_CORPUS_TEXTS_STORE, IDB_LEGACY_STORE]
+        : [IDB_CORPUS_META_STORE, IDB_CORPUS_TEXTS_STORE];
     return new Promise((resolve, reject) => {
-        const tx = db.transaction(IDB_STORE, 'readwrite');
-        const st = tx.objectStore(IDB_STORE);
-        const req = st.delete(id);
-        req.onsuccess = () => resolve(true);
-        req.onerror = () => reject(req.error);
+        const tx = db.transaction(stores, 'readwrite');
+        tx.objectStore(IDB_CORPUS_META_STORE).delete(id);
+        tx.objectStore(IDB_CORPUS_TEXTS_STORE).delete(id);
+        if (hasLegacy) {
+            tx.objectStore(IDB_LEGACY_STORE).delete(id);
+        }
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('IndexedDB 事务中止'));
     });
 }
 
@@ -830,7 +928,7 @@ function stripGluedChapterPrefix(bodyLines, bookName, title) {
     return true;
 }
 
-export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = '正文', cleanAds = true, stripBlocks = [] }) {
+export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = '正文', cleanAds = true, stripBlocks = [], existingPack = null, virtualSeriesSize = 80 }) {
     const rawLines = String(rawText || '').replace(/\r\n?/g, '\n').split('\n');
     const cleanedRes = cleanNovelLinesInBrowser(rawLines, { bookName: name, cleanAds, stripBlocks });
     const cleanStats = cleanedRes.stats;
@@ -901,11 +999,31 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
         }
     }
     const validChaps = rawChapters.filter((c) => c.lines.join('\n').trim().length > 0);
-    const arcs = [];
-    const textsData = {};
-    let arcSeq = 1;
-    let nodeSeq = 1;
-    let totalChars = 0;
+    const existingArcs = Array.isArray(existingPack?.indexData?.arcs) ? existingPack.indexData.arcs : [];
+    const existingTexts = existingPack?.textsData && typeof existingPack.textsData === 'object' ? existingPack.textsData : {};
+    const maxExistingOrder = existingArcs.reduce((m, a) => Math.max(m, Number(a?.order) || 0), 0);
+    const maxExistingArcNum = existingArcs.reduce((m, a) => {
+        const n = parseInt(String(a?.arc_id || ''), 10);
+        return Number.isFinite(n) ? Math.max(m, n) : m;
+    }, 0);
+    let maxExistingNodeNum = 0;
+    for (const k of Object.keys(existingTexts)) {
+        const n = parseInt(String(k), 10);
+        if (Number.isFinite(n)) maxExistingNodeNum = Math.max(maxExistingNodeNum, n);
+    }
+    for (const a of existingArcs) {
+        for (const s of a?.scenes || []) {
+            const n = parseInt(String(s?.node_id || ''), 10);
+            if (Number.isFinite(n)) maxExistingNodeNum = Math.max(maxExistingNodeNum, n);
+        }
+    }
+
+    const newArcs = [];
+    const newTextsData = {};
+    let arcSeq = maxExistingArcNum + 1;
+    let orderSeq = maxExistingOrder + 1;
+    let nodeSeq = maxExistingNodeNum + 1;
+    let newChars = 0;
 
     for (const ch of validChaps) {
         const arcId = String(arcSeq).padStart(4, '0');
@@ -995,12 +1113,12 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
                 group: `${arcId}-${i + 1}`,
                 group_title: scTitle,
                 title: scTitle,
-                order: arcSeq,
+                order: orderSeq,
                 chars: scText.length,
                 tone_tags: scTones,
                 summary: scSummary,
             });
-            textsData[nodeId] = {
+            newTextsData[nodeId] = {
                 arc_id: arcId,
                 arc_title: ch.title,
                 group: `${arcId}-${i + 1}`,
@@ -1011,14 +1129,14 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
 
         const cast = extractDialogueCast(fullText);
         const arcChars = fullText.length;
-        totalChars += arcChars;
-        arcs.push({
+        newChars += arcChars;
+        newArcs.push({
             arc_id: arcId,
             arc_key: `${corpusId}-${arcId}`,
             title: ch.title,
             series: ch.series || '',
             category: category || '正文',
-            order: arcSeq,
+            order: orderSeq,
             total_chars: arcChars,
             description: scenes[0]?.summary || ch.title,
             characters: cast,
@@ -1027,27 +1145,56 @@ export function buildNovelCorpusInBrowser({ rawText, corpusId, name, category = 
             scenes,
         });
         arcSeq += 1;
+        orderSeq += 1;
     }
+
+    const bucketThreshold = Math.max(10, Number(virtualSeriesSize) || 80);
+    const seriesBuckets = new Map();
+    for (const a of newArcs) {
+        const key = String(a.series || '');
+        if (!seriesBuckets.has(key)) seriesBuckets.set(key, []);
+        seriesBuckets.get(key).push(a);
+    }
+    for (const [serKey, list] of seriesBuckets.entries()) {
+        if (list.length <= bucketThreshold) continue;
+        const baseName = serKey || '正文卷';
+        for (let i = 0; i < list.length; i += bucketThreshold) {
+            const start = i + 1;
+            const end = Math.min(i + bucketThreshold, list.length);
+            const label = `${baseName} (${start}-${end})`;
+            for (let j = i; j < end; j++) {
+                list[j].series = label;
+            }
+        }
+    }
+
+    const arcs = [...existingArcs, ...newArcs];
+    const textsData = { ...existingTexts, ...newTextsData };
+    const existingStats = existingPack?.indexData?.stats || {};
+    const totalChars = (Number(existingStats.total_chars) || 0) + newChars;
 
     const indexData = {
         version: 2,
         corpus_id: corpusId,
-        corpus_name: name || corpusId,
+        corpus_name: existingPack?.indexData?.corpus_name || name || corpusId,
         built_at: new Date().toISOString(),
         stats: {
             arcs: arcs.length,
-            scenes: nodeSeq - 1,
+            scenes: Object.keys(textsData).length,
             total_chars: totalChars,
-            max_order: arcs.length,
-            llm_scenes: 0,
-            llm_arcs: 0,
+            max_order: arcs.reduce((m, a) => Math.max(m, Number(a?.order) || 0), 0),
+            llm_scenes: Number(existingStats.llm_scenes) || 0,
+            llm_arcs: Number(existingStats.llm_arcs) || 0,
         },
-        series_summaries: {},
+        series_summaries: { ...(existingPack?.indexData?.series_summaries || {}) },
         arcs,
     };
 
-    const config = normalizeCorpusConfig({ id: corpusId, name: name || corpusId }, corpusId);
-    return { id: corpusId, config, indexData, textsData, graphData: [], cleanStats };
+    const config = existingPack?.config
+        ? normalizeCorpusConfig(existingPack.config, corpusId)
+        : normalizeCorpusConfig({ id: corpusId, name: name || corpusId }, corpusId);
+    const graphData = Array.isArray(existingPack?.graphData) ? existingPack.graphData : [];
+    return { id: corpusId, config, indexData, textsData, graphData, cleanStats };
 }
 
 // ── 世界书条目解析 ───────────────────────────────────────────────────────────
@@ -1826,12 +1973,17 @@ export function createBrowserTreeAgent(pack) {
 
     function grepScenes(rawQuery, opts = {}) {
         const limit = Math.min(Math.max(Number(opts.limit) || 20, 1), 60);
+        const offset = Math.max(0, Math.floor(Number(opts.offset) || 0));
+        const rawSortBy = String(opts.sort_by || opts.sortBy || 'relevance').trim().toLowerCase();
+        const sortBy = rawSortBy === 'diversity' || rawSortBy === 'rarity' ? rawSortBy : 'relevance';
         const maxOrder = opts.maxOrder ?? null;
         const catFilter = String(opts.category || '').trim();
         const toneFilter = String(opts.tone || '').trim().toLowerCase();
         const t0 = performance.now();
         const q = String(rawQuery || '').trim();
-        if (!q) return { took_ms: 0, total: 0, cameo_count: 0, all_matched: false, hits: [] };
+        if (!q) {
+            return { took_ms: 0, total: 0, cameo_count: 0, all_matched: false, sort_by: sortBy, offset, has_more: false, next_offset: null, buckets: [], hits: [] };
+        }
 
         const tokens = q.split(/[\s,，、]+/).map((x) => x.trim()).filter(Boolean);
         const groups = tokens.map((tk) => expandAliases(tk).map((a) => a.toLowerCase()));
@@ -1904,13 +2056,66 @@ export function createBrowserTreeAgent(pack) {
             pool = collect(false);
         }
         pool.sort((a, b) => Number(b.cameo) - Number(a.cameo) || b.groups_hit - a.groups_hit || b.match_count - a.match_count);
+        const numeric = pool.filter((h) => h.order !== null && h.order !== undefined && Number.isFinite(Number(h.order)));
+        const nonNumeric = pool.filter((h) => !(h.order !== null && h.order !== undefined && Number.isFinite(Number(h.order))));
+        const rawBuckets = [];
+        if (numeric.length) {
+            let minOrd = Infinity;
+            let maxOrd = -Infinity;
+            for (const h of numeric) {
+                const o = Number(h.order);
+                if (o < minOrd) minOrd = o;
+                if (o > maxOrd) maxOrd = o;
+            }
+            const bucketCount = maxOrd > minOrd && numeric.length >= 5 ? Math.min(8, Math.max(5, Math.ceil(numeric.length / 4))) : 1;
+            const span = Math.max(1, maxOrd - minOrd + 1);
+            for (let idx = 0; idx < bucketCount; idx++) {
+                const bMin = minOrd + Math.floor((idx * span) / bucketCount);
+                const bMax = idx === bucketCount - 1 ? maxOrd : Math.max(bMin, minOrd + Math.floor(((idx + 1) * span) / bucketCount) - 1);
+                rawBuckets.push({ min_order: bMin, max_order: bMax, items: [] });
+            }
+            for (const h of numeric) {
+                const o = Number(h.order);
+                const idx = bucketCount === 1 ? 0 : Math.min(bucketCount - 1, Math.floor(((o - minOrd) * bucketCount) / span));
+                rawBuckets[idx].items.push(h);
+            }
+        }
+        let ordered = pool;
+        if (sortBy === 'diversity' && rawBuckets.length > 1) {
+            ordered = [];
+            const cursors = rawBuckets.map(() => 0);
+            let added = true;
+            while (added) {
+                added = false;
+                for (let i = 0; i < rawBuckets.length; i++) {
+                    if (cursors[i] < rawBuckets[i].items.length) {
+                        ordered.push(rawBuckets[i].items[cursors[i]++]);
+                        added = true;
+                    }
+                }
+            }
+            ordered.push(...nonNumeric);
+        } else if (sortBy === 'rarity') {
+            const arcFreq = new Map();
+            for (const h of pool) arcFreq.set(h.arc_id, (arcFreq.get(h.arc_id) || 0) + 1);
+            ordered = [...pool].sort((a, b) => (arcFreq.get(a.arc_id) || 0) - (arcFreq.get(b.arc_id) || 0) || a.match_count - b.match_count || b.groups_hit - a.groups_hit);
+        }
+        const hits = ordered.slice(offset, offset + limit);
+        const hasMore = offset + hits.length < ordered.length;
+        const nextOffset = hasMore ? offset + hits.length : null;
+        const buckets = rawBuckets.filter((b) => b.items.length > 0).map((b) => ({ min_order: b.min_order, max_order: b.max_order, count: b.items.length }));
         const cameos = pool.filter((x) => x.cameo);
         return {
             took_ms: Number((performance.now() - t0).toFixed(2)),
             total: pool.length,
             cameo_count: cameos.length,
             all_matched: allMatched,
-            hits: pool.slice(0, limit),
+            sort_by: sortBy,
+            offset,
+            has_more: hasMore,
+            next_offset: nextOffset,
+            buckets,
+            hits,
         };
     }
 
@@ -2018,10 +2223,13 @@ export function createBrowserTreeAgent(pack) {
                 type: 'function',
                 function: {
                     name: 'read_scene',
-                    description: '批量读取 1~10 个场景节点的完整无损原文',
+                    description: '批量读取 1~10 个场景节点的完整无损原文（可选 focus_query 仅提取命中行上下文窗口）',
                     parameters: {
                         type: 'object',
-                        properties: { scene_node_ids: { type: 'array', items: { type: 'string' } } },
+                        properties: {
+                            scene_node_ids: { type: 'array', items: { type: 'string' } },
+                            focus_query: { type: 'string', description: '可选：只提取包含该关键词（自动展开别名）的上下文窗口，节省 token' },
+                        },
                         required: ['scene_node_ids'],
                     },
                 },
@@ -2033,28 +2241,39 @@ export function createBrowserTreeAgent(pack) {
                     description: '全库正文毫秒级精确扫描（自动展开人物别名与客串发现）',
                     parameters: {
                         type: 'object',
-                        properties: { query: { type: 'string' }, category: { type: 'string' }, tone: { type: 'string' } },
+                        properties: {
+                            query: { type: 'string' },
+                            category: { type: 'string' },
+                            tone: { type: 'string' },
+                            sort_by: { type: 'string', enum: ['relevance', 'diversity', 'rarity'], description: 'relevance(默认) | diversity(按order分段均衡采样防高频刷屏) | rarity(低频稀有线索优先)' },
+                            offset: { type: 'integer', description: '分页偏移量，默认 0' },
+                        },
                         required: ['query'],
                     },
                 },
             }
         );
 
-        const aliasBlock = (corpusConfig.aliases || []).length
-            ? `\n【人物本名/化名/代号对照表】\n` +
-              corpusConfig.aliases
-                  .slice(0, 45)
-                  .map((g) => (Array.isArray(g) ? g.join(' = ') : ''))
-                  .filter(Boolean)
-                  .join(' ； ')
-            : '';
-        const glossaryBlock = (corpusConfig.glossary || []).length
-            ? `\n【核心世界观与设定术语】\n` + corpusConfig.glossary.slice(0, 30).join('\n')
+        const glossaryList = corpusConfig.glossary || [];
+        const queryCtx = [
+            payload.query,
+            payload.onDemand,
+            ...(Array.isArray(payload.recentChat) ? payload.recentChat.map((m) => m?.text) : []),
+            ...(Array.isArray(payload.messages) ? payload.messages.map((m) => m?.content) : []),
+        ].filter(Boolean).join('\n').toLowerCase();
+        const filteredGlossary = glossaryList.length <= 15
+            ? glossaryList
+            : glossaryList.filter((entry) => {
+                const term = String(entry || '').split(/[:：]/)[0].trim().toLowerCase();
+                return term && queryCtx.includes(term);
+            }).slice(0, 15);
+        const glossaryBlock = filteredGlossary.length
+            ? `\n【核心世界观与设定术语】\n` + filteredGlossary.join('\n')
             : '';
 
         const sysPrompt = `你是《${corpusConfig.name}》后台树形记忆检索 Agent（浏览器内置引擎），负责定位并核实原著文本。
 ${corpusConfig.world_premise || ''}
-语料规模：${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}。${maxOrder ? `当前防剧透锁定：order <= ${maxOrder}，严禁泄露后续内容。` : ''}${aliasBlock}${glossaryBlock}
+语料规模：${stats.arcs} 卷 / ${stats.scenes} 幕 / ${formatCharCount(stats.total_chars)}。${maxOrder ? `当前防剧透锁定：order <= ${maxOrder}，严禁泄露后续内容。` : ''}${glossaryBlock}
 【检索策略】
 1. 跳过判定：纯无关闲聊或未收录原创设定直接输出 {"skip":true,"reason":"..."}；涉及过往经历、设定或台词细节时主动检索。
 2. 高效寻路：首轮可并发调用目录工具与 grep_scenes（自动展开别名）；read_scene 尽量一次批量传入多个纯编号 scene_node_ids（最多 10 个，如 ["0080","0601"]）。
@@ -2176,6 +2395,39 @@ ${corpusConfig.world_premise || ''}
                     .map((rawId) => String(rawId || '').replace(/^node:/i, '').split('|')[0].trim())
                     .filter(Boolean)
                     .slice(0, 10);
+                const focusQuery = String(args?.focus_query || '').trim();
+                const focusTerms = focusQuery
+                    ? [...new Set(focusQuery.split(/[\s,，、]+/).filter(Boolean).flatMap((t) => expandAliases(t)).map((t) => t.toLowerCase()))]
+                    : [];
+                const extractFocus = (fullText) => {
+                    if (!focusTerms.length) return { text: fullText, focused: false };
+                    const lines = fullText.split('\n');
+                    const ranges = [];
+                    for (let i = 0; i < lines.length; i++) {
+                        const low = lines[i].toLowerCase();
+                        if (focusTerms.some((t) => low.includes(t))) {
+                            const s = Math.max(0, i - 3);
+                            const e = Math.min(lines.length - 1, i + 3);
+                            if (ranges.length && s <= ranges[ranges.length - 1][1] + 1) {
+                                ranges[ranges.length - 1][1] = Math.max(ranges[ranges.length - 1][1], e);
+                            } else {
+                                ranges.push([s, e]);
+                            }
+                        }
+                    }
+                    if (!ranges.length) {
+                        return { text: `[未直接命中 focus_query="${focusQuery}"，以下为开头节选]\n` + fullText.slice(0, 800), focused: true };
+                    }
+                    const chunks = [];
+                    let used = 0;
+                    for (const [s, e] of ranges) {
+                        const seg = lines.slice(s, e + 1).join('\n');
+                        if (used > 0 && used + seg.length > 2500) break;
+                        chunks.push(`[L${s + 1}-L${e + 1}]\n${seg}`);
+                        used += seg.length;
+                    }
+                    return { text: chunks.join('\n...\n'), focused: true };
+                };
                 const out = [];
                 const nodeIds = [];
                 const arcIds = [];
@@ -2184,6 +2436,7 @@ ${corpusConfig.world_premise || ''}
                     const raw = textsData[sid];
                     if (!sm || !raw || !isOrderAllowed(sm.effective_order, maxOrder)) continue;
                     const cleanText = stripMarkup(raw.text);
+                    const { text: bodyText, focused } = extractFocus(cleanText);
                     const rec = {
                         node_id: sid,
                         arc_id: sm.arc_id,
@@ -2192,7 +2445,8 @@ ${corpusConfig.world_premise || ''}
                         title: sm.title || sm.group_title,
                         order: sm.effective_order,
                         chars: cleanText.length,
-                        text: cleanText,
+                        ...(focused ? { focused: true } : {}),
+                        text: bodyText,
                     };
                     readScenesMap.set(sid, rec);
                     readNodesSet.add(sid);
@@ -2207,14 +2461,33 @@ ${corpusConfig.world_premise || ''}
                 };
             }
             if (fnName === 'grep_scenes') {
-                const res = grepScenes(args?.query || '', { limit: 20, maxOrder, category: args?.category, tone: args?.tone });
+                const sortBy = String(args?.sort_by || 'relevance').trim().toLowerCase();
+                const offset = Math.max(0, Math.floor(Number(args?.offset) || 0));
+                const res = grepScenes(args?.query || '', { limit: 20, offset, sort_by: sortBy, maxOrder, category: args?.category, tone: args?.tone });
                 const nodeIds = res.hits.map((h) => h.node_id);
                 const arcIds = [...new Set(res.hits.map((h) => h.arc_id))];
                 arcIds.forEach((id) => listedArcsSet.add(id));
-                const text = !res.hits.length
-                    ? `[全文扫描 ${res.took_ms}ms] 零命中`
-                    : `[全文扫描 ${res.took_ms}ms | 命中 ${res.total} 幕]\n` +
-                      res.hits.map((h) => `- [node_id=${h.node_id} | arc_id=${h.arc_id}] ${h.arc_title} · ${h.title}${h.cameo ? '[客串]' : ''} (${h.match_count}处): ${h.snippet}`).join('\n');
+                let text;
+                if (!res.total) {
+                    text = `[全文扫描 ${res.took_ms}ms] 零命中`;
+                } else if (!res.hits.length) {
+                    text = `[全文扫描 ${res.took_ms}ms] 共命中 ${res.total} 幕，但 offset=${offset} 已超出范围。`;
+                } else {
+                    const sortTag = res.sort_by !== 'relevance' ? ` | sort=${res.sort_by}` : '';
+                    const pageTag = offset > 0 || res.has_more ? ` | 展示 ${offset + 1}~${offset + res.hits.length}/${res.total}` : '';
+                    const radar = [];
+                    if ((res.buckets && res.buckets.length > 1) || res.total > res.hits.length) {
+                        if (res.buckets && res.buckets.length > 0) {
+                            radar.push(`范围分布: ${res.buckets.map((b) => `${b.min_order}~${b.max_order}(${b.count})`).join(' · ')}`);
+                        }
+                        if (res.has_more && res.next_offset !== null) {
+                            radar.push(`翻页提示: 可传 offset=${res.next_offset} 查看后续命中`);
+                        }
+                    }
+                    text = `[全文扫描 ${res.took_ms}ms | 命中 ${res.total} 幕${sortTag}${pageTag}]\n` +
+                        (radar.length ? radar.join(' | ') + '\n' : '') +
+                        res.hits.map((h) => `- [node_id=${h.node_id} | arc_id=${h.arc_id} | order=${h.order ?? '?'}] ${h.arc_title} · ${h.title}${h.cameo ? '[客串]' : ''} (${h.match_count}处): ${h.snippet}`).join('\n');
+                }
                 return {
                     text,
                     summary: `Grep "${args?.query || ''}" -> ${res.total} 幕 (${res.took_ms}ms)`,
@@ -2374,10 +2647,16 @@ ${corpusConfig.world_premise || ''}
             : [];
         const finalScenes = [];
         const pickedIds = new Set();
+        const povTerms = pov ? expandAliases(pov) : [];
         const withPresent = (sc) => {
             const chars = sc.characters || sceneMetaMap.get(sc.node_id)?.arc_characters || [];
-            const present = pov
-                ? sc.text.includes(pov) || chars.some((c) => c.includes(pov))
+            const textLow = String(sc.text || '').toLowerCase();
+            const charsLow = chars.map((c) => String(c || '').toLowerCase());
+            const present = povTerms.length
+                ? povTerms.some((term) => {
+                    const low = term.toLowerCase();
+                    return textLow.includes(low) || charsLow.some((c) => c.includes(low));
+                })
                 : null;
             return { ...sc, present };
         };
@@ -2484,8 +2763,26 @@ ${corpusConfig.world_premise || ''}
     };
 }
 
-function mergeAliasGroupsInBrowser(existingGroups = [], newGroups = [], maxGroups = 60) {
+function mergeAliasGroupsInBrowser(existingGroups = [], newGroups = [], maxGroups = 60, lockedAliases = []) {
     const existingTermsLower = new Set();
+    const lockedTokens = new Set();
+    for (const raw of lockedAliases || []) {
+        const s = String(raw || '').trim().toLowerCase();
+        if (!s) continue;
+        lockedTokens.add(s);
+        for (const part of s.split(/[,，=]+/)) {
+            const p = part.trim();
+            if (p) lockedTokens.add(p);
+        }
+    }
+    const isGroupLocked = (grp) => {
+        if (!lockedTokens.size || !Array.isArray(grp)) return false;
+        const joined = grp.map((t) => String(t || '').trim()).filter(Boolean).join(', ').toLowerCase();
+        if (joined && lockedTokens.has(joined)) return true;
+        return grp.some((t) => lockedTokens.has(String(t || '').trim().toLowerCase()));
+    };
+    const lockedMerged = [];
+    const lockedTermsLower = new Set();
     const merged = [];
 
     const absorb = (group, isNew = false) => {
@@ -2502,6 +2799,15 @@ function mergeAliasGroupsInBrowser(existingGroups = [], newGroups = [], maxGroup
             clean.push(term);
         }
         if (clean.length < 2) return;
+        if (!isNew && isGroupLocked(clean)) {
+            lockedMerged.push(clean);
+            for (const t of clean) {
+                existingTermsLower.add(t.toLowerCase());
+                lockedTermsLower.add(t.toLowerCase());
+            }
+            return;
+        }
+        if (isNew && clean.some((t) => lockedTermsLower.has(t.toLowerCase()))) return;
         if (!isNew) {
             for (const t of clean) existingTermsLower.add(t.toLowerCase());
         }
@@ -2541,10 +2847,10 @@ function mergeAliasGroupsInBrowser(existingGroups = [], newGroups = [], maxGroup
 
     for (const g of existingGroups) absorb(g, false);
     for (const g of newGroups) absorb(g, true);
-    return merged.slice(0, maxGroups);
+    return [...lockedMerged, ...merged].slice(0, Math.max(maxGroups, lockedMerged.length));
 }
 
-function mergeGlossaryInBrowser(existingList = [], newList = [], maxItems = 40) {
+function mergeGlossaryInBrowser(existingList = [], newList = [], maxItems = 40, lockedGlossary = []) {
     const headOf = (item) => {
         for (const sep of ['：', ':']) {
             const pos = item.indexOf(sep);
@@ -2555,18 +2861,29 @@ function mergeGlossaryInBrowser(existingList = [], newList = [], maxItems = 40) 
         }
         return item.trim().replace(/^-+\s*/, '').toLowerCase();
     };
+    const lockedSet = new Set();
+    for (const raw of lockedGlossary || []) {
+        const s = String(raw || '').trim();
+        if (!s) continue;
+        lockedSet.add(s.toLowerCase());
+        lockedSet.add(headOf(s));
+    }
+    const isLocked = (item) => lockedSet.has(item.toLowerCase()) || lockedSet.has(headOf(item));
     const out = [];
     const headToIdx = new Map();
     const seenFull = new Set();
+    const lockedHeads = new Set();
     for (const raw of existingList || []) {
         const item = String(raw || '').trim();
         if (!item) continue;
         const h = headOf(item);
         const full = item.toLowerCase();
         if (seenFull.has(full)) continue;
+        const itemLocked = isLocked(item);
+        if (itemLocked) lockedHeads.add(h);
         if (headToIdx.has(h)) {
             const idx = headToIdx.get(h);
-            if (item.length > out[idx].length && item.length <= 240) {
+            if (!lockedHeads.has(h) && item.length > out[idx].length && item.length <= 240) {
                 out[idx] = item;
                 seenFull.add(full);
             }
@@ -2581,7 +2898,7 @@ function mergeGlossaryInBrowser(existingList = [], newList = [], maxItems = 40) 
         if (!item || item.length > 240) continue;
         const h = headOf(item);
         const full = item.toLowerCase();
-        if (seenFull.has(full)) continue;
+        if (seenFull.has(full) || lockedHeads.has(h) || lockedSet.has(full)) continue;
         if (headToIdx.has(h)) {
             const idx = headToIdx.get(h);
             if (item.length > out[idx].length) {
@@ -2595,7 +2912,7 @@ function mergeGlossaryInBrowser(existingList = [], newList = [], maxItems = 40) 
         seenFull.add(full);
         out.push(item);
     }
-    return out.slice(0, maxItems);
+    return out.slice(0, Math.max(maxItems, lockedHeads.size));
 }
 
 function mergeRelationsInBrowser(existingEdges = [], newEdges = [], maxEdges = 500) {
@@ -2985,7 +3302,7 @@ export function acquireCorpusBuildLock(corpusId, ownerLabel = '当前窗口') {
     };
 }
 
-async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
+async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3, rateGate = null) {
     const cleanBase = String(apiCfg.chatBase || '')
         .trim()
         .replace(/\/+$/, '')
@@ -3001,6 +3318,11 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
         if (signal?.aborted) throw new Error('用户已暂停/终止 LLM 建库');
+        if (rateGate) {
+            const coolMs = rateGate.untilMs - Date.now();
+            if (coolMs > 0) await sleepWithSignal(coolMs, signal);
+            if (rateGate.gapMs > 0) await sleepWithSignal(rateGate.gapMs, signal);
+        }
         const body = {
             model,
             messages: [{ role: 'user', content: prompt }],
@@ -3023,10 +3345,17 @@ async function callLlmJsonInBrowser(apiCfg, prompt, signal, retries = 3) {
             } catch (httpErr) {
                 if (httpErr && httpErr.status === 429) {
                     maxAttempts = Math.max(maxAttempts, 5);
-                    const ra = httpErr.retryAfterMs ? Math.min(15000, Math.max(1000, httpErr.retryAfterMs)) : 0;
-                    suggestedWaitMs = ra || Math.min(15000, 2000 * (attempt + 1) + Math.floor(Math.random() * 500));
+                    const ra = httpErr.retryAfterMs ? Math.min(30000, Math.max(1000, httpErr.retryAfterMs)) : 0;
+                    suggestedWaitMs = ra || Math.min(30000, 2000 * (2 ** attempt) + Math.floor(Math.random() * 500));
+                    if (rateGate) {
+                        rateGate.untilMs = Math.max(rateGate.untilMs, Date.now() + suggestedWaitMs);
+                        rateGate.gapMs = Math.min(2000, Math.max(250, (rateGate.gapMs || 150) * 2));
+                    }
                 }
                 throw httpErr && httpErr.status ? new Error(httpErr.message.slice(0, 146)) : httpErr;
+            }
+            if (rateGate && rateGate.gapMs > 0) {
+                rateGate.gapMs = Math.floor(rateGate.gapMs * 0.5);
             }
             const txt = data?.choices?.[0]?.message?.content || '';
             const parsed = extractJsonObject(txt);
@@ -3400,6 +3729,7 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
     );
 
     let synthesizedSeries = 0;
+    const rateGate = { untilMs: 0, gapMs: 0 };
 
     try {
         // Phase 1A: Global concurrent scene indexing pool across all chapters & scenes
@@ -3422,7 +3752,7 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
                             `只输出严格 JSON：{"title":"...","summary":"...","characters":[],"tone_tags":[]}\n\n` +
                             `所属篇章：${arc.series || ''} / ${arc.title}\n正文：\n${rawText}`;
                         const tCall = Date.now();
-                        const parsed = await callLlmJsonInBrowser(apiCfg, leafPrompt, runSignal);
+                        const parsed = await callLlmJsonInBrowser(apiCfg, leafPrompt, runSignal, 3, rateGate);
                         if (runSignal.aborted) break;
                         const dt = Math.max(1, Date.now() - tCall);
                         sc.title = String(parsed.title || '').trim() || sc.title || `${arc.title}·片段`;
@@ -3520,7 +3850,7 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
                             `只输出 JSON：{"description":"...","characters":[],"tone_tags":[]}\n\n` +
                             `篇章：${arc.series || ''} / ${arc.title}\n子场景：\n${scLines}`;
                         const tArc = Date.now();
-                        const parsedArc = await callLlmJsonInBrowser(apiCfg, arcPrompt, runSignal);
+                        const parsedArc = await callLlmJsonInBrowser(apiCfg, arcPrompt, runSignal, 3, rateGate);
                         if (runSignal.aborted) break;
                         const dtArc = Math.max(1, Date.now() - tArc);
                         arc.description = String(parsedArc.description || '').trim() || arc.description;
@@ -3611,7 +3941,7 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
                     `章节脉络（共 ${fullSerArcs.length} 章）：\n${digestText}`;
                 const tMeta = Date.now();
                 try {
-                    const parsedMeta = await callLlmJsonInBrowser(apiCfg, metaPrompt, runSignal);
+                    const parsedMeta = await callLlmJsonInBrowser(apiCfg, metaPrompt, runSignal, 3, rateGate);
                     const serSum = String(parsedMeta.series_summary || '').trim();
                     if (serSum) {
                         pack.indexData.series_summaries[serName] = serSum;
@@ -3647,10 +3977,10 @@ export async function upgradeBrowserCorpusWithLLM(pack, apiCfg, opts = {}) {
             }
 
             if (extractedAliases.length) {
-                pack.config.aliases = mergeAliasGroupsInBrowser(pack.config.aliases || [], extractedAliases);
+                pack.config.aliases = mergeAliasGroupsInBrowser(pack.config.aliases || [], extractedAliases, 60, pack.config.locked_aliases || []);
             }
             if (extractedGlossary.length) {
-                pack.config.glossary = mergeGlossaryInBrowser(pack.config.glossary || [], extractedGlossary);
+                pack.config.glossary = mergeGlossaryInBrowser(pack.config.glossary || [], extractedGlossary, 40, pack.config.locked_glossary || []);
             }
             if (extractedRelations.length) {
                 pack.graphData = mergeRelationsInBrowser(pack.graphData || [], extractedRelations);

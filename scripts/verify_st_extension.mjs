@@ -30,6 +30,7 @@ const STUB_PARSER = 'export class SlashCommandParser { static addCommandObject()
 const STUB_ENGINE = `
 const noop = () => {};
 export const idbListCorpora = async () => globalThis.__lc.packs;
+export const idbGetCorpus = async (id) => globalThis.__lc.packs.find((p) => p.id === id) || null;
 export const idbSaveCorpus = async () => {};
 export const idbDeleteCorpus = async () => {};
 export const idbGetMeta = async (_k, fb = null) => fb;

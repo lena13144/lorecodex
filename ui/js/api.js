@@ -37,10 +37,12 @@ async function ensureLocalDemoSeeded(be) {
 async function getLocalAgentAndPack(corpusId) {
   const be = await getBrowserEngine();
   const rows = await ensureLocalDemoSeeded(be);
-  const pack = rows.find((p) => p.id === corpusId) || rows[0];
-  if (!pack) {
+  const meta = rows.find((p) => p.id === corpusId) || rows[0];
+  if (!meta) {
     throw new Error('内置免服务端书库为空，请先点击顶栏「导入建树」导入小说 (.txt / .md)、世界书 (.json) 或 .lorepack.json');
   }
+  const fullPack = typeof be.idbGetCorpus === 'function' ? await be.idbGetCorpus(meta.id) : null;
+  const pack = fullPack || meta;
   const cacheKey = `${pack.id}:${pack.updatedAt || ''}`;
   if (!localAgentsCache.has(cacheKey)) {
     localAgentsCache.set(cacheKey, be.createBrowserTreeAgent(pack));
@@ -192,7 +194,17 @@ export async function saveCorpusConfig(id, patch) {
     });
   }
   const { be, pack } = await getLocalAgentAndPack(id);
-  pack.config = be.normalizeCorpusConfig({ ...(pack.config || {}), ...(patch || {}), id: pack.id }, pack.id);
+  const mergedConfig = { ...(pack.config || {}), ...(patch || {}), id: pack.id };
+  const normalized = be.normalizeCorpusConfig(mergedConfig, pack.id);
+  const lockedAliases = Array.isArray(mergedConfig.locked_aliases)
+    ? mergedConfig.locked_aliases.map((x) => String(x || '').trim()).filter(Boolean)
+    : [];
+  const lockedGlossary = Array.isArray(mergedConfig.locked_glossary)
+    ? mergedConfig.locked_glossary.map((x) => String(x || '').trim()).filter(Boolean)
+    : [];
+  normalized.locked_aliases = Array.from(new Set(lockedAliases));
+  normalized.locked_glossary = Array.from(new Set(lockedGlossary));
+  pack.config = normalized;
   if (pack.config.name) pack.indexData.corpus_name = pack.config.name;
   await be.idbSaveCorpus(pack);
   localAgentsCache.clear();
@@ -488,6 +500,12 @@ export async function importCorpus(payload) {
       const mergeTarget = payload.mergeInto
         ? existingRows.find((r) => r.id === payload.mergeInto) || null
         : null;
+      const appendPack = !isJson && payload.appendTo && typeof be.idbGetCorpus === 'function'
+        ? await be.idbGetCorpus(payload.appendTo)
+        : null;
+      if (!isJson && payload.appendTo && !appendPack) {
+        throw new Error(`未找到要追加的目标书库: ${payload.appendTo}`);
+      }
       pack = isJson
         ? be.buildLoreCorpusInBrowser({
             rawJson: rawText,
@@ -505,6 +523,7 @@ export async function importCorpus(payload) {
             category: payload.category || '正文',
             cleanAds: payload.cleanAds !== false,
             stripBlocks: payload.stripBlocks || '',
+            existingPack: appendPack,
           });
       await be.idbSaveCorpus(pack);
       localAgentsCache.clear();
@@ -797,7 +816,7 @@ export async function exportCorpusLorepack(id) {
     return;
   }
   const { pack } = await getLocalAgentAndPack(id);
-  const blob = new Blob([JSON.stringify({ format: 'lorecodex-pack-v2', ...pack }, null, 2)], {
+  const blob = new Blob([JSON.stringify({ format: 'lorecodex-pack-v2', ...pack })], {
     type: 'application/json',
   });
   const url = URL.createObjectURL(blob);

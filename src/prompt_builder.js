@@ -161,6 +161,10 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
             items: { type: 'string' },
             description: 'scene node_id 数组（单次最多 10 个，强烈建议将候选节点合并在一次调用中批量读取）',
           },
+          focus_query: {
+            type: 'string',
+            description: '可选聚焦关键词（空格分隔，自动展开别名）。提供时仅抽取命中行及其上下文窗口，节省长场景的上下文预算。',
+          },
         },
         required: ['scene_node_ids'],
       },
@@ -178,6 +182,15 @@ function buildTools({ corpusConfig, stats, categories, seriesList, toneTags, has
           query: { type: 'string', description: '待扫描的人名/别名、原句片段或空格分隔的共现关键词' },
           category: { type: 'string', description: `可选限定分类：${catDesc}` },
           tone: { type: 'string', description: `可选限定氛围标签：${toneDesc}` },
+          sort_by: {
+            type: 'string',
+            enum: ['relevance', 'diversity', 'rarity'],
+            description: '排序策略：relevance（默认相关性与客串优先）、diversity（跨早期/中期/后期 order 分桶均衡采样）、rarity（低频稀少线索优先）',
+          },
+          offset: {
+            type: 'integer',
+            description: '分页偏移量（默认 0），配合分布雷达提示翻看后续命中',
+          },
         },
         required: ['query'],
       },
@@ -217,6 +230,7 @@ function buildSystemPrompt({
   hasSeriesTool = false,
   hasFallback = false,
   visibleArcsCount = 0,
+  queryContext = '',
 }) {
   const autoThreshold = corpusConfig?.hierarchy?.auto_series_threshold || 250;
   const needSeriesFirst = hasSeriesTool && visibleArcsCount > autoThreshold;
@@ -230,8 +244,19 @@ function buildSystemPrompt({
       ? `\n【防剧透锁定（${corpusConfig.spoiler_gate.order_label} <= ${maxOrder}）】工具已自动过滤超前章节，guide 与 timeline_note 严禁泄露或暗示超过 ${maxOrder} 的后续真相。\n`
       : '';
 
-  const glossaryBlock = corpusConfig.glossary.length
-    ? `\n【编制 / 势力 / 术语速查】\n${corpusConfig.glossary.join('\n')}\n`
+  const rawGlossary = Array.isArray(corpusConfig.glossary) ? corpusConfig.glossary : [];
+  const lowCtx = String(queryContext || '').toLowerCase();
+  const activeGlossary =
+    rawGlossary.length > 15 && lowCtx
+      ? rawGlossary
+          .filter((entry) => {
+            const prefix = String(entry || '').split(/[:：]/)[0].trim().toLowerCase();
+            return prefix && (lowCtx.includes(prefix) || prefix.split(/[\s/／,，、()（）]+/).some((t) => t.length >= 2 && lowCtx.includes(t)));
+          })
+          .slice(0, 15)
+      : rawGlossary;
+  const glossaryBlock = activeGlossary.length
+    ? `\n【编制 / 势力 / 术语速查】\n${activeGlossary.join('\n')}\n`
     : '';
 
   const turn1Rule = needSeriesFirst
